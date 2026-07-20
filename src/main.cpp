@@ -22,6 +22,29 @@
 #include <mutex>
 #include <condition_variable>
 
+// Routes Crow's own internal log messages through our logger, and drops the
+// benign EPIPE line ("Writing stopped premature") that fires whenever a client
+// disconnects before we finish writing a response — common with browsers and
+// not actionable, so it shouldn't spam the log at ERROR.
+class CrowLogRouter : public crow::ILogHandler {
+public:
+    void log(const std::string& message, crow::LogLevel level) override {
+        if (message.find("Writing stopped premature") != std::string::npos ||
+            message.find("buffer write error") != std::string::npos) {
+            return;
+        }
+        auto& log = utils::Logger::get_instance();
+        switch (level) {
+            case crow::LogLevel::Debug:    log.debug(message); break;
+            case crow::LogLevel::Info:     log.info(message); break;
+            case crow::LogLevel::Warning:  log.warn(message); break;
+            case crow::LogLevel::Error:
+            case crow::LogLevel::Critical: log.error(message); break;
+        }
+    }
+};
+static CrowLogRouter crow_log_router;
+
 int main(int argc, char* argv[]) {
     std::string config_file = "config.env";
     if (argc > 1) config_file = argv[1];
@@ -38,6 +61,7 @@ int main(int argc, char* argv[]) {
         else if (log_level_str == "WARN") log_level = utils::LogLevel::WARN;
         else if (log_level_str == "ERROR") log_level = utils::LogLevel::ERROR;
         utils::Logger::get_instance().init(log_level);
+        crow::logger::setHandler(&crow_log_router); // route + de-noise Crow's own logs
         utils::Logger::get_instance().info("===========================================");
         utils::Logger::get_instance().info("cloud-serv starting...");
         utils::Logger::get_instance().info("===========================================");

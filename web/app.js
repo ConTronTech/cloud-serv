@@ -283,7 +283,10 @@ async function uploadDirect(file, state) {
       });
     } catch { state.textContent = "Network error"; return false; }
 
-    if (res.ok) return true;
+    // Always drain the response body, even on success — if we drop it unread,
+    // Chrome cancels the stream and resets the connection mid-write, which makes
+    // the server log an EPIPE ("Writing stopped premature") for every upload.
+    if (res.ok) { await res.json().catch(() => {}); return true; }
     if (res.status === 429 && attempt < UPLOAD_MAX_ATTEMPTS) {
       state.textContent = `Waiting… (busy, retry ${attempt})`;
       await sleep(Math.min(500 * attempt, 3000));
@@ -353,6 +356,7 @@ async function uploadChunked(file, state) {
     state.textContent = prettyError(b) || "Finalize failed";
     return false;
   }
+  await comp.json().catch(() => {}); // drain the body (avoid EPIPE, see uploadDirect)
   return true;
 }
 
