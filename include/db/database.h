@@ -45,16 +45,34 @@ public:
     std::vector<ApiKeyInfo> listApiKeys(int64_t userId);
     bool revokeApiKey(int64_t userId, int64_t keyId);
 
+    // ---- Folders (per-user tree; parentId/folderId 0 = root) ----
+    int64_t createFolder(int64_t userId, int64_t parentId, const std::string& name);
+    std::vector<Folder> listFolders(int64_t userId, int64_t parentId);
+    std::optional<Folder> getFolder(int64_t userId, int64_t folderId);
+    bool renameFolder(int64_t userId, int64_t folderId, const std::string& name);
+    bool moveFolder(int64_t userId, int64_t folderId, int64_t newParentId); // cycle-safe
+    // Recursively deletes a folder and everything under it; fills storageKeys
+    // with the blob keys to unlink from disk.
+    bool deleteFolderRecursive(int64_t userId, int64_t folderId,
+                               std::vector<std::string>& storageKeys);
+    // Ancestors of a folder, root-first (for breadcrumbs). Empty for root.
+    std::vector<Folder> folderPath(int64_t userId, int64_t folderId);
+    // True if folderId exists for the user (or folderId == 0, i.e. root).
+    bool folderExists(int64_t userId, int64_t folderId);
+
     // ---- Files (metadata; blobs handled by FileStore) ----
-    int64_t addFile(int64_t userId, const std::string& name, const std::string& mime,
-                    int64_t size, const std::string& storageKey);
-    std::vector<FileMeta> listFiles(int64_t userId);
+    int64_t addFile(int64_t userId, int64_t folderId, const std::string& name,
+                    const std::string& mime, int64_t size, const std::string& storageKey);
+    std::vector<FileMeta> listFiles(int64_t userId, int64_t folderId);
     std::optional<FileMeta> getFile(int64_t userId, int64_t fileId);
+    bool moveFile(int64_t userId, int64_t fileId, int64_t folderId);
+    bool renameFile(int64_t userId, int64_t fileId, const std::string& name);
     bool deleteFile(int64_t userId, int64_t fileId);
 
     // ---- Chunked uploads ----
-    bool createUploadSession(int64_t userId, const std::string& id, const std::string& name,
-                             const std::string& mime, int64_t size, const std::string& storageKey);
+    bool createUploadSession(int64_t userId, const std::string& id, int64_t folderId,
+                             const std::string& name, const std::string& mime,
+                             int64_t size, const std::string& storageKey);
     std::optional<UploadSession> getUploadSession(int64_t userId, const std::string& id);
     bool setUploadReceived(int64_t userId, const std::string& id, int64_t received);
     bool deleteUploadSession(int64_t userId, const std::string& id);

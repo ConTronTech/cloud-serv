@@ -22,9 +22,21 @@ json ApiKeyInfo::toJson() const {
 json FileMeta::toJson() const {
     return {
         {"id", id},
+        {"type", "file"},
+        {"folderId", folder_id},
         {"name", name},
         {"mime", mime},
         {"size", size},
+        {"createdAt", created_at}
+    };
+}
+
+json Folder::toJson() const {
+    return {
+        {"id", id},
+        {"type", "folder"},
+        {"parentId", parent_id},
+        {"name", name},
         {"createdAt", created_at}
     };
 }

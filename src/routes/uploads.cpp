@@ -59,11 +59,14 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         if (size < 0) size = 0;
         if (size > maxFileBytes) return http::jsonError(413, "file too large");
 
+        int64_t folderId = intField(body, "folderId", 0);
+        if (!db.folderExists(*userId, folderId)) return http::jsonError(400, "folder not found");
+
         std::string uploadId = security::Crypto::randomHex(16);
         std::string storageKey = security::Crypto::randomHex(16);
         if (!store.write(*userId, storageKey, nullptr, 0))  // create empty blob
             return http::jsonError(500, "storage init failed");
-        if (!db.createUploadSession(*userId, uploadId, name, mime, size, storageKey)) {
+        if (!db.createUploadSession(*userId, uploadId, folderId, name, mime, size, storageKey)) {
             store.remove(*userId, storageKey);
             return http::jsonError(500, "could not create upload");
         }
@@ -127,7 +130,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         if (onDisk != s->received) return http::jsonError(409, "size mismatch");
         if (s->size > 0 && s->received != s->size) return http::jsonError(400, "incomplete upload");
 
-        int64_t fileId = db.addFile(*userId, s->name, s->mime, s->received, s->storage_key);
+        int64_t fileId = db.addFile(*userId, s->folder_id, s->name, s->mime, s->received, s->storage_key);
         if (fileId < 0) return http::jsonError(500, "could not finalize");
         db.deleteUploadSession(*userId, id); // keep the blob; it's now a real file
 

@@ -5,6 +5,7 @@
 #include <ctime>
 #include <stdexcept>
 #include <string>
+#include <algorithm>
 
 // This layer uses the sqlite3 C API directly (libsqlite3). A fresh connection is
 // opened per operation — WAL mode makes concurrent connections cheap and safe,
@@ -97,9 +98,20 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_apikey_hash ON api_keys(key_hash);
+            CREATE TABLE IF NOT EXISTS folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                parent_id INTEGER NOT NULL DEFAULT 0,   -- 0 = root
+                name TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_folders_user ON folders(user_id, parent_id);
+
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
+                folder_id INTEGER NOT NULL DEFAULT 0,   -- 0 = root
                 name TEXT NOT NULL,
                 mime TEXT DEFAULT 'application/octet-stream',
                 size INTEGER DEFAULT 0,
@@ -107,7 +119,7 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
-            CREATE INDEX IF NOT EXISTS idx_files_user ON files(user_id);
+            CREATE INDEX IF NOT EXISTS idx_files_user ON files(user_id, folder_id);
             CREATE TABLE IF NOT EXISTS notes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -121,6 +133,7 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
             CREATE TABLE IF NOT EXISTS upload_sessions (
                 id TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
+                folder_id INTEGER NOT NULL DEFAULT 0,
                 name TEXT NOT NULL,
                 mime TEXT DEFAULT 'application/octet-stream',
                 size INTEGER DEFAULT 0,
@@ -137,6 +150,13 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
             sqlite3_free(err);
             throw std::runtime_error(msg);
         }
+        // Migration: add files.folder_id to databases created before folders
+        // existed. Ignore the "duplicate column" error when it's already there.
+        sqlite3_exec(c.h, "ALTER TABLE files ADD COLUMN folder_id INTEGER NOT NULL DEFAULT 0;",
+                     nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN folder_id INTEGER NOT NULL DEFAULT 0;",
+                     nullptr, nullptr, nullptr);
+
         utils::Logger::get_instance().info("Database initialized: " + dbPath_);
     } catch (const std::exception& e) {
         utils::Logger::get_instance().fatal("Database init failed: " + std::string(e.what()));
@@ -352,18 +372,19 @@ bool CloudDB::revokeApiKey(int64_t userId, int64_t keyId) {
 
 // ==== Files (metadata) ====
 
-int64_t CloudDB::addFile(int64_t userId, const std::string& name, const std::string& mime,
-                         int64_t size, const std::string& storageKey) {
+int64_t CloudDB::addFile(int64_t userId, int64_t folderId, const std::string& name,
+                         const std::string& mime, int64_t size, const std::string& storageKey) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
-        Stmt q(c.h, "INSERT INTO files(user_id, name, mime, size, storage_key) "
-                    "VALUES(?, ?, ?, ?, ?)");
+        Stmt q(c.h, "INSERT INTO files(user_id, folder_id, name, mime, size, storage_key) "
+                    "VALUES(?, ?, ?, ?, ?, ?)");
         q.bind(1, userId);
-        q.bind(2, name);
-        q.bind(3, mime);
-        q.bind(4, size);
-        q.bind(5, storageKey);
+        q.bind(2, folderId);
+        q.bind(3, name);
+        q.bind(4, mime);
+        q.bind(5, size);
+        q.bind(6, storageKey);
         if (sqlite3_step(q.s) != SQLITE_DONE) return -1;
         return sqlite3_last_insert_rowid(c.h);
     } catch (const std::exception& e) {
@@ -372,23 +393,25 @@ int64_t CloudDB::addFile(int64_t userId, const std::string& name, const std::str
     }
 }
 
-std::vector<FileMeta> CloudDB::listFiles(int64_t userId) {
+std::vector<FileMeta> CloudDB::listFiles(int64_t userId, int64_t folderId) {
     std::shared_lock lock(db_mutex_);
     std::vector<FileMeta> out;
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, name, mime, size, storage_key, created_at "
-                    "FROM files WHERE user_id = ? ORDER BY created_at DESC");
+        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at "
+                    "FROM files WHERE user_id = ? AND folder_id = ? ORDER BY name COLLATE NOCASE");
         q.bind(1, userId);
+        q.bind(2, folderId);
         while (q.step()) {
             FileMeta f;
             f.id = q.colInt64(0);
             f.user_id = q.colInt64(1);
-            f.name = q.colText(2);
-            f.mime = q.colText(3);
-            f.size = q.colInt64(4);
-            f.storage_key = q.colText(5);
-            f.created_at = q.colText(6);
+            f.folder_id = q.colInt64(2);
+            f.name = q.colText(3);
+            f.mime = q.colText(4);
+            f.size = q.colInt64(5);
+            f.storage_key = q.colText(6);
+            f.created_at = q.colText(7);
             out.push_back(f);
         }
     } catch (const std::exception& e) {
@@ -401,7 +424,7 @@ std::optional<FileMeta> CloudDB::getFile(int64_t userId, int64_t fileId) {
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, name, mime, size, storage_key, created_at "
+        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at "
                     "FROM files WHERE id = ? AND user_id = ?");
         q.bind(1, fileId);
         q.bind(2, userId);
@@ -409,15 +432,48 @@ std::optional<FileMeta> CloudDB::getFile(int64_t userId, int64_t fileId) {
         FileMeta f;
         f.id = q.colInt64(0);
         f.user_id = q.colInt64(1);
-        f.name = q.colText(2);
-        f.mime = q.colText(3);
-        f.size = q.colInt64(4);
-        f.storage_key = q.colText(5);
-        f.created_at = q.colText(6);
+        f.folder_id = q.colInt64(2);
+        f.name = q.colText(3);
+        f.mime = q.colText(4);
+        f.size = q.colInt64(5);
+        f.storage_key = q.colText(6);
+        f.created_at = q.colText(7);
         return f;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("getFile: " + std::string(e.what()));
         return std::nullopt;
+    }
+}
+
+bool CloudDB::moveFile(int64_t userId, int64_t fileId, int64_t folderId) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE files SET folder_id = ? WHERE id = ? AND user_id = ?");
+        q.bind(1, folderId);
+        q.bind(2, fileId);
+        q.bind(3, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("moveFile: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::renameFile(int64_t userId, int64_t fileId, const std::string& name) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE files SET name = ? WHERE id = ? AND user_id = ?");
+        q.bind(1, name);
+        q.bind(2, fileId);
+        q.bind(3, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("renameFile: " + std::string(e.what()));
+        return false;
     }
 }
 
@@ -436,21 +492,218 @@ bool CloudDB::deleteFile(int64_t userId, int64_t fileId) {
     }
 }
 
-// ==== Chunked uploads ====
+// ==== Folders ====
 
-bool CloudDB::createUploadSession(int64_t userId, const std::string& id, const std::string& name,
-                                  const std::string& mime, int64_t size, const std::string& storageKey) {
+bool CloudDB::folderExists(int64_t userId, int64_t folderId) {
+    if (folderId == 0) return true; // root is implicit
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT 1 FROM folders WHERE id = ? AND user_id = ?");
+        q.bind(1, folderId);
+        q.bind(2, userId);
+        return q.step();
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("folderExists: " + std::string(e.what()));
+        return false;
+    }
+}
+
+int64_t CloudDB::createFolder(int64_t userId, int64_t parentId, const std::string& name) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
-        Stmt q(c.h, "INSERT INTO upload_sessions(id, user_id, name, mime, size, received, storage_key) "
-                    "VALUES(?, ?, ?, ?, ?, 0, ?)");
+        if (parentId != 0) {
+            Stmt chk(c.h, "SELECT 1 FROM folders WHERE id = ? AND user_id = ?");
+            chk.bind(1, parentId);
+            chk.bind(2, userId);
+            if (!chk.step()) return -1; // parent must exist and be owned
+        }
+        Stmt q(c.h, "INSERT INTO folders(user_id, parent_id, name) VALUES(?, ?, ?)");
+        q.bind(1, userId);
+        q.bind(2, parentId);
+        q.bind(3, name);
+        if (sqlite3_step(q.s) != SQLITE_DONE) return -1;
+        return sqlite3_last_insert_rowid(c.h);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("createFolder: " + std::string(e.what()));
+        return -1;
+    }
+}
+
+std::vector<Folder> CloudDB::listFolders(int64_t userId, int64_t parentId) {
+    std::shared_lock lock(db_mutex_);
+    std::vector<Folder> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id, user_id, parent_id, name, created_at FROM folders "
+                    "WHERE user_id = ? AND parent_id = ? ORDER BY name COLLATE NOCASE");
+        q.bind(1, userId);
+        q.bind(2, parentId);
+        while (q.step()) {
+            Folder f;
+            f.id = q.colInt64(0);
+            f.user_id = q.colInt64(1);
+            f.parent_id = q.colInt64(2);
+            f.name = q.colText(3);
+            f.created_at = q.colText(4);
+            out.push_back(f);
+        }
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("listFolders: " + std::string(e.what()));
+    }
+    return out;
+}
+
+std::optional<Folder> CloudDB::getFolder(int64_t userId, int64_t folderId) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id, user_id, parent_id, name, created_at FROM folders "
+                    "WHERE id = ? AND user_id = ?");
+        q.bind(1, folderId);
+        q.bind(2, userId);
+        if (!q.step()) return std::nullopt;
+        Folder f;
+        f.id = q.colInt64(0);
+        f.user_id = q.colInt64(1);
+        f.parent_id = q.colInt64(2);
+        f.name = q.colText(3);
+        f.created_at = q.colText(4);
+        return f;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("getFolder: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::renameFolder(int64_t userId, int64_t folderId, const std::string& name) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE folders SET name = ? WHERE id = ? AND user_id = ?");
+        q.bind(1, name);
+        q.bind(2, folderId);
+        q.bind(3, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("renameFolder: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::moveFolder(int64_t userId, int64_t folderId, int64_t newParentId) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        if (folderId == newParentId) return false; // can't parent to self
+        if (newParentId != 0) {
+            Stmt chk(c.h, "SELECT 1 FROM folders WHERE id = ? AND user_id = ?");
+            chk.bind(1, newParentId);
+            chk.bind(2, userId);
+            if (!chk.step()) return false; // target must exist and be owned
+
+            // Cycle guard: walk up from the target; if we reach folderId, the
+            // move would put a folder inside its own subtree.
+            int64_t cur = newParentId, guard = 0;
+            while (cur != 0 && guard++ < 100000) {
+                if (cur == folderId) return false;
+                Stmt up(c.h, "SELECT parent_id FROM folders WHERE id = ? AND user_id = ?");
+                up.bind(1, cur);
+                up.bind(2, userId);
+                if (!up.step()) break;
+                cur = up.colInt64(0);
+            }
+        }
+        Stmt q(c.h, "UPDATE folders SET parent_id = ? WHERE id = ? AND user_id = ?");
+        q.bind(1, newParentId);
+        q.bind(2, folderId);
+        q.bind(3, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("moveFolder: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::deleteFolderRecursive(int64_t userId, int64_t folderId,
+                                    std::vector<std::string>& storageKeys) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+
+        // Collect the blob keys of every file under this folder (any depth), so
+        // the caller can unlink them from disk.
+        const char* collectSql =
+            "WITH RECURSIVE sub(id) AS ("
+            "  SELECT id FROM folders WHERE id = ?1 AND user_id = ?2"
+            "  UNION ALL"
+            "  SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id WHERE f.user_id = ?2"
+            ") SELECT storage_key FROM files WHERE user_id = ?2 AND folder_id IN (SELECT id FROM sub)";
+        {
+            Stmt q(c.h, collectSql);
+            q.bind(1, folderId);
+            q.bind(2, userId);
+            while (q.step()) storageKeys.push_back(q.colText(0));
+        }
+
+        sqlite3_exec(c.h, "BEGIN", nullptr, nullptr, nullptr);
+        const char* delFilesSql =
+            "WITH RECURSIVE sub(id) AS ("
+            "  SELECT id FROM folders WHERE id = ?1 AND user_id = ?2"
+            "  UNION ALL"
+            "  SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id WHERE f.user_id = ?2"
+            ") DELETE FROM files WHERE user_id = ?2 AND folder_id IN (SELECT id FROM sub)";
+        { Stmt q(c.h, delFilesSql); q.bind(1, folderId); q.bind(2, userId); q.exec(); }
+
+        const char* delFoldersSql =
+            "WITH RECURSIVE sub(id) AS ("
+            "  SELECT id FROM folders WHERE id = ?1 AND user_id = ?2"
+            "  UNION ALL"
+            "  SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id WHERE f.user_id = ?2"
+            ") DELETE FROM folders WHERE user_id = ?2 AND id IN (SELECT id FROM sub)";
+        int changes = 0;
+        { Stmt q(c.h, delFoldersSql); q.bind(1, folderId); q.bind(2, userId); q.exec(); changes = sqlite3_changes(c.h); }
+        sqlite3_exec(c.h, "COMMIT", nullptr, nullptr, nullptr);
+        return changes > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("deleteFolderRecursive: " + std::string(e.what()));
+        return false;
+    }
+}
+
+std::vector<Folder> CloudDB::folderPath(int64_t userId, int64_t folderId) {
+    std::vector<Folder> chain;
+    int64_t cur = folderId, guard = 0;
+    while (cur != 0 && guard++ < 100000) {
+        auto f = getFolder(userId, cur);
+        if (!f) break;
+        chain.push_back(*f);
+        cur = f->parent_id;
+    }
+    std::reverse(chain.begin(), chain.end()); // root-first
+    return chain;
+}
+
+// ==== Chunked uploads ====
+
+bool CloudDB::createUploadSession(int64_t userId, const std::string& id, int64_t folderId,
+                                  const std::string& name, const std::string& mime,
+                                  int64_t size, const std::string& storageKey) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "INSERT INTO upload_sessions(id, user_id, folder_id, name, mime, size, received, storage_key) "
+                    "VALUES(?, ?, ?, ?, ?, ?, 0, ?)");
         q.bind(1, id);
         q.bind(2, userId);
-        q.bind(3, name);
-        q.bind(4, mime);
-        q.bind(5, size);
-        q.bind(6, storageKey);
+        q.bind(3, folderId);
+        q.bind(4, name);
+        q.bind(5, mime);
+        q.bind(6, size);
+        q.bind(7, storageKey);
         return sqlite3_step(q.s) == SQLITE_DONE;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("createUploadSession: " + std::string(e.what()));
@@ -462,7 +715,7 @@ std::optional<UploadSession> CloudDB::getUploadSession(int64_t userId, const std
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, name, mime, size, received, storage_key, created_at "
+        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, received, storage_key, created_at "
                     "FROM upload_sessions WHERE id = ? AND user_id = ?");
         q.bind(1, id);
         q.bind(2, userId);
@@ -470,12 +723,13 @@ std::optional<UploadSession> CloudDB::getUploadSession(int64_t userId, const std
         UploadSession u;
         u.id = q.colText(0);
         u.user_id = q.colInt64(1);
-        u.name = q.colText(2);
-        u.mime = q.colText(3);
-        u.size = q.colInt64(4);
-        u.received = q.colInt64(5);
-        u.storage_key = q.colText(6);
-        u.created_at = q.colText(7);
+        u.folder_id = q.colInt64(2);
+        u.name = q.colText(3);
+        u.mime = q.colText(4);
+        u.size = q.colInt64(5);
+        u.received = q.colInt64(6);
+        u.storage_key = q.colText(7);
+        u.created_at = q.colText(8);
         return u;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("getUploadSession: " + std::string(e.what()));

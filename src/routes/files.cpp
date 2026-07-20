@@ -103,6 +103,11 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         if (!isValidDisplayName(name)) return http::jsonError(400, "invalid filename");
         // Empty (0-byte) files are allowed — a cloud legitimately stores them.
 
+        int64_t folderId = 0; // 0 = root
+        std::string folderHdr = req.get_header_value("X-Folder");
+        if (!folderHdr.empty()) { try { folderId = std::stoll(folderHdr); } catch (...) { folderId = 0; } }
+        if (!db.folderExists(*userId, folderId)) return http::jsonError(400, "folder not found");
+
         std::string mime = req.get_header_value("Content-Type");
         if (mime.empty() || mime.size() > 255 || hasAnyControlChar(mime))
             mime = "application/octet-stream";
@@ -114,13 +119,13 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         }
 
         int64_t size = static_cast<int64_t>(req.body.size());
-        int64_t id = db.addFile(*userId, name, mime, size, storageKey);
+        int64_t id = db.addFile(*userId, folderId, name, mime, size, storageKey);
         if (id < 0) {
             store.remove(*userId, storageKey);  // don't leak an orphan blob
             return http::jsonError(500, "could not record file");
         }
 
-        json out = {{"id", id}, {"name", name}, {"mime", mime}, {"size", size}};
+        json out = {{"id", id}, {"name", name}, {"mime", mime}, {"size", size}, {"folderId", folderId}};
         return http::jsonSuccess(out.dump());
     });
 
@@ -130,8 +135,9 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
+        // Root-folder files. The full tree is browsed via GET /api/fs.
         json files = json::array();
-        for (const auto& f : db.listFiles(*userId)) files.push_back(f.toJson());
+        for (const auto& f : db.listFiles(*userId, 0)) files.push_back(f.toJson());
         return http::jsonSuccess(json{{"files", files}}.dump());
     });
 

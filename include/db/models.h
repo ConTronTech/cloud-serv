@@ -35,6 +35,7 @@ struct ApiKeyInfo {
 struct FileMeta {
     int64_t id = 0;
     int64_t user_id = 0;
+    int64_t folder_id = 0;       // 0 = root
     std::string name;            // original filename shown to the user
     std::string mime;
     int64_t size = 0;
@@ -58,11 +59,23 @@ struct Note {
     json toSummaryJson() const;
 };
 
+// A folder in a user's tree. parent_id == 0 means top-level (root).
+struct Folder {
+    int64_t id = 0;
+    int64_t user_id = 0;
+    int64_t parent_id = 0;   // 0 = root
+    std::string name;
+    std::string created_at;
+
+    json toJson() const;
+};
+
 // An in-progress chunked upload. Bytes stream to <storage_key> on disk; on
 // completion a real files row is created pointing at the same blob.
 struct UploadSession {
     std::string id;              // opaque upload id given to the client
     int64_t user_id = 0;
+    int64_t folder_id = 0;       // destination folder (0 = root)
     std::string name;            // intended display filename
     std::string mime;
     int64_t size = 0;            // expected total bytes (0 if the client didn't say)

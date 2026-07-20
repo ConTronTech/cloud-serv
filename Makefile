@@ -17,6 +17,7 @@ PROJECT_SOURCES = src/main.cpp \
                   src/http/middleware.cpp \
                   src/routes/auth.cpp \
                   src/routes/files.cpp \
+                  src/routes/fs.cpp \
                   src/routes/notes.cpp \
                   src/routes/uploads.cpp \
                   src/routes/static_files.cpp \

@@ -5,6 +5,7 @@
 #include "http/middleware.h"
 #include "routes/auth.h"
 #include "routes/files.h"
+#include "routes/fs.h"
 #include "routes/notes.h"
 #include "routes/uploads.h"
 #include "routes/static_files.h"
@@ -130,6 +131,7 @@ int main(int argc, char* argv[]) {
 
         routes::registerAuthRoutes(app, db, sessionSeconds);
         routes::registerFileRoutes(app, db, store);
+        routes::registerFsRoutes(app, db, store);
         routes::registerNoteRoutes(app, db);
         routes::registerUploadRoutes(app, db, store, maxFileBytes);
 
