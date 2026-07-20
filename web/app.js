@@ -139,6 +139,10 @@ async function logout() {
 // ---- files ----
 // ---- file manager (folders) ----
 let currentFolder = 0; // 0 = root
+let curFolders = [], curFiles = [];
+let viewMode = localStorage.getItem("cs_view") || "list";   // list | grid
+let sortBy = localStorage.getItem("cs_sortby") || "name";   // name | date | size
+let sortDir = localStorage.getItem("cs_sortdir") || "asc";  // asc | desc
 
 async function loadFs(folderId) {
   currentFolder = folderId;
@@ -146,13 +150,109 @@ async function loadFs(folderId) {
   if (status === 401) { sessionExpired(); return; }
   if (!ok || !body) { toast("Could not load folder."); return; }
   renderBreadcrumbs($("breadcrumbs"), body.breadcrumbs || [], (id) => loadFs(id));
+  curFolders = body.folders || [];
+  curFiles = body.files || [];
+  renderFs();
+}
+
+function sortItems(items, isFile) {
+  const dir = sortDir === "asc" ? 1 : -1;
+  return [...items].sort((a, b) => {
+    let r;
+    if (sortBy === "size" && isFile) r = (a.size || 0) - (b.size || 0);
+    else if (sortBy === "date") r = (a.createdAt || "").localeCompare(b.createdAt || "");
+    else r = decodeName(a.name).localeCompare(decodeName(b.name), undefined, { sensitivity: "base", numeric: true });
+    return r * dir;
+  });
+}
+
+// Renders the current folder contents in the active view + sort (no refetch).
+function renderFs() {
   const list = $("fs-list");
+  list.className = viewMode === "grid" ? "fs-grid" : "fs-list";
   list.textContent = "";
-  const folders = body.folders || [];
-  const files = body.files || [];
+  const folders = sortItems(curFolders, false);
+  const files = sortItems(curFiles, true);
   $("fs-empty").classList.toggle("hidden", folders.length + files.length > 0);
-  for (const f of folders) list.appendChild(folderRow(f));
-  for (const f of files) list.appendChild(fileRow(f));
+  if (viewMode === "grid") {
+    for (const f of folders) list.appendChild(gridCell("folder", f));
+    for (const f of files) list.appendChild(gridCell("file", f));
+  } else {
+    for (const f of folders) list.appendChild(folderRow(f));
+    for (const f of files) list.appendChild(fileRow(f));
+  }
+  refreshControls();
+}
+
+function toggleView() {
+  viewMode = viewMode === "list" ? "grid" : "list";
+  localStorage.setItem("cs_view", viewMode);
+  renderFs();
+}
+
+const SORT_LABEL = { name: "Name", date: "Date", size: "Size" };
+function refreshControls() {
+  const v = $("view-toggle"); if (v) v.textContent = viewMode === "grid" ? "☰ List" : "▦ Grid";
+  const s = $("sort-btn"); if (s) s.textContent = "↕ " + SORT_LABEL[sortBy] + (sortDir === "asc" ? " ↑" : " ↓");
+}
+
+function openSort() {
+  const list = $("sort-list");
+  list.textContent = "";
+  const add = (by, label) => {
+    const b = document.createElement("button");
+    b.className = "action-item" + (sortBy === by ? " current" : "");
+    b.type = "button";
+    b.textContent = label + (sortBy === by ? (sortDir === "asc" ? "  ↑" : "  ↓") : "");
+    b.addEventListener("click", () => {
+      if (sortBy === by) sortDir = sortDir === "asc" ? "desc" : "asc";
+      else { sortBy = by; sortDir = by === "date" || by === "size" ? "desc" : "asc"; }
+      localStorage.setItem("cs_sortby", sortBy);
+      localStorage.setItem("cs_sortdir", sortDir);
+      closeSort();
+      renderFs();
+    });
+    list.appendChild(b);
+  };
+  add("name", "Name");
+  add("date", "Date");
+  add("size", "Size");
+  $("sort-modal").classList.remove("hidden");
+}
+function closeSort() { $("sort-modal").classList.add("hidden"); }
+
+// A grid tile: thumbnail (image) or type icon, name, and a "•••" menu.
+function gridCell(kind, item) {
+  const li = document.createElement("li");
+  li.className = "grid-cell";
+  const thumb = document.createElement("div");
+  thumb.className = "thumb";
+  if (kind === "folder") {
+    thumb.classList.add("is-folder"); thumb.textContent = "📁";
+  } else if ((item.mime || "").startsWith("image/")) {
+    const img = document.createElement("img");
+    img.loading = "lazy"; img.alt = ""; img.src = API + "/api/files/" + item.id + "/content";
+    thumb.appendChild(img);
+  } else {
+    thumb.classList.add("is-type"); thumb.textContent = iconFor(item.mime);
+    if ((item.mime || "").startsWith("video/")) {
+      const p = document.createElement("span"); p.className = "play-badge"; p.textContent = "▶";
+      thumb.appendChild(p);
+    }
+  }
+  const name = document.createElement("div");
+  name.className = "grid-name";
+  name.textContent = kind === "folder" ? item.name : decodeName(item.name);
+  name.title = name.textContent;
+  const menu = menuButton(kind, item); menu.classList.add("grid-menu");
+  li.append(thumb, name, menu);
+  li.addEventListener("click", (e) => {
+    if (e.target.closest(".menu-btn")) return;
+    if (kind === "folder") loadFs(item.id);
+    else if (isPreviewable(item.mime)) openPreview(item);
+    else openActions("file", item);
+  });
+  return li;
 }
 
 function renderBreadcrumbs(el, crumbs, onNav) {
@@ -698,6 +798,10 @@ async function boot() {
   $("new-folder").addEventListener("click", newFolder);
   $("pick").addEventListener("click", () => $("file-input").click());
   $("file-input").addEventListener("change", (e) => uploadFiles(e.target.files));
+  $("view-toggle").addEventListener("click", toggleView);
+  $("sort-btn").addEventListener("click", openSort);
+  $("sort-close").addEventListener("click", closeSort);
+  $("sort-modal").addEventListener("click", (e) => { if (e.target.id === "sort-modal") closeSort(); });
   wireDropzone();
 
   // move modal
@@ -720,7 +824,7 @@ async function boot() {
   // preview modal
   $("preview-close").addEventListener("click", closePreview);
   $("preview-modal").addEventListener("click", (e) => { if (e.target.id === "preview-modal") closePreview(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closePreview(); closeMove(); closeActions(); } });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closePreview(); closeMove(); closeActions(); closeSort(); } });
 
   setMode("login");
 

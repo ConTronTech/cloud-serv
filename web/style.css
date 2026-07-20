@@ -185,7 +185,39 @@ img { max-width: 100%; }
 .crumb:hover { background: var(--panel-2); }
 .crumb-sep { color: var(--muted); }
 
+.fs-controls { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; }
+
 .fs-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+
+/* Grid view */
+.fs-grid {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 0.6rem;
+}
+.grid-cell {
+  position: relative; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 0.5rem; cursor: pointer; overflow: hidden;
+}
+.grid-cell:hover { border-color: var(--accent); }
+.thumb {
+  position: relative; width: 100%; aspect-ratio: 1 / 1; border-radius: 8px;
+  background: var(--panel-2); display: grid; place-items: center;
+  font-size: 2rem; overflow: hidden;
+}
+.thumb img { width: 100%; height: 100%; object-fit: cover; }
+.thumb.is-folder { color: var(--accent); }
+.play-badge {
+  position: absolute; inset: 0; margin: auto; width: 34px; height: 34px;
+  display: grid; place-items: center; border-radius: 50%;
+  background: rgba(0,0,0,0.5); color: #fff; font-size: 0.9rem;
+}
+.grid-name {
+  margin-top: 0.4rem; font-size: 0.8rem; text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.grid-menu { position: absolute; top: 0.35rem; right: 0.35rem; padding: 0.1rem 0.35rem; background: rgba(0,0,0,0.35); }
+
+.action-item.current { border-color: var(--accent); color: var(--accent); }
 .fs-item {
   display: flex; align-items: center; gap: 0.6rem;
   background: var(--panel); border: 1px solid var(--border);

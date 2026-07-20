@@ -73,6 +73,11 @@
           </div>
         </div>
 
+        <div class="fs-controls">
+          <button id="view-toggle" class="btn ghost small" type="button" title="Toggle grid/list">▦ Grid</button>
+          <button id="sort-btn" class="btn ghost small" type="button" title="Sort">↕ Name ↑</button>
+        </div>
+
         <section id="dropzone" class="dropzone" aria-label="Upload files">
           <div class="dz-inner">
             <div class="dz-icon">⬆</div>
@@ -118,6 +123,17 @@
     <div id="preview-modal" class="modal hidden" role="dialog" aria-modal="true">
       <button id="preview-close" class="modal-close" type="button" aria-label="Close">✕</button>
       <div id="preview-content" class="modal-content"></div>
+    </div>
+
+    <!-- ===== Sort ===== -->
+    <div id="sort-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="sheet">
+        <div class="sheet-head">
+          <strong>Sort by</strong>
+          <button id="sort-close" class="btn ghost small" type="button" aria-label="Close">✕</button>
+        </div>
+        <div id="sort-list" class="action-list"></div>
+      </div>
     </div>
 
     <!-- ===== Per-item actions ===== -->
