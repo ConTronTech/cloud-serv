@@ -30,6 +30,28 @@ bool hasAnyControlChar(const std::string& s) {
 // or put in a header. Note: HTML metacharacters (< > " ' &) are allowed here
 // because a filename can legitimately contain them; clients MUST escape the
 // name when rendering it as HTML.
+// Percent-decode an X-Filename header value so we store the human-readable
+// name (the client encodes it to keep the header ASCII-safe). '+' is left as-is
+// (encodeURIComponent uses %20 for space, not '+').
+std::string urlDecode(const std::string& s) {
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            int hi = hex(s[i + 1]), lo = hex(s[i + 2]);
+            if (hi >= 0 && lo >= 0) { out += static_cast<char>(hi * 16 + lo); i += 2; continue; }
+        }
+        out += s[i];
+    }
+    return out;
+}
+
 bool isValidDisplayName(const std::string& name) {
     if (name.empty() || name.size() > 255) return false;
     if (hasAnyControlChar(name)) return false;
@@ -98,7 +120,7 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
-        std::string name = req.get_header_value("X-Filename");
+        std::string name = urlDecode(req.get_header_value("X-Filename"));
         if (name.empty()) return http::jsonError(400, "missing X-Filename header");
         if (!isValidDisplayName(name)) return http::jsonError(400, "invalid filename");
         // Empty (0-byte) files are allowed — a cloud legitimately stores them.

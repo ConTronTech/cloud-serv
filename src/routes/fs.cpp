@@ -126,6 +126,33 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
         return http::jsonSuccess(R"({"ok":true})");
     });
 
+    // ---- Storage usage ----
+    CROW_ROUTE(app, "/api/usage").methods(crow::HTTPMethod::GET)
+    ([&db](const crow::request& req) {
+        auto userId = security::authenticateRequest(req, db);
+        if (!userId) return http::jsonError(401, "unauthorized");
+        auto [bytes, count] = db.usage(*userId);
+        return http::jsonSuccess(json{{"used", bytes}, {"files", count}}.dump());
+    });
+
+    // ---- Search / category listing (across all folders) ----
+    CROW_ROUTE(app, "/api/search").methods(crow::HTTPMethod::GET)
+    ([&db](const crow::request& req) {
+        auto userId = security::authenticateRequest(req, db);
+        if (!userId) return http::jsonError(401, "unauthorized");
+
+        std::string q, category;
+        if (const char* p = req.url_params.get("q")) q = p;
+        if (const char* p = req.url_params.get("category")) category = p;
+        if (q.size() > 200) q = q.substr(0, 200);
+
+        json files = json::array();
+        for (const auto& f : db.searchFiles(*userId, q, category, 500)) files.push_back(f.toJson());
+        json folders = json::array();
+        for (const auto& f : db.searchFolders(*userId, q, 200)) folders.push_back(f.toJson());
+        return http::jsonSuccess(json{{"files", files}, {"folders", folders}}.dump());
+    });
+
     // ---- Rename / move file ----
     CROW_ROUTE(app, "/api/files/<int>").methods(crow::HTTPMethod::PATCH)
     ([&db](const crow::request& req, int fileId) {

@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <shared_mutex>
 
 // CloudDB — the multi-user data layer for the cloud suite.
@@ -68,6 +69,16 @@ public:
     bool moveFile(int64_t userId, int64_t fileId, int64_t folderId);
     bool renameFile(int64_t userId, int64_t fileId, const std::string& name);
     bool deleteFile(int64_t userId, int64_t fileId);
+
+    // ---- Aggregates / search ----
+    // Total bytes used and file count for a user.
+    std::pair<int64_t, int64_t> usage(int64_t userId);
+    // Search files across all folders. q = case-insensitive name substring
+    // (empty = any). category = image|video|audio|document|other|"" (any).
+    std::vector<FileMeta> searchFiles(int64_t userId, const std::string& q,
+                                      const std::string& category, int limit);
+    // Search folders by name substring across the whole tree.
+    std::vector<Folder> searchFolders(int64_t userId, const std::string& q, int limit);
 
     // ---- Chunked uploads ----
     bool createUploadSession(int64_t userId, const std::string& id, int64_t folderId,

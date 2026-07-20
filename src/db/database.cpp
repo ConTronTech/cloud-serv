@@ -492,6 +492,101 @@ bool CloudDB::deleteFile(int64_t userId, int64_t fileId) {
     }
 }
 
+// ==== Aggregates / search ====
+
+std::pair<int64_t, int64_t> CloudDB::usage(int64_t userId) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT COALESCE(SUM(size), 0), COUNT(*) FROM files WHERE user_id = ?");
+        q.bind(1, userId);
+        if (q.step()) return { q.colInt64(0), q.colInt64(1) };
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("usage: " + std::string(e.what()));
+    }
+    return { 0, 0 };
+}
+
+// Escape LIKE wildcards in user input and wrap with %...% for a substring match.
+static std::string likeTerm(const std::string& q) {
+    std::string term = "%";
+    for (char ch : q) {
+        if (ch == '%' || ch == '_' || ch == '\\') term += '\\';
+        term += ch;
+    }
+    return term + "%";
+}
+
+std::vector<FileMeta> CloudDB::searchFiles(int64_t userId, const std::string& q,
+                                           const std::string& category, int limit) {
+    std::shared_lock lock(db_mutex_);
+    std::vector<FileMeta> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        std::string sql =
+            "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at "
+            "FROM files WHERE user_id = ?";
+        if (!q.empty()) sql += " AND name LIKE ? ESCAPE '\\'";
+        if (category == "image")         sql += " AND mime LIKE 'image/%'";
+        else if (category == "video")    sql += " AND mime LIKE 'video/%'";
+        else if (category == "audio")    sql += " AND mime LIKE 'audio/%'";
+        else if (category == "document") sql += " AND (mime LIKE 'text/%' OR mime LIKE 'application/%')";
+        else if (category == "other")
+            sql += " AND mime NOT LIKE 'image/%' AND mime NOT LIKE 'video/%'"
+                   " AND mime NOT LIKE 'audio/%' AND mime NOT LIKE 'text/%'"
+                   " AND mime NOT LIKE 'application/%'";
+        sql += " ORDER BY created_at DESC LIMIT ?";
+
+        Stmt st(c.h, sql.c_str());
+        int idx = 1;
+        st.bind(idx++, userId);
+        if (!q.empty()) st.bind(idx++, likeTerm(q));
+        st.bind(idx++, static_cast<int64_t>(limit > 0 ? limit : 500));
+        while (st.step()) {
+            FileMeta f;
+            f.id = st.colInt64(0);
+            f.user_id = st.colInt64(1);
+            f.folder_id = st.colInt64(2);
+            f.name = st.colText(3);
+            f.mime = st.colText(4);
+            f.size = st.colInt64(5);
+            f.storage_key = st.colText(6);
+            f.created_at = st.colText(7);
+            out.push_back(f);
+        }
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("searchFiles: " + std::string(e.what()));
+    }
+    return out;
+}
+
+std::vector<Folder> CloudDB::searchFolders(int64_t userId, const std::string& q, int limit) {
+    std::shared_lock lock(db_mutex_);
+    std::vector<Folder> out;
+    if (q.empty()) return out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt st(c.h, "SELECT id, user_id, parent_id, name, created_at FROM folders "
+                     "WHERE user_id = ? AND name LIKE ? ESCAPE '\\' "
+                     "ORDER BY name COLLATE NOCASE LIMIT ?");
+        st.bind(1, userId);
+        st.bind(2, likeTerm(q));
+        st.bind(3, static_cast<int64_t>(limit > 0 ? limit : 200));
+        while (st.step()) {
+            Folder f;
+            f.id = st.colInt64(0);
+            f.user_id = st.colInt64(1);
+            f.parent_id = st.colInt64(2);
+            f.name = st.colText(3);
+            f.created_at = st.colText(4);
+            out.push_back(f);
+        }
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("searchFolders: " + std::string(e.what()));
+    }
+    return out;
+}
+
 // ==== Folders ====
 
 bool CloudDB::folderExists(int64_t userId, int64_t folderId) {
