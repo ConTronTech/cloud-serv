@@ -18,6 +18,7 @@ PROJECT_SOURCES = src/main.cpp \
                   src/routes/auth.cpp \
                   src/routes/files.cpp \
                   src/routes/notes.cpp \
+                  src/routes/uploads.cpp \
                   src/routes/static_files.cpp \
                   src/security/crypto.cpp \
                   src/security/request_auth.cpp \

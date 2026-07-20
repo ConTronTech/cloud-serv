@@ -38,6 +38,27 @@ bool FileStore::write(int64_t userId, const std::string& storageKey,
     return out.good();
 }
 
+bool FileStore::append(int64_t userId, const std::string& storageKey,
+                       const char* data, size_t size) const {
+    std::error_code ec;
+    fs::create_directories(userDir(userId), ec);
+    if (ec) {
+        utils::Logger::get_instance().error("FileStore::append mkdir: " + ec.message());
+        return false;
+    }
+    std::ofstream out(pathFor(userId, storageKey), std::ios::binary | std::ios::app);
+    if (!out) return false;
+    if (size > 0) out.write(data, static_cast<std::streamsize>(size));
+    return out.good();
+}
+
+int64_t FileStore::sizeOf(int64_t userId, const std::string& storageKey) const {
+    std::error_code ec;
+    auto n = fs::file_size(pathFor(userId, storageKey), ec);
+    if (ec) return -1;
+    return static_cast<int64_t>(n);
+}
+
 bool FileStore::remove(int64_t userId, const std::string& storageKey) const {
     std::error_code ec;
     fs::remove(pathFor(userId, storageKey), ec);

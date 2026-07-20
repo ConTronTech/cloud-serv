@@ -118,6 +118,18 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id);
+            CREATE TABLE IF NOT EXISTS upload_sessions (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                mime TEXT DEFAULT 'application/octet-stream',
+                size INTEGER DEFAULT 0,
+                received INTEGER DEFAULT 0,
+                storage_key TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_uploads_user ON upload_sessions(user_id);
         )";
         char* err = nullptr;
         if (sqlite3_exec(c.h, schema, nullptr, nullptr, &err) != SQLITE_OK) {
@@ -420,6 +432,84 @@ bool CloudDB::deleteFile(int64_t userId, int64_t fileId) {
         return sqlite3_changes(c.h) > 0;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("deleteFile: " + std::string(e.what()));
+        return false;
+    }
+}
+
+// ==== Chunked uploads ====
+
+bool CloudDB::createUploadSession(int64_t userId, const std::string& id, const std::string& name,
+                                  const std::string& mime, int64_t size, const std::string& storageKey) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "INSERT INTO upload_sessions(id, user_id, name, mime, size, received, storage_key) "
+                    "VALUES(?, ?, ?, ?, ?, 0, ?)");
+        q.bind(1, id);
+        q.bind(2, userId);
+        q.bind(3, name);
+        q.bind(4, mime);
+        q.bind(5, size);
+        q.bind(6, storageKey);
+        return sqlite3_step(q.s) == SQLITE_DONE;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("createUploadSession: " + std::string(e.what()));
+        return false;
+    }
+}
+
+std::optional<UploadSession> CloudDB::getUploadSession(int64_t userId, const std::string& id) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id, user_id, name, mime, size, received, storage_key, created_at "
+                    "FROM upload_sessions WHERE id = ? AND user_id = ?");
+        q.bind(1, id);
+        q.bind(2, userId);
+        if (!q.step()) return std::nullopt;
+        UploadSession u;
+        u.id = q.colText(0);
+        u.user_id = q.colInt64(1);
+        u.name = q.colText(2);
+        u.mime = q.colText(3);
+        u.size = q.colInt64(4);
+        u.received = q.colInt64(5);
+        u.storage_key = q.colText(6);
+        u.created_at = q.colText(7);
+        return u;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("getUploadSession: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::setUploadReceived(int64_t userId, const std::string& id, int64_t received) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE upload_sessions SET received = ? WHERE id = ? AND user_id = ?");
+        q.bind(1, received);
+        q.bind(2, id);
+        q.bind(3, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setUploadReceived: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::deleteUploadSession(int64_t userId, const std::string& id) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "DELETE FROM upload_sessions WHERE id = ? AND user_id = ?");
+        q.bind(1, id);
+        q.bind(2, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("deleteUploadSession: " + std::string(e.what()));
         return false;
     }
 }

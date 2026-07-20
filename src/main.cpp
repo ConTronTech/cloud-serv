@@ -6,6 +6,7 @@
 #include "routes/auth.h"
 #include "routes/files.h"
 #include "routes/notes.h"
+#include "routes/uploads.h"
 #include "routes/static_files.h"
 #include "security/rate_limiter.h"
 #include "security/sanitizer.h"
@@ -98,9 +99,15 @@ int main(int argc, char* argv[]) {
             nlohmann::json j = {{"status", "ok"}, {"service", "cloud-serv"}};
             return http::jsonSuccess(j.dump());
         });
+        // Max size of a single assembled file (chunked uploads can exceed the
+        // per-request body limit; this caps the total). In MB to stay within int.
+        int64_t maxFileMb = config.get_int("env", "MAX_FILE_MB", 5120); // 5 GB
+        int64_t maxFileBytes = maxFileMb * 1024 * 1024;
+
         routes::registerAuthRoutes(app, db, sessionSeconds);
         routes::registerFileRoutes(app, db, store);
         routes::registerNoteRoutes(app, db);
+        routes::registerUploadRoutes(app, db, store, maxFileBytes);
 
         // Serve the PWA (same-origin with the API).
         std::string web_dir = config.get("env", "WEB_DIR", "web");
@@ -119,7 +126,11 @@ int main(int argc, char* argv[]) {
         utils::Logger::get_instance().info("  POST   /api/files              (X-Filename + raw body)");
         utils::Logger::get_instance().info("  GET    /api/files");
         utils::Logger::get_instance().info("  GET    /api/files/<id>         (download)");
+        utils::Logger::get_instance().info("  GET    /api/files/<id>/content (inline, Range/playback)");
         utils::Logger::get_instance().info("  DELETE /api/files/<id>");
+        utils::Logger::get_instance().info("  POST   /api/uploads/init      (chunked upload)");
+        utils::Logger::get_instance().info("  PUT    /api/uploads/<id>      (chunk, X-Offset)");
+        utils::Logger::get_instance().info("  POST   /api/uploads/<id>/complete");
         utils::Logger::get_instance().info("  GET    /api/notes");
         utils::Logger::get_instance().info("  POST   /api/notes");
         utils::Logger::get_instance().info("  GET    /api/notes/<id>");

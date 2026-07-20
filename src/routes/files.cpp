@@ -5,6 +5,9 @@
 #include "utils/logger.h"
 
 #include <nlohmann/json.hpp>
+#include <fstream>
+#include <algorithm>
+#include <cstdint>
 
 using json = nlohmann::json;
 
@@ -34,6 +37,52 @@ bool isValidDisplayName(const std::string& name) {
     if (name.find('\\') != std::string::npos) return false;
     if (name == "." || name == ".." ) return false;
     return true;
+}
+
+// Cap on bytes served per Range response — bounds memory for a single request
+// while the client keeps requesting further ranges as it plays/seeks.
+const int64_t RANGE_CHUNK_CAP = 8 * 1024 * 1024;
+
+// Parse a "bytes=start-end" Range header against a known total size.
+// Returns false if unparseable or unsatisfiable (caller should 416).
+bool parseRange(const std::string& header, int64_t total, int64_t& start, int64_t& end) {
+    const std::string prefix = "bytes=";
+    if (header.compare(0, prefix.size(), prefix) != 0) return false;
+    std::string spec = header.substr(prefix.size());
+    auto dash = spec.find('-');
+    if (dash == std::string::npos) return false;
+    std::string s = spec.substr(0, dash);
+    std::string e = spec.substr(dash + 1);
+
+    try {
+        if (s.empty()) {
+            // Suffix range: last N bytes ("bytes=-N").
+            if (e.empty()) return false;
+            int64_t n = std::stoll(e);
+            if (n <= 0) return false;
+            start = std::max<int64_t>(0, total - n);
+            end = total - 1;
+        } else {
+            start = std::stoll(s);
+            end = e.empty() ? total - 1 : std::stoll(e);
+        }
+    } catch (...) {
+        return false;
+    }
+    if (start < 0 || start >= total || end < start) return false;
+    if (end >= total) end = total - 1;
+    return true;
+}
+
+// Read [start, end] (inclusive) from a file into a string.
+std::string readSlice(const std::string& path, int64_t start, int64_t len) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    f.seekg(start);
+    std::string buf(static_cast<size_t>(len), '\0');
+    f.read(&buf[0], len);
+    buf.resize(static_cast<size_t>(f.gcount()));
+    return buf;
 }
 
 } // namespace
@@ -102,6 +151,54 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
 
         std::string safeName = security::Sanitizer::safeDispositionName(meta->name);
         res.add_header("Content-Disposition", "attachment; filename=\"" + safeName + "\"");
+        return res;
+    });
+
+    // ---- Content (inline, Range-capable) — for playback / preview ----
+    // <video>/<audio>/<img> point their src here; auth comes from the session
+    // cookie (they can't send Authorization). Supports HTTP Range for seeking.
+    CROW_ROUTE(app, "/api/files/<int>/content").methods(crow::HTTPMethod::GET)
+    ([&db, &store](const crow::request& req, int fileId) {
+        auto userId = security::authenticateRequest(req, db);
+        if (!userId) return http::jsonError(401, "unauthorized");
+
+        auto meta = db.getFile(*userId, fileId);
+        if (!meta) return http::jsonError(404, "not found");
+
+        const std::string path = store.pathFor(*userId, meta->storage_key);
+        const int64_t size = meta->size;
+
+        std::string rangeHeader = req.get_header_value("Range");
+        if (rangeHeader.empty()) {
+            // No range: stream the whole file from disk (low memory), inline.
+            crow::response res;
+            res.set_static_file_info_unsafe(path, meta->mime);
+            if (res.code == 404) return http::jsonError(404, "not found");
+            res.add_header("Accept-Ranges", "bytes");
+            res.add_header("Content-Disposition", "inline");
+            return res;
+        }
+
+        int64_t start = 0, end = size - 1;
+        if (size <= 0 || !parseRange(rangeHeader, size, start, end)) {
+            crow::response res(416); // Range Not Satisfiable
+            res.add_header("Content-Range", "bytes */" + std::to_string(size));
+            return res;
+        }
+
+        // Serve at most RANGE_CHUNK_CAP bytes this response; the client asks for more.
+        if (end - start + 1 > RANGE_CHUNK_CAP) end = start + RANGE_CHUNK_CAP - 1;
+        const int64_t len = end - start + 1;
+
+        std::string slice = readSlice(path, start, len);
+        crow::response res(206);
+        res.body = std::move(slice);
+        res.add_header("Content-Type", meta->mime);
+        res.add_header("Accept-Ranges", "bytes");
+        res.add_header("Content-Range",
+                       "bytes " + std::to_string(start) + "-" + std::to_string(end) +
+                       "/" + std::to_string(size));
+        res.add_header("Content-Disposition", "inline");
         return res;
     });
 

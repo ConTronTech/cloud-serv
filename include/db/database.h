@@ -52,6 +52,13 @@ public:
     std::optional<FileMeta> getFile(int64_t userId, int64_t fileId);
     bool deleteFile(int64_t userId, int64_t fileId);
 
+    // ---- Chunked uploads ----
+    bool createUploadSession(int64_t userId, const std::string& id, const std::string& name,
+                             const std::string& mime, int64_t size, const std::string& storageKey);
+    std::optional<UploadSession> getUploadSession(int64_t userId, const std::string& id);
+    bool setUploadReceived(int64_t userId, const std::string& id, int64_t received);
+    bool deleteUploadSession(int64_t userId, const std::string& id);
+
     // ---- Notes ----
     int64_t createNote(int64_t userId, const std::string& title, const std::string& body);
     std::vector<Note> listNotes(int64_t userId);              // summaries (no body)

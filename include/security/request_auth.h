@@ -20,4 +20,12 @@ std::optional<int64_t> authenticateRequest(const crow::request& req, CloudDB& db
 // Returns empty string if the header is missing or malformed.
 std::string bearerToken(const std::string& authHeader);
 
+// Extract the "session=<token>" value from a Cookie header. Empty if absent.
+std::string cookieSessionToken(const std::string& cookieHeader);
+
+// Build the Set-Cookie value that stores a session token, or clears it when
+// `clear` is true. HttpOnly + SameSite=Strict; Secure is added when `secure`.
+std::string sessionCookie(const std::string& token, int maxAgeSeconds,
+                          bool secure = false, bool clear = false);
+
 } // namespace security

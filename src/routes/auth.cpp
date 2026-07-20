@@ -66,7 +66,9 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         db.createSession(userId, security::Crypto::sha256Hex(token), req.remote_ip_address, expiresAt);
 
         json user = {{"id", userId}, {"email", email}, {"displayName", displayName}};
-        return http::jsonSuccess(json{{"token", token}, {"user", user}}.dump());
+        auto res = http::jsonSuccess(json{{"token", token}, {"user", user}}.dump());
+        res.add_header("Set-Cookie", security::sessionCookie(token, sessionSeconds));
+        return res;
     });
 
     // ---- Login ----
@@ -93,7 +95,9 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         int64_t expiresAt = static_cast<int64_t>(::time(nullptr)) + sessionSeconds;
         db.createSession(user->id, security::Crypto::sha256Hex(token), req.remote_ip_address, expiresAt);
 
-        return http::jsonSuccess(json{{"token", token}, {"user", user->toJson()}}.dump());
+        auto res = http::jsonSuccess(json{{"token", token}, {"user", user->toJson()}}.dump());
+        res.add_header("Set-Cookie", security::sessionCookie(token, sessionSeconds));
+        return res;
     });
 
     // ---- Me ----
@@ -109,9 +113,13 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
     // ---- Logout (revoke current session token) ----
     CROW_ROUTE(app, "/api/auth/logout").methods(crow::HTTPMethod::POST)
     ([&db](const crow::request& req) {
+        // Revoke whichever session token the client presented (header or cookie).
         std::string token = security::bearerToken(req.get_header_value("Authorization"));
+        if (token.empty()) token = security::cookieSessionToken(req.get_header_value("Cookie"));
         if (!token.empty()) db.deleteSession(security::Crypto::sha256Hex(token));
-        return http::jsonSuccess(R"({"ok":true})");
+        auto res = http::jsonSuccess(R"({"ok":true})");
+        res.add_header("Set-Cookie", security::sessionCookie("", 0, false, true));
+        return res;
     });
 
     // ---- Create API key (returned once, in full) ----
