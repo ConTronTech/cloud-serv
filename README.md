@@ -81,10 +81,16 @@ so it never touches your real data.
 | POST   | `/api/auth/api-keys`     | yes  | Create API key (**full key shown once**)  |
 | GET    | `/api/auth/api-keys`     | yes  | List keys (prefixes only)                 |
 | DELETE | `/api/auth/api-keys/<id>`| yes  | Revoke a key                              |
-| POST   | `/api/files`             | yes  | Upload (raw body + `X-Filename` header)   |
+| POST   | `/api/files`             | yes  | Upload small file (raw body + `X-Filename`)|
 | GET    | `/api/files`             | yes  | List your files                           |
-| GET    | `/api/files/<id>`        | yes  | Download (streamed)                       |
+| GET    | `/api/files/<id>`        | yes  | Download (streamed, attachment)           |
+| GET    | `/api/files/<id>/content`| yes¹ | Inline content, **Range/206** for playback |
 | DELETE | `/api/files/<id>`        | yes  | Delete                                    |
+| POST   | `/api/uploads/init`      | yes  | Start chunked upload `{name,mime?,size?}` |
+| GET    | `/api/uploads/<id>`      | yes  | Upload status (for resume)                |
+| PUT    | `/api/uploads/<id>`      | yes  | Append chunk (raw body + `X-Offset`)      |
+| POST   | `/api/uploads/<id>/complete` | yes | Finalize → `{file}`                   |
+| DELETE | `/api/uploads/<id>`      | yes  | Abort chunked upload                      |
 | GET    | `/api/notes`             | yes  | List notes (summaries)                    |
 | POST   | `/api/notes`             | yes  | Create note `{title?,body?}`              |
 | GET    | `/api/notes/<id>`        | yes  | Read note (full)                          |
@@ -92,7 +98,14 @@ so it never touches your real data.
 | DELETE | `/api/notes/<id>`        | yes  | Delete note                               |
 
 Authenticate with **either** `Authorization: Bearer <session-token>` (web login)
-**or** `X-API-Key: <key>` (programmatic clients).
+**or** `X-API-Key: <key>` (programmatic clients). ¹ The `content` endpoint also
+accepts the **session cookie** (set at login), so `<video>`/`<audio>`/`<img>`
+`src` work same-origin without a header.
+
+**Large files & media:** any file type is accepted. Files over 8 MB upload in
+resumable chunks (`init → PUT chunks → complete`); the `content` endpoint serves
+HTTP Range requests (206) so video/audio stream and seek without a full download.
+The web client previews images and plays video/audio inline.
 
 ## Try it with curl
 

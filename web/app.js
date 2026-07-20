@@ -164,6 +164,10 @@ function fileRow(f) {
   name.className = "file-name";
   name.textContent = decodeName(f.name); // XSS-safe: textContent
   name.title = decodeName(f.name);
+  if (isPreviewable(f.mime)) {
+    name.classList.add("clickable");
+    name.addEventListener("click", () => openPreview(f));
+  }
   const sub = document.createElement("div");
   sub.className = "file-sub";
   sub.textContent = `${fmtSize(f.size)} · ${fmtDate(f.createdAt)}`;
@@ -171,6 +175,15 @@ function fileRow(f) {
 
   const actions = document.createElement("div");
   actions.className = "file-actions";
+
+  if (isPreviewable(f.mime)) {
+    const pv = document.createElement("button");
+    pv.className = "btn ghost small";
+    pv.type = "button";
+    pv.innerHTML = "▶ <span>Open</span>";
+    pv.addEventListener("click", () => openPreview(f));
+    actions.append(pv);
+  }
 
   const dl = document.createElement("button");
   dl.className = "btn ghost small";
@@ -211,14 +224,52 @@ async function deleteFile(f) {
   loadFiles();
 }
 
+// ---- preview / playback ----
+function isPreviewable(mime) { return /^(image|video|audio)\//.test(mime || ""); }
+
+// Opens media inline using the content endpoint. The <img>/<video>/<audio> src
+// authenticates via the session cookie (no Authorization header possible), and
+// video/audio stream with Range so they seek without downloading the whole file.
+function openPreview(file) {
+  const modal = $("preview-modal");
+  const c = $("preview-content");
+  c.textContent = "";
+  const src = API + "/api/files/" + file.id + "/content";
+  const mime = file.mime || "";
+  let el;
+  if (mime.startsWith("image/")) { el = document.createElement("img"); el.src = src; }
+  else if (mime.startsWith("video/")) { el = document.createElement("video"); el.src = src; el.controls = true; el.autoplay = true; el.playsInline = true; }
+  else if (mime.startsWith("audio/")) { el = document.createElement("audio"); el.src = src; el.controls = true; el.autoplay = true; }
+  else return;
+  el.className = "preview-media";
+  const cap = document.createElement("div");
+  cap.className = "preview-cap";
+  cap.textContent = decodeName(file.name); // textContent — safe
+  c.append(el, cap);
+  modal.classList.remove("hidden");
+}
+
+function closePreview() {
+  $("preview-content").textContent = ""; // detaching stops video/audio playback
+  $("preview-modal").classList.add("hidden");
+}
+
 // ---- upload ----
-const UPLOAD_CONCURRENCY = 3;   // parallel uploads; keeps us under the rate limit
-const UPLOAD_MAX_ATTEMPTS = 6;  // retries on 429 before giving up
+const UPLOAD_CONCURRENCY = 3;              // parallel uploads; keeps us under the rate limit
+const UPLOAD_MAX_ATTEMPTS = 6;             // retries on 429 before giving up
+const CHUNK_THRESHOLD = 8 * 1024 * 1024;   // files larger than this upload in chunks
+const CHUNK_SIZE = 5 * 1024 * 1024;        // per-chunk size (< server MAX_BODY_SIZE)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function sessionExpired() { token = ""; localStorage.removeItem(TOKEN_KEY); showAuth(); }
 
-// Upload one file, retrying with backoff if the server rate-limits us (429).
+// Dispatch: small files go in one request, big files stream in chunks.
 async function uploadOne(file, state) {
+  return file.size > CHUNK_THRESHOLD ? uploadChunked(file, state) : uploadDirect(file, state);
+}
+
+// Small file: single POST, retrying with backoff if rate-limited (429).
+async function uploadDirect(file, state) {
   for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
     let res;
     try {
@@ -230,28 +281,79 @@ async function uploadOne(file, state) {
         }),
         body: file,
       });
-    } catch {
-      state.textContent = "Network error";
-      return false;
-    }
+    } catch { state.textContent = "Network error"; return false; }
 
     if (res.ok) return true;
-
     if (res.status === 429 && attempt < UPLOAD_MAX_ATTEMPTS) {
-      // Back off and retry — a bulk upload paces itself instead of failing.
-      const wait = Math.min(500 * attempt, 3000);
       state.textContent = `Waiting… (busy, retry ${attempt})`;
-      await sleep(wait);
+      await sleep(Math.min(500 * attempt, 3000));
       continue;
     }
-    if (res.status === 401) { token = ""; localStorage.removeItem(TOKEN_KEY); showAuth(); return false; }
-
+    if (res.status === 401) { sessionExpired(); return false; }
     let body = null;
     try { body = await res.json(); } catch { /* ignore */ }
     state.textContent = prettyError(body) || `Failed (${res.status})`;
     return false;
   }
   return false;
+}
+
+// Large file: init -> PUT sequential chunks (resumable) -> complete.
+async function uploadChunked(file, state) {
+  state.textContent = "Starting…";
+  let initRes;
+  try {
+    initRes = await fetch(API + "/api/uploads/init", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size }),
+    });
+  } catch { state.textContent = "Network error"; return false; }
+  if (initRes.status === 401) { sessionExpired(); return false; }
+  if (!initRes.ok) {
+    let b = null; try { b = await initRes.json(); } catch {}
+    state.textContent = prettyError(b) || "Upload init failed";
+    return false;
+  }
+  const { uploadId } = await initRes.json();
+  const abort = () => fetch(API + "/api/uploads/" + uploadId, { method: "DELETE", headers: authHeaders() }).catch(() => {});
+
+  let offset = 0;
+  while (offset < file.size) {
+    const chunk = file.slice(offset, Math.min(offset + CHUNK_SIZE, file.size));
+    let done = false;
+    for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
+      let res;
+      try {
+        res = await fetch(API + "/api/uploads/" + uploadId, {
+          method: "PUT",
+          headers: authHeaders({ "X-Offset": String(offset), "Content-Type": "application/octet-stream" }),
+          body: chunk,
+        });
+      } catch { state.textContent = "Network error"; abort(); return false; }
+
+      if (res.ok) { offset = (await res.json()).received; done = true; break; }
+      if (res.status === 429 && attempt < UPLOAD_MAX_ATTEMPTS) { await sleep(Math.min(500 * attempt, 3000)); continue; }
+      if (res.status === 409) { // offset drifted — resync to what the server has
+        try { const j = await res.json(); if (typeof j.received === "number") { offset = j.received; done = true; break; } } catch {}
+      }
+      if (res.status === 401) { sessionExpired(); return false; }
+      let b = null; try { b = await res.json(); } catch {}
+      state.textContent = prettyError(b) || `Failed (${res.status})`;
+      abort();
+      return false;
+    }
+    if (!done) { abort(); return false; }
+    state.textContent = "Uploading… " + Math.floor((offset / file.size) * 100) + "%";
+  }
+
+  const comp = await fetch(API + "/api/uploads/" + uploadId + "/complete", { method: "POST", headers: authHeaders() });
+  if (!comp.ok) {
+    let b = null; try { b = await comp.json(); } catch {}
+    state.textContent = prettyError(b) || "Finalize failed";
+    return false;
+  }
+  return true;
 }
 
 async function uploadFiles(fileList) {
@@ -416,6 +518,11 @@ async function boot() {
   $("note-back").addEventListener("click", () => { showNotesList(); loadNotes(); });
   $("note-save").addEventListener("click", saveNote);
   $("note-delete").addEventListener("click", deleteCurrentNote);
+
+  // preview modal
+  $("preview-close").addEventListener("click", closePreview);
+  $("preview-modal").addEventListener("click", (e) => { if (e.target.id === "preview-modal") closePreview(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePreview(); });
 
   setMode("login");
 
