@@ -108,6 +108,16 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_files_user ON files(user_id);
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                title TEXT DEFAULT '',
+                body TEXT DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id);
         )";
         char* err = nullptr;
         if (sqlite3_exec(c.h, schema, nullptr, nullptr, &err) != SQLITE_OK) {
@@ -410,6 +420,105 @@ bool CloudDB::deleteFile(int64_t userId, int64_t fileId) {
         return sqlite3_changes(c.h) > 0;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("deleteFile: " + std::string(e.what()));
+        return false;
+    }
+}
+
+// ==== Notes ====
+
+int64_t CloudDB::createNote(int64_t userId, const std::string& title, const std::string& body) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "INSERT INTO notes(user_id, title, body) VALUES(?, ?, ?)");
+        q.bind(1, userId);
+        q.bind(2, title);
+        q.bind(3, body);
+        if (sqlite3_step(q.s) != SQLITE_DONE) return -1;
+        return sqlite3_last_insert_rowid(c.h);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("createNote: " + std::string(e.what()));
+        return -1;
+    }
+}
+
+std::vector<Note> CloudDB::listNotes(int64_t userId) {
+    std::shared_lock lock(db_mutex_);
+    std::vector<Note> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        // Summaries only (no body) — ordered by most recently edited.
+        Stmt q(c.h, "SELECT id, user_id, title, created_at, updated_at "
+                    "FROM notes WHERE user_id = ? ORDER BY updated_at DESC");
+        q.bind(1, userId);
+        while (q.step()) {
+            Note n;
+            n.id = q.colInt64(0);
+            n.user_id = q.colInt64(1);
+            n.title = q.colText(2);
+            n.created_at = q.colText(3);
+            n.updated_at = q.colText(4);
+            out.push_back(n);
+        }
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("listNotes: " + std::string(e.what()));
+    }
+    return out;
+}
+
+std::optional<Note> CloudDB::getNote(int64_t userId, int64_t noteId) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id, user_id, title, body, created_at, updated_at "
+                    "FROM notes WHERE id = ? AND user_id = ?");
+        q.bind(1, noteId);
+        q.bind(2, userId);
+        if (!q.step()) return std::nullopt;
+        Note n;
+        n.id = q.colInt64(0);
+        n.user_id = q.colInt64(1);
+        n.title = q.colText(2);
+        n.body = q.colText(3);
+        n.created_at = q.colText(4);
+        n.updated_at = q.colText(5);
+        return n;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("getNote: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::updateNote(int64_t userId, int64_t noteId,
+                         const std::string& title, const std::string& body) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE notes SET title = ?, body = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ? AND user_id = ?");
+        q.bind(1, title);
+        q.bind(2, body);
+        q.bind(3, noteId);
+        q.bind(4, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("updateNote: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::deleteNote(int64_t userId, int64_t noteId) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "DELETE FROM notes WHERE id = ? AND user_id = ?");
+        q.bind(1, noteId);
+        q.bind(2, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("deleteNote: " + std::string(e.what()));
         return false;
     }
 }

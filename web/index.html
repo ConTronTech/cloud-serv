@@ -56,26 +56,59 @@
       </div>
     </header>
 
+    <nav class="tabbar">
+      <button id="nav-files" class="navbtn active" type="button">📁 Files</button>
+      <button id="nav-notes" class="navbtn" type="button">📝 Notes</button>
+    </nav>
+
     <main class="content">
-      <section id="dropzone" class="dropzone" aria-label="Upload files">
-        <input id="file-input" type="file" multiple hidden />
-        <div class="dz-inner">
-          <div class="dz-icon">⬆</div>
-          <p><button id="pick" class="linkbtn" type="button">Choose files</button> or drag &amp; drop</p>
-          <p class="muted">Uploads go straight to your server.</p>
-        </div>
-      </section>
+      <!-- ===== Files tab ===== -->
+      <div id="files-tab">
+        <section id="dropzone" class="dropzone" aria-label="Upload files">
+          <input id="file-input" type="file" multiple hidden />
+          <div class="dz-inner">
+            <div class="dz-icon">⬆</div>
+            <p><button id="pick" class="linkbtn" type="button">Choose files</button> or drag &amp; drop</p>
+            <p class="muted">Uploads go straight to your server.</p>
+          </div>
+        </section>
 
-      <div id="uploads" class="uploads"></div>
+        <div id="uploads" class="uploads"></div>
 
-      <section class="files">
-        <div class="files-head">
-          <h2>Your files</h2>
-          <button id="refresh" class="btn ghost small" type="button">Refresh</button>
-        </div>
-        <ul id="file-list" class="file-list"></ul>
-        <p id="empty" class="muted empty hidden">No files yet. Upload something above.</p>
-      </section>
+        <section class="files">
+          <div class="files-head">
+            <h2>Your files</h2>
+            <button id="refresh" class="btn ghost small" type="button">Refresh</button>
+          </div>
+          <ul id="file-list" class="file-list"></ul>
+          <p id="empty" class="muted empty hidden">No files yet. Upload something above.</p>
+        </section>
+      </div>
+
+      <!-- ===== Notes tab ===== -->
+      <div id="notes-tab" class="hidden">
+        <section id="notes-list-view">
+          <div class="files-head">
+            <h2>Your notes</h2>
+            <button id="new-note" class="btn primary small" type="button">＋ New note</button>
+          </div>
+          <ul id="note-list" class="note-list"></ul>
+          <p id="notes-empty" class="muted empty hidden">No notes yet. Create one above.</p>
+        </section>
+
+        <section id="note-editor" class="hidden">
+          <div class="editor-head">
+            <button id="note-back" class="btn ghost small" type="button">← Back</button>
+            <div class="editor-actions">
+              <button id="note-delete" class="btn ghost small" type="button">Delete</button>
+              <button id="note-save" class="btn primary small" type="button">Save</button>
+            </div>
+          </div>
+          <input id="note-title" class="note-title-input" type="text" placeholder="Title" />
+          <textarea id="note-body" class="note-body-input" placeholder="Write something…"></textarea>
+          <p id="note-status" class="muted note-status"></p>
+        </section>
+      </div>
     </main>
 
     <div id="toast" class="toast hidden" role="status"></div>

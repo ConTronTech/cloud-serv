@@ -5,6 +5,7 @@
 #include "http/middleware.h"
 #include "routes/auth.h"
 #include "routes/files.h"
+#include "routes/notes.h"
 #include "routes/static_files.h"
 #include "security/rate_limiter.h"
 #include "security/sanitizer.h"
@@ -108,6 +109,7 @@ int main(int argc, char* argv[]) {
         });
         routes::registerAuthRoutes(app, db, sessionSeconds);
         routes::registerFileRoutes(app, db, store);
+        routes::registerNoteRoutes(app, db);
 
         // Serve the PWA (same-origin with the API).
         std::string web_dir = config.get("env", "WEB_DIR", "web");
@@ -127,6 +129,11 @@ int main(int argc, char* argv[]) {
         utils::Logger::get_instance().info("  GET    /api/files");
         utils::Logger::get_instance().info("  GET    /api/files/<id>         (download)");
         utils::Logger::get_instance().info("  DELETE /api/files/<id>");
+        utils::Logger::get_instance().info("  GET    /api/notes");
+        utils::Logger::get_instance().info("  POST   /api/notes");
+        utils::Logger::get_instance().info("  GET    /api/notes/<id>");
+        utils::Logger::get_instance().info("  PUT    /api/notes/<id>");
+        utils::Logger::get_instance().info("  DELETE /api/notes/<id>");
         utils::Logger::get_instance().info("Press Ctrl+C to stop");
 
         // 10. Run server on its own thread

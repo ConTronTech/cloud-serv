@@ -100,7 +100,42 @@ img { max-width: 100%; }
 .topbar-right { display: flex; align-items: center; gap: 0.75rem; }
 .who { color: var(--muted); font-size: 0.85rem; max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Tab bar */
+.tabbar {
+  display: flex; gap: 0.4rem;
+  max-width: 780px; margin: 0 auto; padding: 0.6rem 1.1rem 0;
+}
+.navbtn {
+  flex: 1; font: inherit; font-weight: 600; cursor: pointer;
+  background: var(--panel); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 10px; padding: 0.55rem;
+}
+.navbtn.active { color: var(--accent); border-color: var(--accent); }
+
 .content { max-width: 780px; margin: 0 auto; padding: 1.1rem; }
+
+/* Notes */
+.note-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.note-card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 0.8rem 0.95rem; cursor: pointer;
+  transition: border-color 0.15s;
+}
+.note-card:hover { border-color: var(--accent); }
+.note-card .note-t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-card .note-d { color: var(--muted); font-size: 0.78rem; margin-top: 0.2rem; }
+
+.editor-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
+.editor-actions { display: flex; gap: 0.4rem; }
+.note-title-input, .note-body-input {
+  width: 100%; font: inherit; color: var(--text);
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 0.7rem 0.85rem; margin-bottom: 0.6rem;
+}
+.note-title-input { font-size: 1.1rem; font-weight: 600; }
+.note-body-input { min-height: 45vh; resize: vertical; line-height: 1.5; }
+.note-title-input:focus, .note-body-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.note-status { min-height: 1.2em; }
 
 .dropzone {
   border: 2px dashed var(--border);

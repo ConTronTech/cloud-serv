@@ -52,6 +52,14 @@ public:
     std::optional<FileMeta> getFile(int64_t userId, int64_t fileId);
     bool deleteFile(int64_t userId, int64_t fileId);
 
+    // ---- Notes ----
+    int64_t createNote(int64_t userId, const std::string& title, const std::string& body);
+    std::vector<Note> listNotes(int64_t userId);              // summaries (no body)
+    std::optional<Note> getNote(int64_t userId, int64_t noteId);
+    bool updateNote(int64_t userId, int64_t noteId,
+                    const std::string& title, const std::string& body);
+    bool deleteNote(int64_t userId, int64_t noteId);
+
 private:
     std::string dbPath_;
     mutable std::shared_mutex db_mutex_;  // reads: shared_lock, writes: unique_lock

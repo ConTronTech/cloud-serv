@@ -28,3 +28,22 @@ json FileMeta::toJson() const {
         {"createdAt", created_at}
     };
 }
+
+json Note::toJson() const {
+    return {
+        {"id", id},
+        {"title", title},
+        {"body", body},
+        {"createdAt", created_at},
+        {"updatedAt", updated_at}
+    };
+}
+
+json Note::toSummaryJson() const {
+    return {
+        {"id", id},
+        {"title", title},
+        {"createdAt", created_at},
+        {"updatedAt", updated_at}
+    };
+}

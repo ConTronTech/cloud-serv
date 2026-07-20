@@ -43,3 +43,17 @@ struct FileMeta {
 
     json toJson() const;
 };
+
+struct Note {
+    int64_t id = 0;
+    int64_t user_id = 0;
+    std::string title;
+    std::string body;
+    std::string created_at;
+    std::string updated_at;
+
+    // Full view (with body).
+    json toJson() const;
+    // List view (title + timestamps, no body) for lighter list responses.
+    json toSummaryJson() const;
+};

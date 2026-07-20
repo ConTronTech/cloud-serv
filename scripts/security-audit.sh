@@ -51,6 +51,11 @@ UP=$(curl -s -X POST $API/api/files -H "authorization: Bearer $T1" -H "X-Filenam
 FID=$(printf '%s' "$UP" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
 want "bob cannot download alice's file" "not found" "$(curl -s $API/api/files/$FID -H "authorization: Bearer $T2")"
 want "bob cannot delete alice's file"   "not found" "$(curl -s -X DELETE $API/api/files/$FID -H "authorization: Bearer $T2")"
+NOTE=$(curl -s -X POST $API/api/notes -H "authorization: Bearer $T1" -d '{"title":"private","body":"secret"}')
+NID=$(printf '%s' "$NOTE" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+want "bob cannot read alice's note"   "not found" "$(curl -s $API/api/notes/$NID -H "authorization: Bearer $T2")"
+want "bob cannot update alice's note" "not found" "$(curl -s -X PUT $API/api/notes/$NID -H "authorization: Bearer $T2" -d '{"title":"hax"}')"
+want "bob cannot delete alice's note" "not found" "$(curl -s -X DELETE $API/api/notes/$NID -H "authorization: Bearer $T2")"
 
 echo "== Auth bypass =="
 want "no creds"        "unauthorized" "$(curl -s $API/api/files)"

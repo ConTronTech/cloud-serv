@@ -12,7 +12,7 @@ Security-audited (see `scripts/security-audit.sh`).
 Roadmap:
 1. ✅ Backend: multi-user auth (sessions + API keys) + files.
 2. ✅ Web PWA client (browser + Linux install + Android home-screen app).
-3. ⬜ Modules: notes → contacts → calendar.
+3. 🚧 Suite modules: ✅ notes → ⬜ contacts → ⬜ calendar.
 4. ⬜ Tailscale remote access + HTTPS (front with a reverse proxy).
 5. ⬜ (Optional) native Android app.
 
@@ -85,6 +85,11 @@ so it never touches your real data.
 | GET    | `/api/files`             | yes  | List your files                           |
 | GET    | `/api/files/<id>`        | yes  | Download (streamed)                       |
 | DELETE | `/api/files/<id>`        | yes  | Delete                                    |
+| GET    | `/api/notes`             | yes  | List notes (summaries)                    |
+| POST   | `/api/notes`             | yes  | Create note `{title?,body?}`              |
+| GET    | `/api/notes/<id>`        | yes  | Read note (full)                          |
+| PUT    | `/api/notes/<id>`        | yes  | Update note                               |
+| DELETE | `/api/notes/<id>`        | yes  | Delete note                               |
 
 Authenticate with **either** `Authorization: Bearer <session-token>` (web login)
 **or** `X-API-Key: <key>` (programmatic clients).
@@ -123,7 +128,7 @@ include/ src/
                sanitizer, validator
   db/          CloudDB (sqlite3 C API; shared_mutex read-many/write-one), models
   storage/     FileStore (per-user blobs on disk)
-  routes/      auth.cpp (accounts + keys), files.cpp, static_files.cpp (PWA)
+  routes/      auth.cpp (accounts + keys), files.cpp, notes.cpp, static_files.cpp (PWA)
   main.cpp     bootstrap
 web/           the PWA (index.html, app.js, style.css, manifest, sw.js)
 scripts/       security-audit.sh (attack + regression battery)

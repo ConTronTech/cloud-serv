@@ -70,6 +70,7 @@ function showApp(user) {
   $("auth-view").classList.add("hidden");
   $("app-view").classList.remove("hidden");
   $("who").textContent = user ? (user.displayName || user.email) : "";
+  switchTab("files"); // always land on Files
   loadFiles();
 }
 
@@ -304,6 +305,99 @@ function wireDropzone() {
   });
 }
 
+// ---- notes ----
+let editingNoteId = null;
+
+function switchTab(tab) {
+  const files = tab === "files";
+  $("nav-files").classList.toggle("active", files);
+  $("nav-notes").classList.toggle("active", !files);
+  $("files-tab").classList.toggle("hidden", !files);
+  $("notes-tab").classList.toggle("hidden", files);
+  if (!files) { showNotesList(); loadNotes(); }
+}
+
+function showNotesList() {
+  $("note-editor").classList.add("hidden");
+  $("notes-list-view").classList.remove("hidden");
+}
+function showNoteEditor() {
+  $("notes-list-view").classList.add("hidden");
+  $("note-editor").classList.remove("hidden");
+  $("note-status").textContent = "";
+}
+
+async function loadNotes() {
+  const { ok, status, body } = await api("/api/notes", { headers: authHeaders() });
+  if (status === 401) { token = ""; localStorage.removeItem(TOKEN_KEY); showAuth(); return; }
+  if (!ok || !body) { toast("Could not load notes."); return; }
+  const list = $("note-list");
+  list.textContent = "";
+  const notes = body.notes || [];
+  $("notes-empty").classList.toggle("hidden", notes.length > 0);
+  for (const n of notes) list.appendChild(noteCard(n));
+}
+
+function noteCard(n) {
+  const li = document.createElement("li");
+  li.className = "note-card";
+  const t = document.createElement("div");
+  t.className = "note-t";
+  t.textContent = n.title && n.title.trim() ? n.title : "Untitled"; // textContent — safe
+  const d = document.createElement("div");
+  d.className = "note-d";
+  d.textContent = "Edited " + fmtDate(n.updatedAt);
+  li.append(t, d);
+  li.addEventListener("click", () => openNote(n.id));
+  return li;
+}
+
+async function openNote(id) {
+  const { ok, body } = await api("/api/notes/" + id, { headers: authHeaders() });
+  if (!ok || !body || !body.note) { toast("Could not open note."); return; }
+  editingNoteId = body.note.id;
+  $("note-title").value = body.note.title || ""; // .value — safe, never parsed as HTML
+  $("note-body").value = body.note.body || "";
+  $("note-delete").classList.remove("hidden");
+  showNoteEditor();
+}
+
+function newNote() {
+  editingNoteId = null;
+  $("note-title").value = "";
+  $("note-body").value = "";
+  $("note-delete").classList.add("hidden");
+  showNoteEditor();
+  $("note-title").focus();
+}
+
+async function saveNote() {
+  const payload = JSON.stringify({ title: $("note-title").value, body: $("note-body").value });
+  const path = editingNoteId ? "/api/notes/" + editingNoteId : "/api/notes";
+  const { ok, body } = await api(path, {
+    method: editingNoteId ? "PUT" : "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: payload,
+  });
+  if (!ok || !body || !body.note) {
+    $("note-status").textContent = prettyError(body) || "Save failed";
+    return;
+  }
+  editingNoteId = body.note.id;
+  $("note-delete").classList.remove("hidden");
+  $("note-status").textContent = "Saved ✔";
+}
+
+async function deleteCurrentNote() {
+  if (!editingNoteId) { showNotesList(); return; }
+  if (!confirm("Delete this note?")) return;
+  const { ok } = await api("/api/notes/" + editingNoteId, { method: "DELETE", headers: authHeaders() });
+  if (!ok) { toast("Delete failed."); return; }
+  editingNoteId = null;
+  showNotesList();
+  loadNotes();
+}
+
 // ---- boot ----
 async function boot() {
   $("tab-login").addEventListener("click", () => setMode("login"));
@@ -314,6 +408,15 @@ async function boot() {
   $("pick").addEventListener("click", () => $("file-input").click());
   $("file-input").addEventListener("change", (e) => uploadFiles(e.target.files));
   wireDropzone();
+
+  // notes
+  $("nav-files").addEventListener("click", () => switchTab("files"));
+  $("nav-notes").addEventListener("click", () => switchTab("notes"));
+  $("new-note").addEventListener("click", newNote);
+  $("note-back").addEventListener("click", () => { showNotesList(); loadNotes(); });
+  $("note-save").addEventListener("click", saveNote);
+  $("note-delete").addEventListener("click", deleteCurrentNote);
+
   setMode("login");
 
   if (token) {
