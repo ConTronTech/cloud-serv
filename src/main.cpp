@@ -15,18 +15,11 @@
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <iostream>
-#include <csignal>
 #include <atomic>
 #include <thread>
 #include <chrono>
-
-static std::atomic<bool> shutdown_requested{false};
-
-static void signal_handler(int signal) {
-    if (signal == SIGINT || signal == SIGTERM) {
-        shutdown_requested.store(true);
-    }
-}
+#include <mutex>
+#include <condition_variable>
 
 int main(int argc, char* argv[]) {
     std::string config_file = "config.env";
@@ -65,11 +58,9 @@ int main(int argc, char* argv[]) {
             rateLimiter.setTrustedProxies(proxies);
         }
 
-        // 4. Signal handlers
-        std::signal(SIGINT, signal_handler);
-        std::signal(SIGTERM, signal_handler);
-
-        // 5. Crow app + middleware
+        // 4. Crow app + middleware
+        //    Crow installs its own SIGINT/SIGTERM handlers (signals_ defaults to
+        //    {SIGINT, SIGTERM}); app.run() returns cleanly when Ctrl+C is pressed.
         crow::App<http::SecurityMiddleware> app;
         http::SecurityMiddleware::rate_limiter = &rateLimiter;
         // Cloud stores media, so allow large bodies by default (256 MB).
@@ -136,33 +127,49 @@ int main(int argc, char* argv[]) {
         utils::Logger::get_instance().info("  DELETE /api/notes/<id>");
         utils::Logger::get_instance().info("Press Ctrl+C to stop");
 
-        // 10. Run server on its own thread
-        std::thread server_thread([&]() {
-            try {
-                app.loglevel(crow::LogLevel::Warning);
-                app.port(static_cast<uint16_t>(port)).multithreaded().run();
-            } catch (const std::exception& e) {
-                utils::Logger::get_instance().error("Server error: " + std::string(e.what()));
+        // 10. Periodic maintenance (purge expired sessions + idle rate buckets)
+        //     runs in the background on an interruptible 1s tick, so shutdown is
+        //     immediate rather than waiting out a sleep.
+        std::atomic<bool> running{true};
+        std::mutex mtx;
+        std::condition_variable cv;
+        std::thread maintenance([&]() {
+            int counter = 0;
+            while (running.load()) {
+                {
+                    std::unique_lock<std::mutex> lk(mtx);
+                    cv.wait_for(lk, std::chrono::seconds(1), [&] { return !running.load(); });
+                }
+                if (!running.load()) break;
+                if (++counter >= 300) {
+                    counter = 0;
+                    rateLimiter.cleanupOldClients();
+                    int purged = db.purgeExpiredSessions();
+                    if (purged > 0)
+                        utils::Logger::get_instance().info("Purged " + std::to_string(purged) + " expired sessions");
+                }
             }
         });
 
-        // 11. Periodic maintenance: purge expired sessions + idle rate buckets.
-        int cleanup_counter = 0;
-        while (!shutdown_requested.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (++cleanup_counter >= 300) {
-                cleanup_counter = 0;
-                rateLimiter.cleanupOldClients();
-                int purged = db.purgeExpiredSessions();
-                if (purged > 0)
-                    utils::Logger::get_instance().info("Purged " + std::to_string(purged) + " expired sessions");
-            }
+        // 11. Run the server. Blocks here until SIGINT/SIGTERM (Crow's own signal
+        //     handling stops the io_context and run() returns) — that's the clean
+        //     Ctrl+C path.
+        app.loglevel(crow::LogLevel::Warning);
+        try {
+            app.port(static_cast<uint16_t>(port)).multithreaded().run();
+        } catch (const std::exception& e) {
+            utils::Logger::get_instance().error("Server error: " + std::string(e.what()));
         }
 
-        // 12. Graceful shutdown
+        // 12. Graceful shutdown — always stop + join the maintenance thread,
+        //     even if run() threw (otherwise ~thread would std::terminate).
         utils::Logger::get_instance().info("Shutting down...");
-        app.stop();
-        if (server_thread.joinable()) server_thread.join();
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            running.store(false);
+        }
+        cv.notify_all();
+        if (maintenance.joinable()) maintenance.join();
         utils::Logger::get_instance().info("Server stopped");
 
     } catch (const std::exception& e) {
