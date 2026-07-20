@@ -19,6 +19,14 @@ void registerStaticRoutes(crow::App<http::SecurityMiddleware>& app,
     ([webDir](const crow::request&, crow::response& res, std::string name) {
         // set_static_file_info sanitizes the path (blocks traversal / device names).
         res.set_static_file_info(webDir + "/" + name);
+        // Crow doesn't know .webmanifest -> defaults to text/plain. Set the
+        // correct type so browsers treat it as a PWA manifest.
+        auto endsWith = [&](const std::string& suf) {
+            return name.size() >= suf.size() &&
+                   name.compare(name.size() - suf.size(), suf.size(), suf) == 0;
+        };
+        if (endsWith(".webmanifest"))
+            res.set_header("Content-Type", "application/manifest+json");
         res.end();
     });
 }

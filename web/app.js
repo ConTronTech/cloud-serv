@@ -211,38 +211,84 @@ async function deleteFile(f) {
 }
 
 // ---- upload ----
+const UPLOAD_CONCURRENCY = 3;   // parallel uploads; keeps us under the rate limit
+const UPLOAD_MAX_ATTEMPTS = 6;  // retries on 429 before giving up
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Upload one file, retrying with backoff if the server rate-limits us (429).
+async function uploadOne(file, state) {
+  for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
+    let res;
+    try {
+      res = await fetch(API + "/api/files", {
+        method: "POST",
+        headers: authHeaders({
+          "X-Filename": encodeURIComponent(file.name), // ASCII-safe header
+          "Content-Type": file.type || "application/octet-stream",
+        }),
+        body: file,
+      });
+    } catch {
+      state.textContent = "Network error";
+      return false;
+    }
+
+    if (res.ok) return true;
+
+    if (res.status === 429 && attempt < UPLOAD_MAX_ATTEMPTS) {
+      // Back off and retry — a bulk upload paces itself instead of failing.
+      const wait = Math.min(500 * attempt, 3000);
+      state.textContent = `Waiting… (busy, retry ${attempt})`;
+      await sleep(wait);
+      continue;
+    }
+    if (res.status === 401) { token = ""; localStorage.removeItem(TOKEN_KEY); showAuth(); return false; }
+
+    let body = null;
+    try { body = await res.json(); } catch { /* ignore */ }
+    state.textContent = prettyError(body) || `Failed (${res.status})`;
+    return false;
+  }
+  return false;
+}
+
 async function uploadFiles(fileList) {
   const files = Array.from(fileList);
   if (!files.length) return;
   const box = $("uploads");
 
-  for (const file of files) {
+  // Build a row per file up front so progress is visible immediately.
+  const jobs = files.map((file) => {
     const row = document.createElement("div");
     row.className = "upload-row";
     const label = document.createElement("span");
     label.textContent = file.name; // textContent — safe
     const state = document.createElement("span");
-    state.textContent = "Uploading…";
+    state.textContent = "Queued…";
     row.append(label, state);
     box.appendChild(row);
+    return { file, row, state };
+  });
 
-    const { ok, body } = await api("/api/files", {
-      method: "POST",
-      headers: authHeaders({
-        "X-Filename": encodeURIComponent(file.name), // ASCII-safe header
-        "Content-Type": file.type || "application/octet-stream",
-      }),
-      body: file,
-    });
-
-    if (ok) {
-      state.textContent = "Done ✔";
-      setTimeout(() => row.remove(), 1500);
-    } else {
-      row.classList.add("err");
-      state.textContent = prettyError(body) || "Failed";
+  // Worker pool: at most UPLOAD_CONCURRENCY uploads in flight at once.
+  let next = 0;
+  async function worker() {
+    while (next < jobs.length) {
+      const j = jobs[next++];
+      j.state.textContent = "Uploading…";
+      const ok = await uploadOne(j.file, j.state);
+      if (ok) {
+        j.state.textContent = "Done ✔";
+        setTimeout(() => j.row.remove(), 1500);
+      } else {
+        j.row.classList.add("err");
+      }
     }
   }
+  await Promise.all(
+    Array.from({ length: Math.min(UPLOAD_CONCURRENCY, jobs.length) }, worker)
+  );
   loadFiles();
 }
 
