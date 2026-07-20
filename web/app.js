@@ -71,7 +71,7 @@ function showApp(user) {
   $("app-view").classList.remove("hidden");
   $("who").textContent = user ? (user.displayName || user.email) : "";
   switchTab("files"); // always land on Files
-  loadFiles();
+  loadFs(0);
 }
 
 // ---- auth ----
@@ -137,70 +137,122 @@ async function logout() {
 }
 
 // ---- files ----
-async function loadFiles() {
-  const { ok, status, body } = await api("/api/files", { headers: authHeaders() });
-  if (status === 401) { token = ""; localStorage.removeItem(TOKEN_KEY); showAuth(); return; }
-  if (!ok || !body) { toast("Could not load files."); return; }
+// ---- file manager (folders) ----
+let currentFolder = 0; // 0 = root
 
-  const list = $("file-list");
+async function loadFs(folderId) {
+  currentFolder = folderId;
+  const { ok, status, body } = await api("/api/fs?folder=" + folderId, { headers: authHeaders() });
+  if (status === 401) { sessionExpired(); return; }
+  if (!ok || !body) { toast("Could not load folder."); return; }
+  renderBreadcrumbs($("breadcrumbs"), body.breadcrumbs || [], (id) => loadFs(id));
+  const list = $("fs-list");
   list.textContent = "";
+  const folders = body.folders || [];
   const files = body.files || [];
-  $("empty").classList.toggle("hidden", files.length > 0);
-
+  $("fs-empty").classList.toggle("hidden", folders.length + files.length > 0);
+  for (const f of folders) list.appendChild(folderRow(f));
   for (const f of files) list.appendChild(fileRow(f));
+}
+
+function renderBreadcrumbs(el, crumbs, onNav) {
+  el.textContent = "";
+  const home = document.createElement("button");
+  home.className = "crumb"; home.type = "button"; home.textContent = "🏠";
+  home.addEventListener("click", () => onNav(0));
+  el.appendChild(home);
+  for (const c of crumbs) {
+    const sep = document.createElement("span");
+    sep.className = "crumb-sep"; sep.textContent = "›";
+    el.appendChild(sep);
+    const b = document.createElement("button");
+    b.className = "crumb"; b.type = "button";
+    b.textContent = c.name; // textContent — safe
+    b.addEventListener("click", () => onNav(c.id));
+    el.appendChild(b);
+  }
+}
+
+// A single "•••" actions button (bullets render everywhere, unlike glyph icons).
+function menuButton(kind, item) {
+  const b = document.createElement("button");
+  b.className = "btn ghost small menu-btn"; b.type = "button";
+  b.textContent = "•••"; b.setAttribute("aria-label", "Actions");
+  b.addEventListener("click", (e) => { e.stopPropagation(); openActions(kind, item); });
+  return b;
+}
+
+function folderRow(f) {
+  const li = document.createElement("li");
+  li.className = "fs-item";
+  const ic = document.createElement("div");
+  ic.className = "file-ic clickable"; ic.textContent = "📁";
+  ic.addEventListener("click", () => loadFs(f.id));
+  const meta = document.createElement("div");
+  meta.className = "file-meta clickable";
+  const name = document.createElement("div");
+  name.className = "file-name"; name.textContent = f.name; name.title = f.name;
+  const sub = document.createElement("div");
+  sub.className = "file-sub"; sub.textContent = "Folder";
+  meta.append(name, sub);
+  meta.addEventListener("click", () => loadFs(f.id));
+  const actions = document.createElement("div");
+  actions.className = "file-actions";
+  actions.append(menuButton("folder", f));
+  li.append(ic, meta, actions);
+  return li;
 }
 
 function fileRow(f) {
   const li = document.createElement("li");
-  li.className = "file-item";
-
+  li.className = "fs-item";
   const ic = document.createElement("div");
-  ic.className = "file-ic";
-  ic.textContent = iconFor(f.mime);
-
+  ic.className = "file-ic clickable"; ic.textContent = iconFor(f.mime);
   const meta = document.createElement("div");
-  meta.className = "file-meta";
+  meta.className = "file-meta clickable";
   const name = document.createElement("div");
-  name.className = "file-name";
-  name.textContent = decodeName(f.name); // XSS-safe: textContent
-  name.title = decodeName(f.name);
-  if (isPreviewable(f.mime)) {
-    name.classList.add("clickable");
-    name.addEventListener("click", () => openPreview(f));
-  }
+  name.className = "file-name"; name.textContent = decodeName(f.name); name.title = decodeName(f.name);
   const sub = document.createElement("div");
-  sub.className = "file-sub";
-  sub.textContent = `${fmtSize(f.size)} · ${fmtDate(f.createdAt)}`;
+  sub.className = "file-sub"; sub.textContent = `${fmtSize(f.size)} · ${fmtDate(f.createdAt)}`;
   meta.append(name, sub);
-
+  // Tap a file: preview media, otherwise show its actions.
+  const onTap = () => (isPreviewable(f.mime) ? openPreview(f) : openActions("file", f));
+  ic.addEventListener("click", onTap);
+  meta.addEventListener("click", onTap);
   const actions = document.createElement("div");
   actions.className = "file-actions";
-
-  if (isPreviewable(f.mime)) {
-    const pv = document.createElement("button");
-    pv.className = "btn ghost small";
-    pv.type = "button";
-    pv.innerHTML = "▶ <span>Open</span>";
-    pv.addEventListener("click", () => openPreview(f));
-    actions.append(pv);
-  }
-
-  const dl = document.createElement("button");
-  dl.className = "btn ghost small";
-  dl.type = "button";
-  dl.innerHTML = "⬇ <span>Download</span>";
-  dl.addEventListener("click", () => downloadFile(f));
-
-  const del = document.createElement("button");
-  del.className = "btn ghost small";
-  del.type = "button";
-  del.innerHTML = "🗑 <span>Delete</span>";
-  del.addEventListener("click", () => deleteFile(f));
-
-  actions.append(dl, del);
+  actions.append(menuButton("file", f));
   li.append(ic, meta, actions);
   return li;
 }
+
+// ---- per-item action sheet ----
+function openActions(kind, item) {
+  const list = $("action-list");
+  list.textContent = "";
+  $("action-title").textContent = kind === "folder" ? item.name : decodeName(item.name);
+  const add = (label, fn, danger) => {
+    const b = document.createElement("button");
+    b.className = "action-item" + (danger ? " danger" : "");
+    b.type = "button"; b.textContent = label;
+    b.addEventListener("click", () => { closeActions(); fn(); });
+    list.appendChild(b);
+  };
+  if (kind === "folder") {
+    add("Open", () => loadFs(item.id));
+    add("Rename", () => renameFolder(item));
+    add("Move", () => openMove("folder", item));
+    add("Delete", () => deleteFolder(item), true);
+  } else {
+    if (isPreviewable(item.mime)) add("Open / preview", () => openPreview(item));
+    add("Download", () => downloadFile(item));
+    add("Rename", () => renameFileItem(item));
+    add("Move", () => openMove("file", item));
+    add("Delete", () => deleteFile(item), true);
+  }
+  $("action-modal").classList.remove("hidden");
+}
+function closeActions() { $("action-modal").classList.add("hidden"); }
 
 async function downloadFile(f) {
   const res = await fetch(API + "/api/files/" + f.id, { headers: authHeaders() });
@@ -208,11 +260,8 @@ async function downloadFile(f) {
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url;
-  a.download = decodeName(f.name); // client controls the saved filename
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  a.href = url; a.download = decodeName(f.name);
+  document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
 
@@ -220,8 +269,107 @@ async function deleteFile(f) {
   if (!confirm(`Delete "${decodeName(f.name)}"?`)) return;
   const { ok } = await api("/api/files/" + f.id, { method: "DELETE", headers: authHeaders() });
   if (!ok) { toast("Delete failed."); return; }
-  toast("Deleted.");
-  loadFiles();
+  loadFs(currentFolder);
+}
+
+// ---- folder + file operations ----
+async function newFolder() {
+  const name = prompt("New folder name:");
+  if (name == null || !name.trim()) return;
+  const { ok, body } = await api("/api/folders", {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ parentId: currentFolder, name: name.trim() }),
+  });
+  if (!ok) { toast(prettyError(body) || "Could not create folder"); return; }
+  loadFs(currentFolder);
+}
+
+async function renameFolder(f) {
+  const name = prompt("Rename folder:", f.name);
+  if (name == null || !name.trim() || name.trim() === f.name) return;
+  const { ok } = await api("/api/folders/" + f.id, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  if (!ok) { toast("Rename failed"); return; }
+  loadFs(currentFolder);
+}
+
+async function deleteFolder(f) {
+  if (!confirm(`Delete folder "${f.name}" and everything inside it?`)) return;
+  const { ok } = await api("/api/folders/" + f.id, { method: "DELETE", headers: authHeaders() });
+  if (!ok) { toast("Delete failed"); return; }
+  loadFs(currentFolder);
+}
+
+async function renameFileItem(f) {
+  const cur = decodeName(f.name);
+  const name = prompt("Rename file:", cur);
+  if (name == null || !name.trim() || name.trim() === cur) return;
+  const { ok } = await api("/api/files/" + f.id, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  if (!ok) { toast("Rename failed"); return; }
+  loadFs(currentFolder);
+}
+
+// ---- move modal (folder picker) ----
+let moveTarget = null;       // { kind: "file" | "folder", item }
+let moveCurrentFolder = 0;
+
+function openMove(kind, item) {
+  moveTarget = { kind, item };
+  moveCurrentFolder = 0;
+  $("move-modal").classList.remove("hidden");
+  loadMoveFs(0);
+}
+function closeMove() { $("move-modal").classList.add("hidden"); moveTarget = null; }
+
+async function loadMoveFs(folderId) {
+  moveCurrentFolder = folderId;
+  const { ok, body } = await api("/api/fs?folder=" + folderId, { headers: authHeaders() });
+  if (!ok || !body) { toast("Could not load folders."); return; }
+  renderBreadcrumbs($("move-breadcrumbs"), body.breadcrumbs || [], (id) => loadMoveFs(id));
+  const list = $("move-list");
+  list.textContent = "";
+  // Can't move a folder into itself.
+  const skipId = moveTarget && moveTarget.kind === "folder" ? moveTarget.item.id : null;
+  const subs = (body.folders || []).filter((f) => f.id !== skipId);
+  if (!subs.length) {
+    const p = document.createElement("li");
+    p.className = "muted move-empty"; p.textContent = "No subfolders here.";
+    list.appendChild(p);
+  }
+  for (const f of subs) {
+    const li = document.createElement("li");
+    li.className = "fs-item clickable";
+    const ic = document.createElement("div"); ic.className = "file-ic"; ic.textContent = "📁";
+    const meta = document.createElement("div"); meta.className = "file-meta";
+    const name = document.createElement("div"); name.className = "file-name"; name.textContent = f.name;
+    meta.append(name);
+    li.append(ic, meta);
+    li.addEventListener("click", () => loadMoveFs(f.id));
+    list.appendChild(li);
+  }
+}
+
+async function doMove() {
+  if (!moveTarget) return;
+  const { kind, item } = moveTarget;
+  const path = kind === "file" ? "/api/files/" + item.id : "/api/folders/" + item.id;
+  const payload = kind === "file" ? { folderId: moveCurrentFolder } : { parentId: moveCurrentFolder };
+  const { ok, body } = await api(path, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  if (!ok) { toast(prettyError(body) || "Move failed"); return; }
+  closeMove();
+  loadFs(currentFolder);
 }
 
 // ---- preview / playback ----
@@ -277,6 +425,7 @@ async function uploadDirect(file, state) {
         method: "POST",
         headers: authHeaders({
           "X-Filename": encodeURIComponent(file.name), // ASCII-safe header
+          "X-Folder": String(currentFolder),
           "Content-Type": file.type || "application/octet-stream",
         }),
         body: file,
@@ -309,7 +458,7 @@ async function uploadChunked(file, state) {
     initRes = await fetch(API + "/api/uploads/init", {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size }),
+      body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, folderId: currentFolder }),
     });
   } catch { state.textContent = "Network error"; return false; }
   if (initRes.status === 401) { sessionExpired(); return false; }
@@ -396,7 +545,7 @@ async function uploadFiles(fileList) {
   await Promise.all(
     Array.from({ length: Math.min(UPLOAD_CONCURRENCY, jobs.length) }, worker)
   );
-  loadFiles();
+  loadFs(currentFolder);
 }
 
 // ---- drag & drop (folder-aware) ----
@@ -546,10 +695,19 @@ async function boot() {
   $("tab-register").addEventListener("click", () => setMode("register"));
   $("auth-form").addEventListener("submit", onAuthSubmit);
   $("logout").addEventListener("click", logout);
-  $("refresh").addEventListener("click", loadFiles);
+  $("new-folder").addEventListener("click", newFolder);
   $("pick").addEventListener("click", () => $("file-input").click());
   $("file-input").addEventListener("change", (e) => uploadFiles(e.target.files));
   wireDropzone();
+
+  // move modal
+  $("move-close").addEventListener("click", closeMove);
+  $("move-here").addEventListener("click", doMove);
+  $("move-modal").addEventListener("click", (e) => { if (e.target.id === "move-modal") closeMove(); });
+
+  // action sheet
+  $("action-close").addEventListener("click", closeActions);
+  $("action-modal").addEventListener("click", (e) => { if (e.target.id === "action-modal") closeActions(); });
 
   // notes
   $("nav-files").addEventListener("click", () => switchTab("files"));
@@ -562,7 +720,7 @@ async function boot() {
   // preview modal
   $("preview-close").addEventListener("click", closePreview);
   $("preview-modal").addEventListener("click", (e) => { if (e.target.id === "preview-modal") closePreview(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePreview(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closePreview(); closeMove(); closeActions(); } });
 
   setMode("login");
 

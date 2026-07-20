@@ -62,27 +62,28 @@
     </nav>
 
     <main class="content">
-      <!-- ===== Files tab ===== -->
+      <!-- ===== Files tab (folder browser) ===== -->
       <div id="files-tab">
+        <div class="fs-toolbar">
+          <nav id="breadcrumbs" class="breadcrumbs" aria-label="Path"></nav>
+          <div class="fs-actions">
+            <button id="new-folder" class="btn ghost small" type="button">📁 New</button>
+            <button id="pick" class="btn primary small" type="button">⬆ Upload</button>
+            <input id="file-input" type="file" multiple hidden />
+          </div>
+        </div>
+
         <section id="dropzone" class="dropzone" aria-label="Upload files">
-          <input id="file-input" type="file" multiple hidden />
           <div class="dz-inner">
             <div class="dz-icon">⬆</div>
-            <p><button id="pick" class="linkbtn" type="button">Choose files</button> or drag &amp; drop</p>
-            <p class="muted">Uploads go straight to your server.</p>
+            <p class="muted">Drop files here to upload into this folder</p>
           </div>
         </section>
 
         <div id="uploads" class="uploads"></div>
 
-        <section class="files">
-          <div class="files-head">
-            <h2>Your files</h2>
-            <button id="refresh" class="btn ghost small" type="button">Refresh</button>
-          </div>
-          <ul id="file-list" class="file-list"></ul>
-          <p id="empty" class="muted empty hidden">No files yet. Upload something above.</p>
-        </section>
+        <ul id="fs-list" class="fs-list"></ul>
+        <p id="fs-empty" class="muted empty hidden">This folder is empty.</p>
       </div>
 
       <!-- ===== Notes tab ===== -->
@@ -117,6 +118,32 @@
     <div id="preview-modal" class="modal hidden" role="dialog" aria-modal="true">
       <button id="preview-close" class="modal-close" type="button" aria-label="Close">✕</button>
       <div id="preview-content" class="modal-content"></div>
+    </div>
+
+    <!-- ===== Per-item actions ===== -->
+    <div id="action-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="sheet">
+        <div class="sheet-head">
+          <strong id="action-title" class="action-title"></strong>
+          <button id="action-close" class="btn ghost small" type="button" aria-label="Close">✕</button>
+        </div>
+        <div id="action-list" class="action-list"></div>
+      </div>
+    </div>
+
+    <!-- ===== Move-to folder picker ===== -->
+    <div id="move-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="sheet">
+        <div class="sheet-head">
+          <strong>Move to…</strong>
+          <button id="move-close" class="btn ghost small" type="button" aria-label="Close">✕</button>
+        </div>
+        <nav id="move-breadcrumbs" class="breadcrumbs"></nav>
+        <ul id="move-list" class="fs-list move-list"></ul>
+        <div class="sheet-actions">
+          <button id="move-here" class="btn primary" type="button">Move here</button>
+        </div>
+      </div>
     </div>
   </div>
 

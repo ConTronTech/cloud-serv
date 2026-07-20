@@ -168,7 +168,59 @@ img { max-width: 100%; }
 .file-meta { min-width: 0; flex: 1; }
 .file-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-sub { color: var(--muted); font-size: 0.78rem; }
-.file-actions { display: flex; gap: 0.4rem; flex: none; }
+.file-actions { display: flex; gap: 0.3rem; flex: none; }
+
+/* Folder browser */
+.fs-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+  margin-bottom: 0.75rem; flex-wrap: wrap;
+}
+.fs-actions { display: flex; gap: 0.4rem; flex: none; }
+.breadcrumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 0.15rem; min-width: 0; }
+.crumb {
+  background: none; border: none; cursor: pointer; font: inherit; color: var(--accent);
+  padding: 0.2rem 0.3rem; border-radius: 6px; max-width: 40vw;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.crumb:hover { background: var(--panel-2); }
+.crumb-sep { color: var(--muted); }
+
+.fs-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.fs-item {
+  display: flex; align-items: center; gap: 0.6rem;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 0.6rem 0.7rem;
+}
+.fs-item .file-meta.clickable, .fs-item .file-ic.clickable { cursor: pointer; }
+.fs-item .file-meta { min-width: 0; flex: 1; }
+
+/* Compact icon buttons: show only the glyph on narrow screens */
+.icon-btn { padding: 0.4rem 0.5rem; }
+@media (max-width: 560px) { .icon-btn .btn-label { display: none; } }
+
+/* Bottom-sheet modal (move picker) */
+.sheet {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  background: var(--panel); border-top-left-radius: 16px; border-top-right-radius: 16px;
+  padding: 1rem; padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+  max-height: 80vh; display: flex; flex-direction: column; gap: 0.6rem;
+  box-shadow: 0 -8px 30px rgba(0,0,0,0.3);
+}
+.sheet-head { display: flex; align-items: center; justify-content: space-between; }
+.move-list { overflow-y: auto; }
+.move-empty { padding: 1rem; text-align: center; }
+.sheet-actions { display: flex; justify-content: flex-end; }
+
+.menu-btn { font-weight: 700; letter-spacing: 1px; padding: 0.4rem 0.7rem; }
+.action-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.action-list { display: flex; flex-direction: column; gap: 0.25rem; }
+.action-item {
+  text-align: left; font: inherit; cursor: pointer;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 10px; padding: 0.75rem 0.9rem;
+}
+.action-item:hover { border-color: var(--accent); }
+.action-item.danger { color: var(--danger); }
 
 .toast {
   position: fixed; left: 50%; bottom: calc(1rem + env(safe-area-inset-bottom));
