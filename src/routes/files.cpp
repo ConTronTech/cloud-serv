@@ -101,7 +101,7 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         std::string name = req.get_header_value("X-Filename");
         if (name.empty()) return http::jsonError(400, "missing X-Filename header");
         if (!isValidDisplayName(name)) return http::jsonError(400, "invalid filename");
-        if (req.body.empty()) return http::jsonError(400, "empty body");
+        // Empty (0-byte) files are allowed — a cloud legitimately stores them.
 
         std::string mime = req.get_header_value("Content-Type");
         if (mime.empty() || mime.size() > 255 || hasAnyControlChar(mime))

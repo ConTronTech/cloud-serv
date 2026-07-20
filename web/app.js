@@ -395,15 +395,51 @@ async function uploadFiles(fileList) {
   loadFiles();
 }
 
-// ---- drag & drop ----
+// ---- drag & drop (folder-aware) ----
+// Read every entry from a directory reader (it returns results in batches).
+function readAllEntries(reader) {
+  return new Promise((resolve) => {
+    const all = [];
+    const pump = () => reader.readEntries((batch) => {
+      if (!batch.length) return resolve(all);
+      all.push(...batch);
+      pump();
+    }, () => resolve(all));
+    pump();
+  });
+}
+
+// Recursively collect File objects from a dropped file/folder entry.
+async function collectEntry(entry, out) {
+  if (entry.isFile) {
+    try { out.push(await new Promise((res, rej) => entry.file(res, rej))); } catch { /* skip */ }
+  } else if (entry.isDirectory) {
+    const entries = await readAllEntries(entry.createReader());
+    for (const e of entries) await collectEntry(e, out);
+  }
+}
+
 function wireDropzone() {
   const dz = $("dropzone");
   ["dragenter", "dragover"].forEach((ev) =>
     dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add("drag"); }));
   ["dragleave", "drop"].forEach((ev) =>
     dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove("drag"); }));
-  dz.addEventListener("drop", (e) => {
-    if (e.dataTransfer && e.dataTransfer.files) uploadFiles(e.dataTransfer.files);
+  dz.addEventListener("drop", async (e) => {
+    const dt = e.dataTransfer;
+    if (!dt) return;
+    // Prefer entries (handles dropped folders); fall back to a flat file list.
+    const entries = dt.items
+      ? Array.from(dt.items).map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean)
+      : [];
+    if (entries.length) {
+      const files = [];
+      for (const entry of entries) await collectEntry(entry, files);
+      if (files.length) uploadFiles(files);
+      else toast("Nothing to upload.");
+    } else if (dt.files && dt.files.length) {
+      uploadFiles(dt.files);
+    }
   });
 }
 
