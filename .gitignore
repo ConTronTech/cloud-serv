@@ -1,0 +1,12 @@
+# Build artifacts
+*.o
+cloud_serv
+libs/SQLiteCpp/**/*.o
+
+# Runtime data: SQLite DB (+WAL) and uploaded blobs. Never commit these.
+data/
+*.log
+
+# Local overrides
+config.local.env
+.DS_Store

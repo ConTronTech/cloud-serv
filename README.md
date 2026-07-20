@@ -1,0 +1,110 @@
+# cloud-serv
+
+A self-hosted personal cloud suite (files now; notes / contacts / calendar later),
+built from scratch in **modular C++ (Crow)**. One API server + a shared web client,
+with native apps added later. Runs on your own PC; reachable remotely over Tailscale.
+
+## Status
+
+**Step 1 — walking skeleton (done):** multi-user accounts, API keys, and file
+upload / list / download / delete, all per-user isolated. Verified end-to-end.
+
+Roadmap:
+1. ✅ Backend: multi-user auth (sessions + API keys) + files.
+2. ⬜ Web PWA client (browser + Linux install + Android home-screen app).
+3. ⬜ Modules: notes → contacts → calendar.
+4. ⬜ Tailscale remote access + HTTPS (front with a reverse proxy).
+5. ⬜ (Optional) native Android app.
+
+## Architecture
+
+```
+Web PWA / Android / Linux  →  HTTP/REST  →  API server (C++ / Crow)
+                                              ├── SQLite (metadata: users, keys, files)
+                                              └── Disk   (file blobs, per-user dirs)
+```
+
+Built on reusable security cores (adapted from the project-tracker stack):
+`SecurityMiddleware` (rate limiting, CSRF, CORS, security headers, request
+logging), `Sanitizer`, `Validator`, `RateLimiter` (with trusted-proxy XFF
+resolution). The multi-user layer adds:
+
+- **Accounts** — passwords hashed with **PBKDF2-HMAC-SHA256** (OpenSSL), 200k iterations.
+- **Sessions** — opaque random tokens; only their SHA-256 is stored.
+- **API keys** — `csk_…` keys for programmatic / mobile / CLI use; shown once,
+  stored only as SHA-256, with a display prefix. Revocable.
+- Everything a user owns is scoped by `user_id`; one user can't touch another's data.
+
+## Build & run
+
+Dependencies (Ubuntu/Debian): `libasio-dev` (Crow), `libssl-dev` (crypto),
+`libsqlite3-dev` (database). Crow + nlohmann/json are vendored in `libs/`.
+
+```bash
+make
+./cloud_serv config.env      # listens on http://0.0.0.0:8080
+```
+
+Data (SQLite DB + uploaded blobs) is written under `data/` and is gitignored.
+Configuration lives in `config.env`. Or run in Docker: `docker build -t cloud-serv .`
+
+## API quick reference
+
+| Method | Path                     | Auth | Purpose                                   |
+|--------|--------------------------|------|-------------------------------------------|
+| GET    | `/api/health`            | no   | Liveness check                            |
+| POST   | `/api/auth/register`     | no   | Create account → `{token, user}`          |
+| POST   | `/api/auth/login`        | no   | Log in → `{token, user}`                  |
+| GET    | `/api/auth/me`           | yes  | Current user                              |
+| POST   | `/api/auth/logout`       | yes  | Revoke current session token              |
+| POST   | `/api/auth/api-keys`     | yes  | Create API key (**full key shown once**)  |
+| GET    | `/api/auth/api-keys`     | yes  | List keys (prefixes only)                 |
+| DELETE | `/api/auth/api-keys/<id>`| yes  | Revoke a key                              |
+| POST   | `/api/files`             | yes  | Upload (raw body + `X-Filename` header)   |
+| GET    | `/api/files`             | yes  | List your files                           |
+| GET    | `/api/files/<id>`        | yes  | Download (streamed)                       |
+| DELETE | `/api/files/<id>`        | yes  | Delete                                    |
+
+Authenticate with **either** `Authorization: Bearer <session-token>` (web login)
+**or** `X-API-Key: <key>` (programmatic clients).
+
+## Try it with curl
+
+```bash
+API=localhost:8080
+
+# register (returns a session token)
+TOKEN=$(curl -s $API/api/auth/register -H 'content-type: application/json' \
+  -d '{"email":"me@example.com","password":"supersecret"}' \
+  | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+
+# mint an API key for a device (shown once)
+KEY=$(curl -s -X POST $API/api/auth/api-keys -H "authorization: Bearer $TOKEN" \
+  -d '{"name":"phone"}' | grep -o '"key":"[^"]*"' | cut -d'"' -f4)
+
+# upload a file using the API key
+curl -s -X POST $API/api/files -H "X-API-Key: $KEY" \
+  -H "X-Filename: photo.jpg" -H "content-type: image/jpeg" \
+  --data-binary @photo.jpg
+
+# list, then download id 1
+curl -s $API/api/files -H "X-API-Key: $KEY"
+curl -s $API/api/files/1 -H "X-API-Key: $KEY" -o out.jpg
+```
+
+## Layout
+
+```
+include/ src/
+  core/        config loader
+  http/        SecurityMiddleware (rate limit, CSRF, CORS, headers, logging)
+  security/    crypto (PBKDF2/SHA-256/CSPRNG), request_auth, rate_limiter,
+               sanitizer, validator
+  db/          CloudDB (sqlite3 C API; shared_mutex read-many/write-one), models
+  storage/     FileStore (per-user blobs on disk)
+  routes/      auth.cpp (accounts + keys), files.cpp
+  main.cpp     bootstrap
+libs/          crow, nlohmann/json (vendored)
+schema.sql     reference schema (CloudDB also creates tables at startup)
+config.env     runtime configuration
+```
