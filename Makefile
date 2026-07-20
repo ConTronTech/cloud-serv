@@ -17,6 +17,7 @@ PROJECT_SOURCES = src/main.cpp \
                   src/http/middleware.cpp \
                   src/routes/auth.cpp \
                   src/routes/files.cpp \
+                  src/routes/static_files.cpp \
                   src/security/crypto.cpp \
                   src/security/request_auth.cpp \
                   src/security/rate_limiter.cpp \

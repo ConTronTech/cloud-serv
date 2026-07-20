@@ -6,12 +6,12 @@ with native apps added later. Runs on your own PC; reachable remotely over Tails
 
 ## Status
 
-**Step 1 — walking skeleton (done):** multi-user accounts, API keys, and file
-upload / list / download / delete, all per-user isolated. Verified end-to-end.
+**Steps 1–2 (done):** multi-user backend + an installable web client (PWA).
+Security-audited (see `scripts/security-audit.sh`).
 
 Roadmap:
 1. ✅ Backend: multi-user auth (sessions + API keys) + files.
-2. ⬜ Web PWA client (browser + Linux install + Android home-screen app).
+2. ✅ Web PWA client (browser + Linux install + Android home-screen app).
 3. ⬜ Modules: notes → contacts → calendar.
 4. ⬜ Tailscale remote access + HTTPS (front with a reverse proxy).
 5. ⬜ (Optional) native Android app.
@@ -45,8 +45,29 @@ make
 ./cloud_serv config.env      # listens on http://0.0.0.0:8080
 ```
 
+Then open **http://localhost:8080** — the web client (PWA) is served same-origin
+by the C++ server, so there's no separate build step or CORS setup. On Chrome/Edge
+(desktop or Android) use "Install app" to add it to your home screen / app menu.
+
 Data (SQLite DB + uploaded blobs) is written under `data/` and is gitignored.
 Configuration lives in `config.env`. Or run in Docker: `docker build -t cloud-serv .`
+
+## Web client (PWA)
+
+`web/` is a dependency-free vanilla-JS PWA (no build step): login/register, a
+drag-and-drop file manager (upload, download, delete), and offline app-shell
+caching via a service worker. Filenames are always rendered with `textContent`
+(never `innerHTML`), so a filename can't inject HTML.
+
+## Testing / security
+
+```bash
+make && ./scripts/security-audit.sh   # 16-case attack + regression battery
+```
+
+Covers SQL injection, path traversal (API + static), cross-user IDOR, auth
+bypass, input validation, and logout revocation. Runs on a throwaway DB/port,
+so it never touches your real data.
 
 ## API quick reference
 
@@ -102,8 +123,10 @@ include/ src/
                sanitizer, validator
   db/          CloudDB (sqlite3 C API; shared_mutex read-many/write-one), models
   storage/     FileStore (per-user blobs on disk)
-  routes/      auth.cpp (accounts + keys), files.cpp
+  routes/      auth.cpp (accounts + keys), files.cpp, static_files.cpp (PWA)
   main.cpp     bootstrap
+web/           the PWA (index.html, app.js, style.css, manifest, sw.js)
+scripts/       security-audit.sh (attack + regression battery)
 libs/          crow, nlohmann/json (vendored)
 schema.sql     reference schema (CloudDB also creates tables at startup)
 config.env     runtime configuration

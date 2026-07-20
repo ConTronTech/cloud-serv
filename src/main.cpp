@@ -5,6 +5,7 @@
 #include "http/middleware.h"
 #include "routes/auth.h"
 #include "routes/files.h"
+#include "routes/static_files.h"
 #include "security/rate_limiter.h"
 #include "security/sanitizer.h"
 #include "utils/logger.h"
@@ -107,6 +108,10 @@ int main(int argc, char* argv[]) {
         });
         routes::registerAuthRoutes(app, db, sessionSeconds);
         routes::registerFileRoutes(app, db, store);
+
+        // Serve the PWA (same-origin with the API).
+        std::string web_dir = config.get("env", "WEB_DIR", "web");
+        routes::registerStaticRoutes(app, web_dir);
 
         // 9. Startup banner
         int port = config.get_int("env", "PORT", 8080);
