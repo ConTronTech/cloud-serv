@@ -41,14 +41,30 @@ function decodeName(name) {
   try { return decodeURIComponent(name); } catch { return name; }
 }
 
-function iconFor(mime) {
-  if (!mime) return "📄";
-  if (mime.startsWith("image/")) return "🖼️";
-  if (mime.startsWith("video/")) return "🎬";
-  if (mime.startsWith("audio/")) return "🎵";
-  if (mime.includes("pdf")) return "📕";
-  if (mime.startsWith("text/")) return "📝";
-  if (mime.includes("zip") || mime.includes("tar") || mime.includes("compressed")) return "🗜️";
+function extOf(name) { const i = (name || "").lastIndexOf("."); return i > 0 ? name.slice(i + 1).toLowerCase() : ""; }
+
+// Text-ish extensions we can preview as plain text.
+const TEXT_EXT = new Set(["txt", "md", "markdown", "log", "json", "csv", "xml", "yml", "yaml",
+  "js", "ts", "jsx", "tsx", "py", "c", "cpp", "cc", "h", "hpp", "html", "css", "sh", "ino",
+  "kt", "java", "go", "rs", "rb", "php", "sql", "toml", "ini", "conf"]);
+const ARCHIVE_EXT = new Set(["zip", "tar", "gz", "tgz", "rar", "7z", "xz", "bz2"]);
+
+// A type icon from mime + filename (mime is often generic, so fall back to ext).
+function iconFor(mime, name) {
+  const m = mime || "";
+  if (m.startsWith("image/")) return "🖼️";
+  if (m.startsWith("video/")) return "🎬";
+  if (m.startsWith("audio/")) return "🎵";
+  const e = extOf(name);
+  if (m.includes("pdf") || e === "pdf") return "📕";
+  if (m.includes("zip") || m.includes("compressed") || m.includes("tar") || ARCHIVE_EXT.has(e)) return "🗜️";
+  if (["doc", "docx", "odt", "rtf"].includes(e)) return "📘";
+  if (["xls", "xlsx", "ods", "csv"].includes(e) || m.includes("spreadsheet")) return "📊";
+  if (["ppt", "pptx", "odp"].includes(e) || m.includes("presentation")) return "📙";
+  if (["js", "ts", "jsx", "tsx", "py", "c", "cpp", "cc", "h", "hpp", "java", "rs", "go", "rb",
+       "php", "sh", "html", "css", "xml", "yml", "yaml", "ino", "kt", "swift", "sql"].includes(e) ||
+      m.includes("json") || e === "json") return "💻";
+  if (m.startsWith("text/") || TEXT_EXT.has(e)) return "📝";
   return "📄";
 }
 
@@ -409,8 +425,7 @@ let sortDir = localStorage.getItem("cs_sortdir") || "asc";  // asc | desc
 function rowActivate(li, kind, item) {
   if (selectMode) { toggleSelect(kind, item.id); li.classList.toggle("selected"); return; }
   if (kind === "folder") loadFs(item.id);
-  else if (isPreviewable(item.mime)) openPreview(item);
-  else openActions("file", item);
+  else openPreview(item); // handles media/pdf/text inline, else a download card
 }
 function isSelected(kind, id) { return (kind === "folder" ? selFolders : selFiles).has(id); }
 function toggleSelect(kind, id) {
@@ -591,7 +606,7 @@ function gridCell(kind, item) {
     }
     thumb.appendChild(img);
   } else {
-    thumb.classList.add("is-type"); thumb.textContent = iconFor(item.mime);
+    thumb.classList.add("is-type"); thumb.textContent = iconFor(item.mime, dispName(item));
     if ((item.mime || "").startsWith("video/")) {
       const p = document.createElement("span"); p.className = "play-badge"; p.textContent = "▶";
       thumb.appendChild(p);
@@ -684,7 +699,7 @@ function listRow(kind, item, icText, displayName, modified, size) {
 
 function folderRow(f) { return listRow("folder", f, "📁", dispName(f), fmtDate(f.createdAt), "—"); }
 function fileRow(f) {
-  return listRow("file", f, iconFor(f.mime), dispName(f), fmtDate(f.createdAt), fmtSize(f.size));
+  return listRow("file", f, iconFor(f.mime, dispName(f)), dispName(f), fmtDate(f.createdAt), fmtSize(f.size));
 }
 
 // Sortable column header for list view.
@@ -730,7 +745,7 @@ function openActions(kind, item) {
     add("Move", () => openMove("folder", item));
     add("Delete", () => deleteFolder(item), true);
   } else {
-    if (isPreviewable(item.mime)) add("Open / preview", () => openPreview(item));
+    add("Open", () => openPreview(item));
     add(item.starred ? "★ Unstar" : "☆ Star", () => toggleStar("file", item));
     add("Download", () => downloadFile(item));
     add("Rename", () => renameFileItem(item));
@@ -946,42 +961,75 @@ async function batchDelete() {
 }
 
 // ---- preview / playback ----
-function isPreviewable(mime) { return /^(image|video|audio)\//.test(mime || ""); }
+// What kind of inline preview a file supports (mime is often generic, so also
+// look at the extension).
+function previewKind(mime, name) {
+  const m = mime || "", e = extOf(name);
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("video/")) return "video";
+  if (m.startsWith("audio/")) return "audio";
+  if (m.includes("pdf") || e === "pdf") return "pdf";
+  if (m.startsWith("text/") || TEXT_EXT.has(e)) return "text";
+  return "other"; // no inline preview — show a download card
+}
 
-// Opens media inline using the content endpoint. The <img>/<video>/<audio> src
-// authenticates via the session cookie (no Authorization header possible), and
-// video/audio stream with Range so they seek without downloading the whole file.
 let previewObjectUrl = null; // revoked when the preview closes
+
+function previewCaption(name) {
+  const cap = document.createElement("div");
+  cap.className = "preview-cap";
+  cap.textContent = name; // textContent — safe
+  return cap;
+}
+
+// Info card for types we can't render inline: big icon, name, size, Download.
+function previewCard(file, name) {
+  const card = document.createElement("div"); card.className = "preview-card";
+  const ic = document.createElement("div"); ic.className = "preview-card-icon"; ic.textContent = iconFor(file.mime, name);
+  const nm = document.createElement("div"); nm.className = "preview-card-name"; nm.textContent = name;
+  const meta = document.createElement("div"); meta.className = "preview-card-meta";
+  meta.textContent = "No preview available · " + fmtSize(file.size || 0);
+  const btn = document.createElement("button"); btn.className = "btn primary preview-card-btn";
+  btn.textContent = "⬇ Download";
+  btn.onclick = () => downloadFile(file);
+  card.append(ic, nm, meta, btn);
+  return card;
+}
 
 async function openPreview(file) {
   const modal = $("preview-modal");
   const c = $("preview-content");
-  const mime = file.mime || "";
-  let el;
-  if (mime.startsWith("image/")) el = document.createElement("img");
-  else if (mime.startsWith("video/")) { el = document.createElement("video"); el.controls = true; el.autoplay = true; el.playsInline = true; }
-  else if (mime.startsWith("audio/")) { el = document.createElement("audio"); el.controls = true; el.autoplay = true; }
-  else return;
+  const name = dispName(file);
+  const kind = previewKind(file.mime, name);
 
   c.textContent = "Loading…";
   modal.classList.remove("hidden");
 
-  // E2E: fetch + decrypt into a blob URL (download-then-play). Video/audio load
-  // the whole file into memory for now; streamed decrypt is a later phase.
-  let url;
-  try { url = await objectUrlFor(file); }
-  catch { c.textContent = "Preview failed."; return; }
-  if (modal.classList.contains("hidden")) { URL.revokeObjectURL(url); return; } // closed while loading
+  // Non-renderable types: no fetch, just the download card.
+  if (kind === "other") { c.textContent = ""; c.append(previewCard(file, name)); return; }
 
+  // Everything else needs the decrypted bytes (download-then-view).
+  let bytes;
+  try { bytes = await fetchPlaintext(file); }
+  catch { c.textContent = "Preview failed."; return; }
+  if (modal.classList.contains("hidden")) return; // closed while loading
+
+  if (kind === "text") {
+    const text = new TextDecoder().decode(bytes.subarray(0, 512 * 1024)); // cap huge files
+    const pre = document.createElement("pre"); pre.className = "preview-text"; pre.textContent = text;
+    c.textContent = ""; c.append(pre, previewCaption(name));
+    return;
+  }
+
+  const url = URL.createObjectURL(new Blob([bytes], { type: file.mime || "application/octet-stream" }));
   if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
   previewObjectUrl = url;
-  el.src = url;
-  el.className = "preview-media";
-  const cap = document.createElement("div");
-  cap.className = "preview-cap";
-  cap.textContent = dispName(file); // textContent — safe
-  c.textContent = "";
-  c.append(el, cap);
+  let el;
+  if (kind === "image") { el = document.createElement("img"); el.className = "preview-media"; el.src = url; }
+  else if (kind === "video") { el = document.createElement("video"); el.className = "preview-media"; el.controls = true; el.autoplay = true; el.playsInline = true; el.src = url; }
+  else if (kind === "audio") { el = document.createElement("audio"); el.className = "preview-media"; el.controls = true; el.autoplay = true; el.src = url; }
+  else if (kind === "pdf") { el = document.createElement("iframe"); el.className = "preview-pdf"; el.src = url; }
+  c.textContent = ""; c.append(el, previewCaption(name));
 }
 
 function closePreview() {

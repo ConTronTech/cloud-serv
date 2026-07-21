@@ -433,6 +433,21 @@ img { max-width: 100%; }
 .preview-media { max-width: 92vw; max-height: 82vh; border-radius: 10px; background: #000; }
 audio.preview-media { width: 80vw; max-width: 480px; background: transparent; }
 .preview-cap { color: #fff; font-size: 0.85rem; opacity: 0.9; text-align: center; word-break: break-word; }
+.preview-pdf { width: 92vw; height: 82vh; border: 0; border-radius: 10px; background: #fff; }
+.preview-text {
+  max-width: 92vw; max-height: 82vh; overflow: auto; margin: 0;
+  background: var(--panel-2); color: var(--text); border-radius: 10px;
+  padding: 1rem; font-size: 0.8rem; line-height: 1.45; white-space: pre-wrap; word-break: break-word;
+}
+.preview-card {
+  display: flex; flex-direction: column; align-items: center; gap: 0.6rem;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+  padding: 2rem 2.4rem; max-width: 90vw;
+}
+.preview-card-icon { font-size: 3.4rem; line-height: 1; }
+.preview-card-name { color: var(--text); font-weight: 600; text-align: center; word-break: break-word; max-width: 70vw; }
+.preview-card-meta { color: var(--muted); font-size: 0.85rem; }
+.preview-card-btn { max-width: 240px; margin-top: 0.4rem; }
 .modal-close {
   position: absolute; top: calc(0.8rem + env(safe-area-inset-top)); right: 0.8rem;
   width: 40px; height: 40px; border-radius: 50%; cursor: pointer;
