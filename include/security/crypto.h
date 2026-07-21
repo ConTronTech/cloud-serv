@@ -16,6 +16,10 @@ public:
     // before they touch the database.
     static std::string sha256Hex(const std::string& input);
 
+    // HMAC-SHA256(key, message), lowercase hex. Keyed hash — unlike sha256Hex,
+    // its output can't be recomputed without the key.
+    static std::string hmacSha256Hex(const std::string& key, const std::string& message);
+
     // Hash a password for storage. Format: "pbkdf2$<iters>$<saltHex>$<hashHex>".
     static std::string hashPassword(const std::string& password);
 

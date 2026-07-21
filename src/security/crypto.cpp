@@ -3,6 +3,7 @@
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <openssl/rand.h>
+#include <openssl/hmac.h>
 
 #include <fstream>
 #include <sstream>
@@ -49,6 +50,16 @@ std::string Crypto::sha256Hex(const std::string& input) {
     unsigned char digest[SHA256_DIGEST_LENGTH];
     SHA256(reinterpret_cast<const unsigned char*>(input.data()), input.size(), digest);
     return toHex(digest, SHA256_DIGEST_LENGTH);
+}
+
+std::string Crypto::hmacSha256Hex(const std::string& key, const std::string& message) {
+    unsigned char mac[EVP_MAX_MD_SIZE];
+    unsigned int macLen = 0;
+    HMAC(EVP_sha256(),
+         key.data(), static_cast<int>(key.size()),
+         reinterpret_cast<const unsigned char*>(message.data()), message.size(),
+         mac, &macLen);
+    return toHex(mac, macLen);
 }
 
 std::string Crypto::hashPassword(const std::string& password) {

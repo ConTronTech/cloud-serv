@@ -1,5 +1,6 @@
 #include "db/database.h"
 #include "utils/logger.h"
+#include "security/crypto.h"
 
 #include <sqlite3.h>
 #include <ctime>
@@ -154,6 +155,10 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_uploads_user ON upload_sessions(user_id);
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         )";
         char* err = nullptr;
         if (sqlite3_exec(c.h, schema, nullptr, nullptr, &err) != SQLITE_OK) {
@@ -288,6 +293,28 @@ std::optional<std::string> CloudDB::saltForEmail(const std::string& email) {
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("saltForEmail: " + std::string(e.what()));
         return std::nullopt;
+    }
+}
+
+std::string CloudDB::serverSecret() {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        {
+            Stmt q(c.h, "SELECT value FROM app_meta WHERE key = 'server_secret'");
+            if (q.step()) return q.colText(0);
+        }
+        // First run: generate and persist a random secret.
+        std::string secret = security::Crypto::randomHex(32);
+        Stmt ins(c.h, "INSERT OR IGNORE INTO app_meta(key, value) VALUES('server_secret', ?)");
+        ins.bind(1, secret);
+        ins.exec();
+        Stmt q2(c.h, "SELECT value FROM app_meta WHERE key = 'server_secret'");
+        if (q2.step()) return q2.colText(0);
+        return secret;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("serverSecret: " + std::string(e.what()));
+        return "";
     }
 }
 
@@ -925,7 +952,10 @@ bool CloudDB::deleteFolderRecursive(int64_t userId, int64_t folderId,
             while (q.step()) storageKeys.push_back(q.colText(0));
         }
 
-        sqlite3_exec(c.h, "BEGIN", nullptr, nullptr, nullptr);
+        if (sqlite3_exec(c.h, "BEGIN", nullptr, nullptr, nullptr) != SQLITE_OK) {
+            storageKeys.clear();
+            return false;
+        }
         const char* delFilesSql =
             "WITH RECURSIVE sub(id) AS ("
             "  SELECT id FROM folders WHERE id = ?1 AND user_id = ?2"
@@ -942,10 +972,20 @@ bool CloudDB::deleteFolderRecursive(int64_t userId, int64_t folderId,
             ") DELETE FROM folders WHERE user_id = ?2 AND id IN (SELECT id FROM sub)";
         int changes = 0;
         { Stmt q(c.h, delFoldersSql); q.bind(1, folderId); q.bind(2, userId); q.exec(); changes = sqlite3_changes(c.h); }
-        sqlite3_exec(c.h, "COMMIT", nullptr, nullptr, nullptr);
+        if (sqlite3_exec(c.h, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
+            // COMMIT failed (e.g. disk full). Roll back and report failure so the
+            // caller never unlinks blobs whose DB rows still exist (data loss).
+            sqlite3_exec(c.h, "ROLLBACK", nullptr, nullptr, nullptr);
+            storageKeys.clear();
+            return false;
+        }
         return changes > 0;
     } catch (const std::exception& e) {
+        // The Conn destructor closes the connection, which auto-rolls-back any
+        // open transaction. Clear the keys so a caller never unlinks blobs whose
+        // rows may still exist.
         utils::Logger::get_instance().error("deleteFolderRecursive: " + std::string(e.what()));
+        storageKeys.clear();
         return false;
     }
 }

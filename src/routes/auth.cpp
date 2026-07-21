@@ -77,15 +77,19 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
     });
 
     // ---- KDF salt for an email (needed client-side before login) ----
-    // Returns a deterministic decoy salt for unknown emails to avoid enumeration.
+    // For unknown emails we return a decoy salt so registered/unregistered are
+    // indistinguishable. The decoy is HMAC(serverSecret, email) — deterministic
+    // per install but NOT client-computable, so an attacker who knows an email
+    // cannot recompute it and detect that a real (different) salt was returned.
+    const std::string decoyKey = db.serverSecret();
     CROW_ROUTE(app, "/api/auth/salt").methods(crow::HTTPMethod::GET)
-    ([&db](const crow::request& req) {
+    ([&db, decoyKey](const crow::request& req) {
         std::string email;
         if (const char* p = req.url_params.get("email")) email = toLower(p);
         auto salt = db.saltForEmail(email);
         std::string out = (salt && !salt->empty())
             ? *salt
-            : security::Crypto::sha256Hex("cloud-serv-salt-v1|" + email).substr(0, 32);
+            : security::Crypto::hmacSha256Hex(decoyKey, "cloud-serv-salt-v1|" + email).substr(0, 32);
         return http::jsonSuccess(json{{"salt", out}}.dump());
     });
 

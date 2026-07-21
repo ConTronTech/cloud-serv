@@ -37,6 +37,10 @@ D1=$(curl -s "http://$API/api/auth/salt?email=ghost@x.cc")
 D2=$(curl -s "http://$API/api/auth/salt?email=ghost@x.cc")
 want "unknown email -> decoy salt" '"salt":"' "$D1"
 [ "$D1" = "$D2" ] && ok "decoy salt deterministic" || bad "decoy salt not deterministic"
+# The decoy must NOT be the client-computable sha256("cloud-serv-salt-v1|"+email)
+# (MV-1): otherwise an attacker recomputes it and detects registered emails.
+NAIVE=$(printf '%s' "cloud-serv-salt-v1|ghost@x.cc" | sha256sum | cut -c1-32)
+if printf '%s' "$D1" | grep -qF "$NAIVE"; then bad "decoy salt is attacker-computable (sha256)"; else ok "decoy salt not attacker-computable (HMAC-keyed)"; fi
 want "login returns wrapped DEK" '"wrappedDek":"WDEK"' "$(curl -s "http://$API/api/auth/login" -d '{"email":"e@e.cc","password":"AUTHKEYb64xxxxxxxxxxxxxxxx"}')"
 
 finish

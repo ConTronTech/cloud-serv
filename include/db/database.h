@@ -32,6 +32,9 @@ public:
                      const std::string& wrappedDek, const std::string& wrappedDekRecovery);
     // The KDF salt for an email (for the pre-login derivation). nullopt if unknown.
     std::optional<std::string> saltForEmail(const std::string& email);
+    // A stable, random, server-side secret (generated once, persisted). Used to
+    // key derivations that must not be client-computable, e.g. the decoy salt.
+    std::string serverSecret();
 
     // ---- Sessions ----
     // Stores only the hash of the token; expiresAt is a unix epoch (seconds).
