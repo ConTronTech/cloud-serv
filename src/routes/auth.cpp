@@ -60,6 +60,11 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         int64_t userId = db.createUser(email, displayName, security::Crypto::hashPassword(password));
         if (userId < 0) return http::jsonError(409, "email already registered");
 
+        // E2E key material — client-generated, opaque to us. Stored so we can hand
+        // it back at login; without the user's password/recovery key it's useless.
+        db.setUserKeys(userId, strField(body, "salt"),
+                       strField(body, "wrappedDek"), strField(body, "wrappedDekRecovery"));
+
         // Issue a session token immediately so registration logs the user in.
         std::string token = security::Crypto::randomHex(32);
         int64_t expiresAt = static_cast<int64_t>(::time(nullptr)) + sessionSeconds;
@@ -69,6 +74,19 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         auto res = http::jsonSuccess(json{{"token", token}, {"user", user}}.dump());
         res.add_header("Set-Cookie", security::sessionCookie(token, sessionSeconds));
         return res;
+    });
+
+    // ---- KDF salt for an email (needed client-side before login) ----
+    // Returns a deterministic decoy salt for unknown emails to avoid enumeration.
+    CROW_ROUTE(app, "/api/auth/salt").methods(crow::HTTPMethod::GET)
+    ([&db](const crow::request& req) {
+        std::string email;
+        if (const char* p = req.url_params.get("email")) email = toLower(p);
+        auto salt = db.saltForEmail(email);
+        std::string out = (salt && !salt->empty())
+            ? *salt
+            : security::Crypto::sha256Hex("cloud-serv-salt-v1|" + email).substr(0, 32);
+        return http::jsonSuccess(json{{"salt", out}}.dump());
     });
 
     // ---- Login ----
@@ -95,7 +113,10 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         int64_t expiresAt = static_cast<int64_t>(::time(nullptr)) + sessionSeconds;
         db.createSession(user->id, security::Crypto::sha256Hex(token), req.remote_ip_address, expiresAt);
 
-        auto res = http::jsonSuccess(json{{"token", token}, {"user", user->toJson()}}.dump());
+        auto res = http::jsonSuccess(json{
+            {"token", token}, {"user", user->toJson()},
+            {"salt", user->kdf_salt}, {"wrappedDek", user->wrapped_dek}
+        }.dump());
         res.add_header("Set-Cookie", security::sessionCookie(token, sessionSeconds));
         return res;
     });
@@ -107,7 +128,10 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         if (!userId) return http::jsonError(401, "unauthorized");
         auto user = db.findUserById(*userId);
         if (!user) return http::jsonError(401, "unauthorized");
-        return http::jsonSuccess(json{{"user", user->toJson()}}.dump());
+        return http::jsonSuccess(json{
+            {"user", user->toJson()},
+            {"salt", user->kdf_salt}, {"wrappedDek", user->wrapped_dek}
+        }.dump());
     });
 
     // ---- Logout (revoke current session token) ----

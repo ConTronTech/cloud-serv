@@ -27,6 +27,11 @@ public:
                        const std::string& passwordHash);
     std::optional<User> findUserByEmail(const std::string& email);
     std::optional<User> findUserById(int64_t id);
+    // E2E: store the client-generated key material for a user.
+    bool setUserKeys(int64_t userId, const std::string& kdfSalt,
+                     const std::string& wrappedDek, const std::string& wrappedDekRecovery);
+    // The KDF salt for an email (for the pre-login derivation). nullopt if unknown.
+    std::optional<std::string> saltForEmail(const std::string& email);
 
     // ---- Sessions ----
     // Stores only the hash of the token; expiresAt is a unix epoch (seconds).

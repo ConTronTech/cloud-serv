@@ -14,8 +14,12 @@ struct User {
     int64_t id = 0;
     std::string email;
     std::string display_name;
-    std::string password_hash;   // never serialized to clients
+    std::string password_hash;   // scrypt of the client-derived AUTH key (never the real password)
     std::string created_at;
+    // ---- E2E key material (all client-generated; server only stores/serves) ----
+    std::string kdf_salt;              // salt the client uses to derive keys from the password
+    std::string wrapped_dek;          // Data Encryption Key wrapped by the password-derived KEK
+    std::string wrapped_dek_recovery; // DEK wrapped by the recovery key
 
     // Public view — omits password_hash.
     json toJson() const;

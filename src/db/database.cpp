@@ -75,6 +75,9 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 email TEXT UNIQUE NOT NULL,
                 display_name TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
+                kdf_salt TEXT DEFAULT '',
+                wrapped_dek TEXT DEFAULT '',
+                wrapped_dek_recovery TEXT DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS sessions (
@@ -162,6 +165,9 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                      nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE folders ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;",
                      nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN kdf_salt TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN wrapped_dek TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN wrapped_dek_recovery TEXT DEFAULT '';", nullptr, nullptr, nullptr);
 
         utils::Logger::get_instance().info("Database initialized: " + dbPath_);
     } catch (const std::exception& e) {
@@ -194,7 +200,8 @@ std::optional<User> CloudDB::findUserByEmail(const std::string& email) {
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, email, display_name, password_hash, created_at "
+        Stmt q(c.h, "SELECT id, email, display_name, password_hash, created_at, "
+                    "kdf_salt, wrapped_dek, wrapped_dek_recovery "
                     "FROM users WHERE email = ?");
         q.bind(1, email);
         if (!q.step()) return std::nullopt;
@@ -204,6 +211,9 @@ std::optional<User> CloudDB::findUserByEmail(const std::string& email) {
         u.display_name = q.colText(2);
         u.password_hash = q.colText(3);
         u.created_at = q.colText(4);
+        u.kdf_salt = q.colText(5);
+        u.wrapped_dek = q.colText(6);
+        u.wrapped_dek_recovery = q.colText(7);
         return u;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("findUserByEmail: " + std::string(e.what()));
@@ -215,7 +225,8 @@ std::optional<User> CloudDB::findUserById(int64_t id) {
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, email, display_name, password_hash, created_at "
+        Stmt q(c.h, "SELECT id, email, display_name, password_hash, created_at, "
+                    "kdf_salt, wrapped_dek, wrapped_dek_recovery "
                     "FROM users WHERE id = ?");
         q.bind(1, id);
         if (!q.step()) return std::nullopt;
@@ -225,9 +236,45 @@ std::optional<User> CloudDB::findUserById(int64_t id) {
         u.display_name = q.colText(2);
         u.password_hash = q.colText(3);
         u.created_at = q.colText(4);
+        u.kdf_salt = q.colText(5);
+        u.wrapped_dek = q.colText(6);
+        u.wrapped_dek_recovery = q.colText(7);
         return u;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("findUserById: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::setUserKeys(int64_t userId, const std::string& kdfSalt,
+                          const std::string& wrappedDek, const std::string& wrappedDekRecovery) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET kdf_salt = ?, wrapped_dek = ?, wrapped_dek_recovery = ? "
+                    "WHERE id = ?");
+        q.bind(1, kdfSalt);
+        q.bind(2, wrappedDek);
+        q.bind(3, wrappedDekRecovery);
+        q.bind(4, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setUserKeys: " + std::string(e.what()));
+        return false;
+    }
+}
+
+std::optional<std::string> CloudDB::saltForEmail(const std::string& email) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT kdf_salt FROM users WHERE email = ?");
+        q.bind(1, email);
+        if (!q.step()) return std::nullopt;
+        return q.colText(0);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("saltForEmail: " + std::string(e.what()));
         return std::nullopt;
     }
 }
