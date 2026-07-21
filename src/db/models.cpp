@@ -30,7 +30,8 @@ json FileMeta::toJson() const {
         {"createdAt", created_at},
         {"starred", starred},
         {"wrappedKey", wrapped_key},
-        {"encName", enc_name}
+        {"encName", enc_name},
+        {"encMime", enc_mime}
     };
 }
 

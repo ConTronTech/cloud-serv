@@ -183,7 +183,8 @@ async function encryptFileForUpload(file) {
   const cipher = await encryptContent(key, plain);
   const wrappedKey = await wrapFileKey(raw);
   const encName = await encryptName(file.name);
-  return { cipher, wrappedKey, plainSize: plain.length, encName };
+  const encMime = await encryptName(file.type || "application/octet-stream");
+  return { cipher, wrappedKey, plainSize: plain.length, encName, encMime };
 }
 
 // Fetch a file's stored content and return its plaintext bytes. A file with no
@@ -209,14 +210,21 @@ async function objectUrlFor(item) {
 const _nameDec = new TextDecoder();
 async function encryptName(name) { return wrapBytes(new TextEncoder().encode(name), await dekKey()); }
 async function decryptName(enc) { return _nameDec.decode(await unwrapBytes(enc, await dekKey())); }
-// Decrypt encName -> item._name for every item in a listing, before it renders.
+// Decrypt encrypted metadata (name, mime) for every item in a listing, before
+// it renders: encName -> item._name, encMime -> item.mime (overwriting the
+// server's generic placeholder).
 async function hydrateNames(...lists) {
   for (const items of lists) {
     if (!Array.isArray(items)) continue;
     for (const it of items) {
-      if (it && it.encName) {
+      if (!it) continue;
+      if (it.encName) {
         try { it._name = await decryptName(it.encName); }
         catch { it._name = "🔒 locked"; }
+      }
+      if (it.encMime) {
+        try { it.mime = await decryptName(it.encMime); }
+        catch { /* keep the server placeholder */ }
       }
     }
   }
@@ -947,10 +955,11 @@ async function uploadDirect(file, state, folderId) {
         method: "POST",
         headers: authHeaders({
           "X-Enc-Name": enc.encName, // encrypted filename (opaque to the server)
+          "X-Enc-Mime": enc.encMime, // encrypted mime type (opaque to the server)
           "X-Folder": String(folderId),
           "X-Wrapped-Key": enc.wrappedKey,
           "X-Plain-Size": String(enc.plainSize),
-          "Content-Type": file.type || "application/octet-stream",
+          "Content-Type": "application/octet-stream",
         }),
         body: enc.cipher,
       });
@@ -993,7 +1002,7 @@ async function uploadChunked(file, state, folderId) {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
-        encName: enc.encName, mime: file.type || "application/octet-stream",
+        encName: enc.encName, encMime: enc.encMime,
         size: total, folderId,
         wrappedKey: enc.wrappedKey, plainSize: enc.plainSize,
       }),

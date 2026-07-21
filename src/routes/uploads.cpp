@@ -69,9 +69,17 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
             if (!validName(name)) return http::jsonError(400, "invalid filename");
         }
 
-        std::string mime = strField(body, "mime");
-        if (mime.empty() || mime.size() > 255 || anyControlChar(mime))
+        // E2E: an encrypted mime (opaque) means we store a generic placeholder.
+        std::string encMime = strField(body, "encMime");
+        std::string mime;
+        if (!encMime.empty()) {
+            if (!validEncName(encMime)) return http::jsonError(400, "invalid enc mime");
             mime = "application/octet-stream";
+        } else {
+            mime = strField(body, "mime");
+            if (mime.empty() || mime.size() > 255 || anyControlChar(mime))
+                mime = "application/octet-stream";
+        }
 
         int64_t size = intField(body, "size", 0);
         if (size < 0) size = 0;
@@ -89,7 +97,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         if (!store.write(*userId, storageKey, nullptr, 0))  // create empty blob
             return http::jsonError(500, "storage init failed");
         if (!db.createUploadSession(*userId, uploadId, folderId, name, mime, size, storageKey,
-                                    wrappedKey, plainSize, encName)) {
+                                    wrappedKey, plainSize, encName, encMime)) {
             store.remove(*userId, storageKey);
             return http::jsonError(500, "could not create upload");
         }
@@ -157,7 +165,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         // otherwise the bytes received.
         int64_t displaySize = s->plain_size > 0 ? s->plain_size : s->received;
         int64_t fileId = db.addFile(*userId, s->folder_id, s->name, s->mime, displaySize,
-                                    s->storage_key, s->wrapped_key, s->enc_name);
+                                    s->storage_key, s->wrapped_key, s->enc_name, s->enc_mime);
         if (fileId < 0) return http::jsonError(500, "could not finalize");
         db.deleteUploadSession(*userId, id); // keep the blob; it's now a real file
 

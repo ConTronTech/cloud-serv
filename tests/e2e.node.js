@@ -108,15 +108,18 @@ async function main() {
   const cipher = await encryptContent(await importAes(fileRaw), plaintext);
   const wrappedKey = await wrapBytes(fileRaw, dekKey);
   const encName = await wrapBytes(te.encode(nameMarker), dekKey);
+  const mimeMarker = "application/x-my-secret-type";
+  const encMime = await wrapBytes(te.encode(mimeMarker), dekKey);
   r = await fetch(API + "/api/files", {
     method: "POST",
-    headers: { ...auth, "X-Enc-Name": encName, "X-Folder": "0", "X-Wrapped-Key": wrappedKey, "X-Plain-Size": String(plaintext.length), "content-type": "application/octet-stream" },
+    headers: { ...auth, "X-Enc-Name": encName, "X-Enc-Mime": encMime, "X-Folder": "0", "X-Wrapped-Key": wrappedKey, "X-Plain-Size": String(plaintext.length), "content-type": "application/octet-stream" },
     body: cipher,
   });
   const uj = await r.json();
-  uj.id ? ok("upload encrypted file (encrypted name)") : bad("upload " + r.status);
+  uj.id ? ok("upload encrypted file (encrypted name+mime)") : bad("upload " + r.status);
   uj.size === plaintext.length ? ok("stored display size = plaintext size") : bad("size " + uj.size);
   uj.name === "" ? ok("server stores blank plaintext name") : bad("plaintext name stored: " + JSON.stringify(uj.name));
+  uj.mime === "application/octet-stream" ? ok("server stores generic mime placeholder") : bad("real mime stored: " + JSON.stringify(uj.mime));
 
   // Create a folder with an encrypted name too.
   const folderNameMarker = "PRIVATE-FOLDER-NAME";
@@ -137,6 +140,8 @@ async function main() {
   const dbBlobs = fs.readdirSync(dbDir).filter((f) => f.startsWith("cloud.db")).map((f) => fs.readFileSync(path.join(dbDir, f)));
   const nameLeaked = dbBlobs.some((b) => b.includes(Buffer.from(nameMarker)) || b.includes(Buffer.from(folderNameMarker)));
   nameLeaked ? bad("PLAINTEXT NAME LEAKED TO DATABASE") : ok("no plaintext name in the database");
+  const mimeLeaked = dbBlobs.some((b) => b.includes(Buffer.from(mimeMarker)));
+  mimeLeaked ? bad("PLAINTEXT MIME LEAKED TO DATABASE") : ok("no plaintext mime in the database");
 
   // The listing exposes wrappedKey + encName so the client can decrypt both.
   r = await fetch(API + "/api/files", { headers: auth });
@@ -144,6 +149,8 @@ async function main() {
   listed && listed.wrappedKey === wrappedKey ? ok("listing returns wrappedKey") : bad("wrappedKey not in listing");
   const backName = listed && listed.encName ? new TextDecoder().decode(await unwrapBytes(listed.encName, dekKey)) : "";
   backName === nameMarker ? ok("encName decrypts to original filename") : bad("name decrypt mismatch: " + backName);
+  const backMime = listed && listed.encMime ? new TextDecoder().decode(await unwrapBytes(listed.encMime, dekKey)) : "";
+  backMime === mimeMarker ? ok("encMime decrypts to original mime") : bad("mime decrypt mismatch: " + backMime);
 
   // Download + decrypt with the key recovered via the DEK → original bytes.
   r = await fetch(API + "/api/files/" + uj.id + "/content", { headers: auth });

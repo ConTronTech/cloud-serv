@@ -151,9 +151,18 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         if (!folderHdr.empty()) { try { folderId = std::stoll(folderHdr); } catch (...) { folderId = 0; } }
         if (!db.folderExists(*userId, folderId)) return http::jsonError(400, "folder not found");
 
-        std::string mime = req.get_header_value("Content-Type");
-        if (mime.empty() || mime.size() > 255 || hasAnyControlChar(mime))
+        // E2E: the mime may be encrypted (X-Enc-Mime); then we store a generic
+        // placeholder and keep only the opaque blob. Otherwise the Content-Type.
+        std::string encMime = req.get_header_value("X-Enc-Mime");
+        std::string mime;
+        if (!encMime.empty()) {
+            if (!isValidEncName(encMime)) return http::jsonError(400, "invalid enc mime");
             mime = "application/octet-stream";
+        } else {
+            mime = req.get_header_value("Content-Type");
+            if (mime.empty() || mime.size() > 255 || hasAnyControlChar(mime))
+                mime = "application/octet-stream";
+        }
 
         // E2E: the body may be ciphertext with a wrapped per-file key; the client
         // reports the plaintext size for display. Opaque to us either way.
@@ -168,14 +177,14 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
             return http::jsonError(500, "storage write failed");
         }
 
-        int64_t id = db.addFile(*userId, folderId, name, mime, size, storageKey, wrappedKey, encName);
+        int64_t id = db.addFile(*userId, folderId, name, mime, size, storageKey, wrappedKey, encName, encMime);
         if (id < 0) {
             store.remove(*userId, storageKey);  // don't leak an orphan blob
             return http::jsonError(500, "could not record file");
         }
 
         json out = {{"id", id}, {"name", name}, {"mime", mime}, {"size", size},
-                    {"folderId", folderId}, {"encName", encName}};
+                    {"folderId", folderId}, {"encName", encName}, {"encMime", encMime}};
         return http::jsonSuccess(out.dump());
     });
 
