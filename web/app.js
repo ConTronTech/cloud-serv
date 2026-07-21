@@ -140,12 +140,14 @@ async function logout() {
 // ---- file manager (folders) ----
 let currentFolder = 0; // 0 = root
 let curFolders = [], curFiles = [];
+let resultsMode = false; // true when showing category/search results
 let viewMode = localStorage.getItem("cs_view") || "list";   // list | grid
 let sortBy = localStorage.getItem("cs_sortby") || "name";   // name | date | size
 let sortDir = localStorage.getItem("cs_sortdir") || "asc";  // asc | desc
 
 async function loadFs(folderId) {
   currentFolder = folderId;
+  resultsMode = false;
   const { ok, status, body } = await api("/api/fs?folder=" + folderId, { headers: authHeaders() });
   if (status === 401) { sessionExpired(); return; }
   if (!ok || !body) { toast("Could not load folder."); return; }
@@ -153,6 +155,47 @@ async function loadFs(folderId) {
   curFolders = body.folders || [];
   curFiles = body.files || [];
   renderFs();
+  updateHome();
+}
+
+// Storage chip + category row are only shown at the root, in normal (non-results) mode.
+function updateHome() {
+  const atRoot = currentFolder === 0 && !resultsMode;
+  $("home-extras").classList.toggle("hidden", !atRoot);
+  $("dropzone").classList.toggle("hidden", resultsMode);
+  if (atRoot) loadUsage();
+}
+
+async function loadUsage() {
+  const { ok, body } = await api("/api/usage", { headers: authHeaders() });
+  const el = $("storage-chip");
+  if (ok && body) {
+    el.textContent = `🗄 ${fmtSize(body.used || 0)} used · ${body.files || 0} file${body.files === 1 ? "" : "s"}`;
+  }
+}
+
+const CATEGORY_TITLE = { image: "Images", video: "Videos", audio: "Audio", document: "Documents" };
+async function openCategory(cat) {
+  const { ok, status, body } = await api("/api/search?category=" + encodeURIComponent(cat), { headers: authHeaders() });
+  if (status === 401) { sessionExpired(); return; }
+  if (!ok || !body) { toast("Could not load."); return; }
+  resultsMode = true;
+  curFolders = [];
+  curFiles = body.files || [];
+  renderResultsHeader(CATEGORY_TITLE[cat] || "Results");
+  renderFs();
+  updateHome();
+}
+
+function renderResultsHeader(title) {
+  const el = $("breadcrumbs");
+  el.textContent = "";
+  const home = document.createElement("button");
+  home.className = "crumb"; home.type = "button"; home.textContent = "🏠";
+  home.addEventListener("click", () => loadFs(currentFolder));
+  const sep = document.createElement("span"); sep.className = "crumb-sep"; sep.textContent = "›";
+  const t = document.createElement("span"); t.className = "crumb-current"; t.textContent = title;
+  el.append(home, sep, t);
 }
 
 function sortItems(items, isFile) {
@@ -800,6 +843,7 @@ async function boot() {
   $("file-input").addEventListener("change", (e) => uploadFiles(e.target.files));
   $("view-toggle").addEventListener("click", toggleView);
   $("sort-btn").addEventListener("click", openSort);
+  document.querySelectorAll(".cat").forEach((b) => b.addEventListener("click", () => openCategory(b.dataset.cat)));
   $("sort-close").addEventListener("click", closeSort);
   $("sort-modal").addEventListener("click", (e) => { if (e.target.id === "sort-modal") closeSort(); });
   wireDropzone();

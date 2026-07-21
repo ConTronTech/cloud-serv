@@ -185,6 +185,22 @@ img { max-width: 100%; }
 .crumb:hover { background: var(--panel-2); }
 .crumb-sep { color: var(--muted); }
 
+#home-extras { margin-bottom: 0.75rem; }
+.storage-chip {
+  display: inline-block; font-size: 0.82rem; color: var(--muted);
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 999px; padding: 0.35rem 0.75rem; margin-bottom: 0.6rem;
+}
+.categories { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; }
+.cat {
+  display: flex; align-items: center; gap: 0.5rem; font: inherit; cursor: pointer;
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: 12px; padding: 0.7rem 0.85rem; font-weight: 600;
+}
+.cat:hover { border-color: var(--accent); }
+.cat-ic { font-size: 1.1rem; }
+.crumb-current { padding: 0.2rem 0.3rem; font-weight: 600; }
+
 .fs-controls { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; }
 
 .fs-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
