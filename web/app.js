@@ -258,6 +258,7 @@ function renderFs() {
     for (const f of folders) list.appendChild(gridCell("folder", f));
     for (const f of files) list.appendChild(gridCell("file", f));
   } else {
+    if (folders.length + files.length) list.appendChild(listHeader());
     for (const f of folders) list.appendChild(folderRow(f));
     for (const f of files) list.appendChild(fileRow(f));
   }
@@ -367,54 +368,71 @@ function menuButton(kind, item) {
   return b;
 }
 
-function rowShell(kind, item, icText) {
+function cell(cls, text) {
+  const d = document.createElement("div");
+  d.className = "cell " + cls;
+  if (text != null) d.textContent = text;
+  return d;
+}
+
+// Drive-style list row: [name (icon+name+star)] [modified] [size] [menu].
+// On mobile the modified/size columns collapse into a sub-line under the name.
+function listRow(kind, item, icText, displayName, modified, size) {
   const li = document.createElement("li");
   li.className = "fs-item";
   if (selectMode) li.classList.add("selecting");
   if (isSelected(kind, item.id)) li.classList.add("selected");
-  const check = document.createElement("div");
-  check.className = "row-check"; check.textContent = "✓";
-  const ic = document.createElement("div");
-  ic.className = "file-ic"; ic.textContent = icText;
-  const meta = document.createElement("div");
-  meta.className = "file-meta clickable";
-  li.append(check, ic, meta);
-  if (item.starred) {
-    const star = document.createElement("span");
-    star.className = "star-mark"; star.textContent = "★"; star.title = "Starred";
-    li.append(star);
-  }
+
+  const nameCell = document.createElement("div");
+  nameCell.className = "cell cell-name clickable";
+  const check = document.createElement("div"); check.className = "row-check"; check.textContent = "✓";
+  const ic = document.createElement("div"); ic.className = "file-ic"; ic.textContent = icText;
+  const wrap = document.createElement("div"); wrap.className = "name-wrap";
+  const name = document.createElement("div"); name.className = "file-name"; name.textContent = displayName; name.title = displayName;
+  const sub = document.createElement("div"); sub.className = "file-sub mobile-only";
+  sub.textContent = kind === "folder" ? "Folder" : `${size} · ${modified}`;
+  wrap.append(name, sub);
+  nameCell.append(check, ic, wrap);
+  if (item.starred) { const s = document.createElement("span"); s.className = "star-mark"; s.textContent = "★"; s.title = "Starred"; nameCell.append(s); }
+
+  const menuCell = document.createElement("div"); menuCell.className = "cell cell-menu";
+  menuCell.append(menuButton(kind, item));
+
+  li.append(nameCell, cell("cell-mod", modified), cell("cell-size", kind === "folder" ? "—" : size), menuCell);
   li.addEventListener("click", (e) => {
     if (e.target.closest(".menu-btn")) return;
     rowActivate(li, kind, item);
   });
-  return { li, meta };
-}
-
-function folderRow(f) {
-  const { li, meta } = rowShell("folder", f, "📁");
-  const name = document.createElement("div");
-  name.className = "file-name"; name.textContent = f.name; name.title = f.name;
-  const sub = document.createElement("div");
-  sub.className = "file-sub"; sub.textContent = "Folder";
-  meta.append(name, sub);
-  const actions = document.createElement("div");
-  actions.className = "file-actions"; actions.append(menuButton("folder", f));
-  li.append(actions);
   return li;
 }
 
+function folderRow(f) { return listRow("folder", f, "📁", f.name, fmtDate(f.createdAt), "—"); }
 function fileRow(f) {
-  const { li, meta } = rowShell("file", f, iconFor(f.mime));
-  const name = document.createElement("div");
-  name.className = "file-name"; name.textContent = decodeName(f.name); name.title = decodeName(f.name);
-  const sub = document.createElement("div");
-  sub.className = "file-sub"; sub.textContent = `${fmtSize(f.size)} · ${fmtDate(f.createdAt)}`;
-  meta.append(name, sub);
-  const actions = document.createElement("div");
-  actions.className = "file-actions"; actions.append(menuButton("file", f));
-  li.append(actions);
+  return listRow("file", f, iconFor(f.mime), decodeName(f.name), fmtDate(f.createdAt), fmtSize(f.size));
+}
+
+// Sortable column header for list view.
+function listHeader() {
+  const li = document.createElement("li");
+  li.className = "fs-head";
+  const col = (by, label, cls) => {
+    const d = document.createElement("div");
+    d.className = "cell " + cls + " sortable";
+    d.textContent = label + (sortBy === by ? (sortDir === "asc" ? " ↑" : " ↓") : "");
+    d.addEventListener("click", () => setSort(by));
+    return d;
+  };
+  li.append(col("name", "Name", "cell-name"), col("date", "Modified", "cell-mod"),
+            col("size", "Size", "cell-size"), cell("cell-menu", ""));
   return li;
+}
+
+function setSort(by) {
+  if (sortBy === by) sortDir = sortDir === "asc" ? "desc" : "asc";
+  else { sortBy = by; sortDir = (by === "date" || by === "size") ? "desc" : "asc"; }
+  localStorage.setItem("cs_sortby", sortBy);
+  localStorage.setItem("cs_sortdir", sortDir);
+  renderFs();
 }
 
 // ---- per-item action sheet ----

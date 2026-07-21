@@ -336,6 +336,32 @@ img { max-width: 100%; }
 .fs-item .file-meta.clickable, .fs-item .file-ic.clickable { cursor: pointer; }
 .fs-item .file-meta { min-width: 0; flex: 1; }
 
+/* Drive-style columns for the main list (scoped so the move-picker stays simple) */
+#fs-list .fs-item, #fs-list .fs-head {
+  display: grid; grid-template-columns: minmax(0, 1fr) 190px 110px 44px;
+  align-items: center; gap: 0.5rem;
+}
+#fs-list .fs-head {
+  background: transparent; border: none; padding: 0.2rem 0.85rem;
+  color: var(--muted); font-size: 0.8rem; font-weight: 600;
+}
+#fs-list .fs-head .sortable { cursor: pointer; }
+#fs-list .fs-head .sortable:hover { color: var(--text); }
+.cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cell-name { display: flex; align-items: center; gap: 0.6rem; overflow: visible; }
+.name-wrap { min-width: 0; overflow: hidden; }
+.cell-mod, .cell-size { color: var(--muted); font-size: 0.85rem; }
+.cell-menu { display: flex; justify-content: flex-end; overflow: visible; }
+.file-sub.mobile-only { display: none; }
+
+@media (max-width: 760px) {
+  #fs-list .fs-head { display: none; }
+  #fs-list .fs-item { display: flex; align-items: center; gap: 0.6rem; }
+  #fs-list .cell-mod, #fs-list .cell-size { display: none; }
+  #fs-list .cell-name { flex: 1; min-width: 0; }
+  .file-sub.mobile-only { display: block; }
+}
+
 /* Compact icon buttons: show only the glyph on narrow screens */
 .icon-btn { padding: 0.4rem 0.5rem; }
 @media (max-width: 560px) { .icon-btn .btn-label { display: none; } }
