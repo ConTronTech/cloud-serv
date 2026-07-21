@@ -204,6 +204,69 @@ async function objectUrlFor(item) {
   return URL.createObjectURL(new Blob([bytes], { type: item.mime || "application/octet-stream" }));
 }
 
+// ---- E2E thumbnails (lazy, bounded, cached) ----
+// The server can't thumbnail encrypted blobs, so the client fetches + decrypts
+// each image itself. To keep that affordable we (1) only start when a tile
+// scrolls near the viewport, (2) cap concurrency, (3) downscale to a small
+// cached data URL so memory stays low and re-renders are instant.
+const THUMB_MAX = 256;               // longest edge, px
+const THUMB_CONCURRENCY = 4;
+const thumbCache = new Map();        // fileId -> small data URL
+let thumbQueue = [];
+let thumbActive = 0;
+
+function clearThumbCache() { thumbCache.clear(); thumbQueue = []; }
+
+async function makeThumb(item) {
+  const bytes = await fetchPlaintext(item);
+  // Decode the bytes directly (no <img> blob: URL, so CSP img-src stays strict).
+  const bmp = await createImageBitmap(new Blob([bytes], { type: item.mime || "image/*" }));
+  try {
+    const scale = Math.min(1, THUMB_MAX / Math.max(bmp.width, bmp.height, 1));
+    const w = Math.max(1, Math.round(bmp.width * scale));
+    const h = Math.max(1, Math.round(bmp.height * scale));
+    const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
+    canvas.getContext("2d").drawImage(bmp, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", 0.8); // small data: URL (allowed by CSP)
+  } finally {
+    bmp.close(); // free the full-size decoded image; keep only the small thumb
+  }
+}
+
+function pumpThumbs() {
+  while (thumbActive < THUMB_CONCURRENCY && thumbQueue.length) {
+    const { item, imgEl } = thumbQueue.shift();
+    if (!imgEl.isConnected) continue; // tile scrolled away / re-rendered
+    thumbActive++;
+    makeThumb(item)
+      .then((dataUrl) => { thumbCache.set(item.id, dataUrl); if (imgEl.isConnected) imgEl.src = dataUrl; })
+      .catch(() => {})
+      .finally(() => { thumbActive--; pumpThumbs(); });
+  }
+}
+
+const thumbObserver = ("IntersectionObserver" in window)
+  ? new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const imgEl = e.target;
+        thumbObserver.unobserve(imgEl);
+        const item = imgEl._thumbItem;
+        if (thumbCache.has(item.id)) { imgEl.src = thumbCache.get(item.id); continue; }
+        thumbQueue.push({ item, imgEl });
+        pumpThumbs();
+      }
+    }, { rootMargin: "300px" })
+  : null;
+
+// Attach an E2E image tile: use the cache, else lazy-load when it nears view.
+function loadThumb(imgEl, item) {
+  if (thumbCache.has(item.id)) { imgEl.src = thumbCache.get(item.id); return; }
+  imgEl._thumbItem = item;
+  if (thumbObserver) thumbObserver.observe(imgEl);
+  else { thumbQueue.push({ item, imgEl }); pumpThumbs(); } // no IO: just bound concurrency
+}
+
 // ---- E2E name encryption ----
 // Display names are encrypted under the DEK (like content keys), so the server
 // only ever stores opaque blobs. Empty encName = legacy plaintext (see dispName).
@@ -239,7 +302,7 @@ function dispName(item) {
 // The Data Encryption Key lives in memory + sessionStorage (per-tab, cleared on close).
 let DEK_RAW = null;
 function setDEK(raw) { DEK_RAW = raw; try { sessionStorage.setItem("cs_dek", toB64(raw)); } catch {} }
-function clearDEK() { DEK_RAW = null; try { sessionStorage.removeItem("cs_dek"); } catch {} }
+function clearDEK() { DEK_RAW = null; try { sessionStorage.removeItem("cs_dek"); } catch {} clearThumbCache(); }
 function restoreDEK() { if (!DEK_RAW) { const s = sessionStorage.getItem("cs_dek"); if (s) DEK_RAW = fromB64(s); } return !!DEK_RAW; }
 
 async function e2eRegister(email, password, displayName) {
@@ -452,6 +515,9 @@ function renderFs() {
   const list = $("fs-list");
   const grid = viewMode === "grid";
   list.className = grid ? "fs-grid" : "fs-list";
+  // Drop observations/queue for the tiles we're about to remove (cache persists).
+  if (thumbObserver) thumbObserver.disconnect();
+  thumbQueue = [];
   list.textContent = "";
   const folders = sortItems(curFolders, false);
   const files = sortItems(curFiles, true);
@@ -519,10 +585,7 @@ function gridCell(kind, item) {
     const img = document.createElement("img");
     img.loading = "lazy"; img.alt = "";
     if (item.wrappedKey) {
-      // E2E: fetch + decrypt, then swap in a blob URL (revoked once decoded).
-      objectUrlFor(item)
-        .then((u) => { img.src = u; img.addEventListener("load", () => URL.revokeObjectURL(u), { once: true }); })
-        .catch(() => {});
+      loadThumb(img, item); // E2E: lazy decrypt + downscale + cache
     } else {
       img.src = API + "/api/files/" + item.id + "/content"; // legacy plaintext
     }
