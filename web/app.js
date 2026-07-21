@@ -122,6 +122,43 @@ async function unwrapBytes(wrapped, key) {
   return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromB64(iv) }, key, fromB64(ct)));
 }
 
+// ---- content encryption (chunked AES-256-GCM) ----
+// Each chunk on the wire/disk is [nonce(12) ‖ ciphertext ‖ tag(16)]; full chunks
+// hold ENC_CHUNK plaintext bytes, so decryption can seek by fixed frame size.
+const ENC_CHUNK = 1024 * 1024;
+const ENC_OVERHEAD = 12 + 16;
+function concatBytes(list) { const n = list.reduce((s, c) => s + c.length, 0); const o = new Uint8Array(n); let p = 0; for (const c of list) { o.set(c, p); p += c.length; } return o; }
+async function encryptChunk(fileKey, slice) {
+  const nonce = randBytes(12);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, fileKey, slice));
+  const frame = new Uint8Array(12 + ct.length); frame.set(nonce, 0); frame.set(ct, 12);
+  return frame;
+}
+async function decryptFrame(fileKey, frame) {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: frame.subarray(0, 12) }, fileKey, frame.subarray(12)));
+}
+async function encryptContent(fileKey, plain) {
+  const frames = []; let off = 0;
+  do { frames.push(await encryptChunk(fileKey, plain.subarray(off, Math.min(off + ENC_CHUNK, plain.length)))); off += ENC_CHUNK; }
+  while (off < plain.length);
+  return concatBytes(frames);
+}
+async function decryptContent(fileKey, cipher) {
+  const FRAME = ENC_CHUNK + ENC_OVERHEAD; const parts = [];
+  for (let off = 0; off < cipher.length; ) {
+    const len = Math.min(FRAME, cipher.length - off);
+    parts.push(await decryptFrame(fileKey, cipher.subarray(off, off + len)));
+    off += len;
+  }
+  return concatBytes(parts);
+}
+
+// Per-file content keys, wrapped by the user's DEK.
+function dekKey() { return importAes(DEK_RAW); }
+async function newFileKey() { const raw = randBytes(32); return { raw, key: await importAes(raw) }; }
+async function wrapFileKey(raw) { return wrapBytes(raw, await dekKey()); }
+async function unwrapFileKey(wrapped) { return importAes(await unwrapBytes(wrapped, await dekKey())); }
+
 // The Data Encryption Key lives in memory + sessionStorage (per-tab, cleared on close).
 let DEK_RAW = null;
 function setDEK(raw) { DEK_RAW = raw; try { sessionStorage.setItem("cs_dek", toB64(raw)); } catch {} }

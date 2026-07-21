@@ -134,14 +134,20 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         if (mime.empty() || mime.size() > 255 || hasAnyControlChar(mime))
             mime = "application/octet-stream";
 
+        // E2E: the body may be ciphertext with a wrapped per-file key; the client
+        // reports the plaintext size for display. Opaque to us either way.
+        std::string wrappedKey = req.get_header_value("X-Wrapped-Key");
+        int64_t size = static_cast<int64_t>(req.body.size());
+        std::string plainSize = req.get_header_value("X-Plain-Size");
+        if (!plainSize.empty()) { try { size = std::stoll(plainSize); } catch (...) {} }
+
         // Opaque on-disk name — decouples storage from the user-facing filename.
         std::string storageKey = security::Crypto::randomHex(16);
         if (!store.write(*userId, storageKey, req.body.data(), req.body.size())) {
             return http::jsonError(500, "storage write failed");
         }
 
-        int64_t size = static_cast<int64_t>(req.body.size());
-        int64_t id = db.addFile(*userId, folderId, name, mime, size, storageKey);
+        int64_t id = db.addFile(*userId, folderId, name, mime, size, storageKey, wrappedKey);
         if (id < 0) {
             store.remove(*userId, storageKey);  // don't leak an orphan blob
             return http::jsonError(500, "could not record file");

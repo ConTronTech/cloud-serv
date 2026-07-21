@@ -42,10 +42,11 @@ struct FileMeta {
     int64_t folder_id = 0;       // 0 = root
     std::string name;            // original filename shown to the user
     std::string mime;
-    int64_t size = 0;
+    int64_t size = 0;            // plaintext size (for display); ciphertext on disk may differ
     std::string storage_key;     // opaque filename on disk (never exposed)
     std::string created_at;
     bool starred = false;
+    std::string wrapped_key;     // E2E: per-file content key wrapped by the user's DEK ("" = plaintext)
 
     json toJson() const;
 };
@@ -84,8 +85,10 @@ struct UploadSession {
     int64_t folder_id = 0;       // destination folder (0 = root)
     std::string name;            // intended display filename
     std::string mime;
-    int64_t size = 0;            // expected total bytes (0 if the client didn't say)
+    int64_t size = 0;            // expected total bytes on the wire (0 if unknown)
     int64_t received = 0;        // bytes written so far
     std::string storage_key;     // blob on disk being appended to
     std::string created_at;
+    std::string wrapped_key;     // E2E: wrapped content key (empty = plaintext)
+    int64_t plain_size = 0;      // plaintext size for display (0 = use received)
 };

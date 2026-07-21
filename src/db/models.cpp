@@ -28,7 +28,8 @@ json FileMeta::toJson() const {
         {"mime", mime},
         {"size", size},
         {"createdAt", created_at},
-        {"starred", starred}
+        {"starred", starred},
+        {"wrappedKey", wrapped_key}
     };
 }
 

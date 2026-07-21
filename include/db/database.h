@@ -68,7 +68,8 @@ public:
 
     // ---- Files (metadata; blobs handled by FileStore) ----
     int64_t addFile(int64_t userId, int64_t folderId, const std::string& name,
-                    const std::string& mime, int64_t size, const std::string& storageKey);
+                    const std::string& mime, int64_t size, const std::string& storageKey,
+                    const std::string& wrappedKey = "");
     std::vector<FileMeta> listFiles(int64_t userId, int64_t folderId);
     std::optional<FileMeta> getFile(int64_t userId, int64_t fileId);
     bool moveFile(int64_t userId, int64_t fileId, int64_t folderId);
@@ -95,7 +96,8 @@ public:
     // ---- Chunked uploads ----
     bool createUploadSession(int64_t userId, const std::string& id, int64_t folderId,
                              const std::string& name, const std::string& mime,
-                             int64_t size, const std::string& storageKey);
+                             int64_t size, const std::string& storageKey,
+                             const std::string& wrappedKey, int64_t plainSize);
     std::optional<UploadSession> getUploadSession(int64_t userId, const std::string& id);
     bool setUploadReceived(int64_t userId, const std::string& id, int64_t received);
     bool deleteUploadSession(int64_t userId, const std::string& id);

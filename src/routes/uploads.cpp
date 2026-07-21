@@ -62,11 +62,16 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         int64_t folderId = intField(body, "folderId", 0);
         if (!db.folderExists(*userId, folderId)) return http::jsonError(400, "folder not found");
 
+        // E2E: wrapped per-file key + plaintext size (display), both opaque to us.
+        std::string wrappedKey = strField(body, "wrappedKey");
+        int64_t plainSize = intField(body, "plainSize", 0);
+
         std::string uploadId = security::Crypto::randomHex(16);
         std::string storageKey = security::Crypto::randomHex(16);
         if (!store.write(*userId, storageKey, nullptr, 0))  // create empty blob
             return http::jsonError(500, "storage init failed");
-        if (!db.createUploadSession(*userId, uploadId, folderId, name, mime, size, storageKey)) {
+        if (!db.createUploadSession(*userId, uploadId, folderId, name, mime, size, storageKey,
+                                    wrappedKey, plainSize)) {
             store.remove(*userId, storageKey);
             return http::jsonError(500, "could not create upload");
         }
@@ -130,7 +135,11 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         if (onDisk != s->received) return http::jsonError(409, "size mismatch");
         if (s->size > 0 && s->received != s->size) return http::jsonError(400, "incomplete upload");
 
-        int64_t fileId = db.addFile(*userId, s->folder_id, s->name, s->mime, s->received, s->storage_key);
+        // Display size = plaintext size when the client declared one (E2E),
+        // otherwise the bytes received.
+        int64_t displaySize = s->plain_size > 0 ? s->plain_size : s->received;
+        int64_t fileId = db.addFile(*userId, s->folder_id, s->name, s->mime, displaySize,
+                                    s->storage_key, s->wrapped_key);
         if (fileId < 0) return http::jsonError(500, "could not finalize");
         db.deleteUploadSession(*userId, id); // keep the blob; it's now a real file
 

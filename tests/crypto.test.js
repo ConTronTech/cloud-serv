@@ -7,6 +7,8 @@ const fromHex = (s) => { const a = new Uint8Array(s.length / 2); for (let i = 0;
 const toB64 = (b) => Buffer.from(new Uint8Array(b)).toString("base64");
 const fromB64 = (s) => new Uint8Array(Buffer.from(s, "base64"));
 const rand = (n) => crypto.getRandomValues(new Uint8Array(n));
+// getRandomValues caps at 64KB/call — fill larger buffers in blocks (test helper only).
+function bigBytes(n) { const a = new Uint8Array(n); for (let i = 0; i < n; i += 65536) crypto.getRandomValues(a.subarray(i, Math.min(i + 65536, n))); return a; }
 
 async function deriveKeys(password, saltHex) {
   const base = await crypto.subtle.importKey("raw", te.encode(password), "PBKDF2", false, ["deriveBits"]);
@@ -17,6 +19,35 @@ async function deriveKeys(password, saltHex) {
 const importAes = (raw) => crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 async function wrapBytes(raw, key) { const iv = rand(12); const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, raw); return toB64(iv) + "." + toB64(new Uint8Array(ct)); }
 async function unwrapBytes(w, key) { const [iv, ct] = w.split("."); return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromB64(iv) }, key, fromB64(ct))); }
+
+// ---- content encryption (chunked AES-256-GCM), identical to web/app.js ----
+const ENC_CHUNK = 1024 * 1024;   // plaintext bytes per chunk
+const ENC_OVERHEAD = 12 + 16;    // nonce + GCM tag
+function concatBytes(list) { const n = list.reduce((s, c) => s + c.length, 0); const o = new Uint8Array(n); let p = 0; for (const c of list) { o.set(c, p); p += c.length; } return o; }
+async function encryptContent(fileKey, plain) {
+  const frames = [];
+  let off = 0;
+  do {
+    const slice = plain.subarray(off, Math.min(off + ENC_CHUNK, plain.length));
+    const nonce = rand(12);
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, fileKey, slice));
+    const frame = new Uint8Array(12 + ct.length); frame.set(nonce, 0); frame.set(ct, 12);
+    frames.push(frame); off += ENC_CHUNK;
+  } while (off < plain.length);
+  return concatBytes(frames);
+}
+async function decryptContent(fileKey, cipher) {
+  const FRAME = ENC_CHUNK + ENC_OVERHEAD;
+  const parts = [];
+  for (let off = 0; off < cipher.length; ) {
+    const len = Math.min(FRAME, cipher.length - off);
+    const nonce = cipher.subarray(off, off + 12);
+    const ctTag = cipher.subarray(off + 12, off + len);
+    parts.push(new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, fileKey, ctTag)));
+    off += len;
+  }
+  return concatBytes(parts);
+}
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { console.log((cond ? "  PASS: " : "  FAIL: ") + name); cond ? pass++ : fail++; };
@@ -57,6 +88,33 @@ const ok = (name, cond) => { console.log((cond ? "  PASS: " : "  FAIL: ") + name
   let tamperFailed = false;
   try { await unwrapBytes(parts[0] + "." + toB64(ctB), kek); } catch { tamperFailed = true; }
   ok("tampered ciphertext is rejected (GCM)", tamperFailed);
+
+  // ---- content encryption round-trips ----
+  const fileKey = await importAes(rand(32));
+  for (const size of [0, 1, 100, ENC_CHUNK, ENC_CHUNK + 1, ENC_CHUNK * 2 + 12345]) {
+    const plain = bigBytes(size);
+    const cipher = await encryptContent(fileKey, plain);
+    const back = await decryptContent(fileKey, cipher);
+    const same = back.length === plain.length && Buffer.compare(Buffer.from(back), Buffer.from(plain)) === 0;
+    ok(`content round-trip @ ${size} bytes (cipher=${cipher.length})`, same);
+  }
+  // wrong file key can't decrypt content
+  {
+    const plain = bigBytes(2048);
+    const cipher = await encryptContent(fileKey, plain);
+    let failed = false;
+    try { await decryptContent(await importAes(rand(32)), cipher); } catch { failed = true; }
+    ok("content: wrong key rejected (GCM)", failed);
+  }
+  // tampered content chunk rejected
+  {
+    const plain = bigBytes(4096);
+    const cipher = await encryptContent(fileKey, plain);
+    cipher[20] ^= 1;
+    let failed = false;
+    try { await decryptContent(fileKey, cipher); } catch { failed = true; }
+    ok("content: tampered chunk rejected (GCM)", failed);
+  }
 
   console.log(`\nRESULTS: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
