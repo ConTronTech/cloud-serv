@@ -64,6 +64,9 @@
     <main class="content">
       <!-- ===== Files tab (folder browser) ===== -->
       <div id="files-tab">
+        <div class="fs-search">
+          <input id="search-input" type="search" placeholder="🔍  Search files &amp; folders" autocomplete="off" />
+        </div>
         <div class="fs-toolbar">
           <nav id="breadcrumbs" class="breadcrumbs" aria-label="Path"></nav>
           <div class="fs-actions">
@@ -86,6 +89,7 @@
         <div class="fs-controls">
           <button id="view-toggle" class="btn ghost small" type="button" title="Toggle grid/list">▦ Grid</button>
           <button id="sort-btn" class="btn ghost small" type="button" title="Sort">↕ Name ↑</button>
+          <button id="select-btn" class="btn ghost small" type="button" title="Select">☑ Select</button>
         </div>
 
         <section id="dropzone" class="dropzone" aria-label="Upload files">
@@ -126,6 +130,16 @@
         </section>
       </div>
     </main>
+
+    <!-- ===== Multi-select action bar ===== -->
+    <div id="select-bar" class="select-bar hidden">
+      <span id="select-count">0 selected</span>
+      <div class="select-actions">
+        <button id="sel-move" class="btn ghost small" type="button">Move</button>
+        <button id="sel-delete" class="btn ghost small" type="button">Delete</button>
+        <button id="sel-cancel" class="btn ghost small" type="button">Cancel</button>
+      </div>
+    </div>
 
     <div id="toast" class="toast hidden" role="status"></div>
 

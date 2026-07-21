@@ -185,6 +185,14 @@ img { max-width: 100%; }
 .crumb:hover { background: var(--panel-2); }
 .crumb-sep { color: var(--muted); }
 
+.fs-search { margin-bottom: 0.75rem; }
+.fs-search input {
+  width: 100%; font: inherit; color: var(--text);
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 999px; padding: 0.6rem 1rem;
+}
+.fs-search input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 #home-extras { margin-bottom: 0.75rem; }
 .storage-chip {
   display: inline-block; font-size: 0.82rem; color: var(--muted);
@@ -234,6 +242,34 @@ img { max-width: 100%; }
 .grid-menu { position: absolute; top: 0.35rem; right: 0.35rem; padding: 0.1rem 0.35rem; background: rgba(0,0,0,0.35); }
 
 .action-item.current { border-color: var(--accent); color: var(--accent); }
+
+/* Multi-select */
+.btn.ghost.active { border-color: var(--accent); color: var(--accent); }
+.row-check {
+  display: none; flex: none; width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--border); place-items: center; color: transparent; font-size: 0.8rem;
+}
+.fs-item.selecting .row-check { display: grid; }
+.fs-item.selected .row-check { background: var(--accent); border-color: var(--accent); color: #fff; }
+.fs-item.selected { border-color: var(--accent); }
+.grid-cell.selected { border-color: var(--accent); outline: 2px solid var(--accent); }
+.grid-cell.selecting .thumb::after {
+  content: "✓"; position: absolute; top: 0.3rem; left: 0.3rem;
+  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  background: rgba(0,0,0,0.45); color: transparent; border: 2px solid #fff; font-size: 0.75rem;
+}
+.grid-cell.selected .thumb::after { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+.select-bar {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(0.8rem + env(safe-area-inset-bottom));
+  display: flex; align-items: center; gap: 0.75rem;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+  padding: 0.5rem 0.6rem 0.5rem 1rem; box-shadow: var(--shadow); z-index: 25; max-width: 94vw;
+}
+.select-bar #select-count { font-size: 0.85rem; font-weight: 600; white-space: nowrap; }
+.select-actions { display: flex; gap: 0.3rem; }
+.select-bar .btn:disabled { opacity: 0.45; }
 .fs-item {
   display: flex; align-items: center; gap: 0.6rem;
   background: var(--panel); border: 1px solid var(--border);

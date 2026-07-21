@@ -141,13 +141,40 @@ async function logout() {
 let currentFolder = 0; // 0 = root
 let curFolders = [], curFiles = [];
 let resultsMode = false; // true when showing category/search results
+let selectMode = false;  // multi-select
+const selFiles = new Set(), selFolders = new Set();
 let viewMode = localStorage.getItem("cs_view") || "list";   // list | grid
 let sortBy = localStorage.getItem("cs_sortby") || "name";   // name | date | size
 let sortDir = localStorage.getItem("cs_sortdir") || "asc";  // asc | desc
 
+// Row/tile activation: in select mode toggle selection, else open.
+function rowActivate(li, kind, item) {
+  if (selectMode) { toggleSelect(kind, item.id); li.classList.toggle("selected"); return; }
+  if (kind === "folder") loadFs(item.id);
+  else if (isPreviewable(item.mime)) openPreview(item);
+  else openActions("file", item);
+}
+function isSelected(kind, id) { return (kind === "folder" ? selFolders : selFiles).has(id); }
+function toggleSelect(kind, id) {
+  const set = kind === "folder" ? selFolders : selFiles;
+  set.has(id) ? set.delete(id) : set.add(id);
+  updateSelectBar();
+}
+function enterSelect() { selectMode = true; selFiles.clear(); selFolders.clear(); renderFs(); updateSelectBar(); }
+function exitSelect() { selectMode = false; selFiles.clear(); selFolders.clear(); renderFs(); updateSelectBar(); }
+function updateSelectBar() {
+  const n = selFiles.size + selFolders.size;
+  $("select-bar").classList.toggle("hidden", !selectMode);
+  $("select-count").textContent = n + " selected";
+  $("sel-move").disabled = n === 0;
+  $("sel-delete").disabled = n === 0;
+  const btn = $("select-btn"); if (btn) btn.classList.toggle("active", selectMode);
+}
+
 async function loadFs(folderId) {
   currentFolder = folderId;
   resultsMode = false;
+  const si = $("search-input"); if (si) si.value = "";
   const { ok, status, body } = await api("/api/fs?folder=" + folderId, { headers: authHeaders() });
   if (status === 401) { sessionExpired(); return; }
   if (!ok || !body) { toast("Could not load folder."); return; }
@@ -289,11 +316,11 @@ function gridCell(kind, item) {
   name.title = name.textContent;
   const menu = menuButton(kind, item); menu.classList.add("grid-menu");
   li.append(thumb, name, menu);
+  if (selectMode) li.classList.add("selecting");
+  if (isSelected(kind, item.id)) li.classList.add("selected");
   li.addEventListener("click", (e) => {
     if (e.target.closest(".menu-btn")) return;
-    if (kind === "folder") loadFs(item.id);
-    else if (isPreviewable(item.mime)) openPreview(item);
-    else openActions("file", item);
+    rowActivate(li, kind, item);
   });
   return li;
 }
@@ -325,47 +352,48 @@ function menuButton(kind, item) {
   return b;
 }
 
-function folderRow(f) {
+function rowShell(kind, item, icText) {
   const li = document.createElement("li");
   li.className = "fs-item";
+  if (selectMode) li.classList.add("selecting");
+  if (isSelected(kind, item.id)) li.classList.add("selected");
+  const check = document.createElement("div");
+  check.className = "row-check"; check.textContent = "✓";
   const ic = document.createElement("div");
-  ic.className = "file-ic clickable"; ic.textContent = "📁";
-  ic.addEventListener("click", () => loadFs(f.id));
+  ic.className = "file-ic"; ic.textContent = icText;
   const meta = document.createElement("div");
   meta.className = "file-meta clickable";
+  li.append(check, ic, meta);
+  li.addEventListener("click", (e) => {
+    if (e.target.closest(".menu-btn")) return;
+    rowActivate(li, kind, item);
+  });
+  return { li, meta };
+}
+
+function folderRow(f) {
+  const { li, meta } = rowShell("folder", f, "📁");
   const name = document.createElement("div");
   name.className = "file-name"; name.textContent = f.name; name.title = f.name;
   const sub = document.createElement("div");
   sub.className = "file-sub"; sub.textContent = "Folder";
   meta.append(name, sub);
-  meta.addEventListener("click", () => loadFs(f.id));
   const actions = document.createElement("div");
-  actions.className = "file-actions";
-  actions.append(menuButton("folder", f));
-  li.append(ic, meta, actions);
+  actions.className = "file-actions"; actions.append(menuButton("folder", f));
+  li.append(actions);
   return li;
 }
 
 function fileRow(f) {
-  const li = document.createElement("li");
-  li.className = "fs-item";
-  const ic = document.createElement("div");
-  ic.className = "file-ic clickable"; ic.textContent = iconFor(f.mime);
-  const meta = document.createElement("div");
-  meta.className = "file-meta clickable";
+  const { li, meta } = rowShell("file", f, iconFor(f.mime));
   const name = document.createElement("div");
   name.className = "file-name"; name.textContent = decodeName(f.name); name.title = decodeName(f.name);
   const sub = document.createElement("div");
   sub.className = "file-sub"; sub.textContent = `${fmtSize(f.size)} · ${fmtDate(f.createdAt)}`;
   meta.append(name, sub);
-  // Tap a file: preview media, otherwise show its actions.
-  const onTap = () => (isPreviewable(f.mime) ? openPreview(f) : openActions("file", f));
-  ic.addEventListener("click", onTap);
-  meta.addEventListener("click", onTap);
   const actions = document.createElement("div");
-  actions.className = "file-actions";
-  actions.append(menuButton("file", f));
-  li.append(ic, meta, actions);
+  actions.className = "file-actions"; actions.append(menuButton("file", f));
+  li.append(actions);
   return li;
 }
 
@@ -460,8 +488,8 @@ async function renameFileItem(f) {
   loadFs(currentFolder);
 }
 
-// ---- move modal (folder picker) ----
-let moveTarget = null;       // { kind: "file" | "folder", item }
+// ---- move modal (folder picker) — handles single item or a batch ----
+let moveTarget = null;       // { kind:"file"|"folder", item } OR { kind:"batch", files, folders }
 let moveCurrentFolder = 0;
 
 function openMove(kind, item) {
@@ -470,7 +498,22 @@ function openMove(kind, item) {
   $("move-modal").classList.remove("hidden");
   loadMoveFs(0);
 }
+function openMoveBatch() {
+  if (!(selFiles.size + selFolders.size)) return;
+  moveTarget = { kind: "batch", files: [...selFiles], folders: [...selFolders] };
+  moveCurrentFolder = 0;
+  $("move-modal").classList.remove("hidden");
+  loadMoveFs(0);
+}
 function closeMove() { $("move-modal").classList.add("hidden"); moveTarget = null; }
+
+// Folders we must not show as a destination (can't move a folder into itself).
+function moveSkipSet() {
+  if (!moveTarget) return new Set();
+  if (moveTarget.kind === "folder") return new Set([moveTarget.item.id]);
+  if (moveTarget.kind === "batch") return new Set(moveTarget.folders);
+  return new Set();
+}
 
 async function loadMoveFs(folderId) {
   moveCurrentFolder = folderId;
@@ -479,9 +522,8 @@ async function loadMoveFs(folderId) {
   renderBreadcrumbs($("move-breadcrumbs"), body.breadcrumbs || [], (id) => loadMoveFs(id));
   const list = $("move-list");
   list.textContent = "";
-  // Can't move a folder into itself.
-  const skipId = moveTarget && moveTarget.kind === "folder" ? moveTarget.item.id : null;
-  const subs = (body.folders || []).filter((f) => f.id !== skipId);
+  const skip = moveSkipSet();
+  const subs = (body.folders || []).filter((f) => !skip.has(f.id));
   if (!subs.length) {
     const p = document.createElement("li");
     p.className = "muted move-empty"; p.textContent = "No subfolders here.";
@@ -502,16 +544,62 @@ async function loadMoveFs(folderId) {
 
 async function doMove() {
   if (!moveTarget) return;
-  const { kind, item } = moveTarget;
-  const path = kind === "file" ? "/api/files/" + item.id : "/api/folders/" + item.id;
-  const payload = kind === "file" ? { folderId: moveCurrentFolder } : { parentId: moveCurrentFolder };
-  const { ok, body } = await api(path, {
-    method: "PATCH",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(payload),
+  const dest = moveCurrentFolder;
+  const isBatch = moveTarget.kind === "batch";
+  const patchFile = (id) => api("/api/files/" + id, {
+    method: "PATCH", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ folderId: dest }),
   });
-  if (!ok) { toast(prettyError(body) || "Move failed"); return; }
+  const patchFolder = (id) => api("/api/folders/" + id, {
+    method: "PATCH", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ parentId: dest }),
+  });
+
+  const ops = [];
+  if (moveTarget.kind === "file") ops.push(patchFile(moveTarget.item.id));
+  else if (moveTarget.kind === "folder") ops.push(patchFolder(moveTarget.item.id));
+  else { moveTarget.files.forEach((id) => ops.push(patchFile(id))); moveTarget.folders.forEach((id) => ops.push(patchFolder(id))); }
+
+  const results = await Promise.all(ops);
+  const failed = results.filter((r) => !r.ok).length;
   closeMove();
+  if (isBatch) exitSelect();
+  if (failed) toast(failed + " couldn't be moved");
+  loadFs(currentFolder);
+}
+
+// ---- search ----
+let searchTimer;
+function onSearchInput(e) {
+  const q = e.target.value.trim();
+  clearTimeout(searchTimer);
+  if (!q) { loadFs(currentFolder); return; }
+  searchTimer = setTimeout(() => doSearch(q), 300);
+}
+async function doSearch(q) {
+  const { ok, status, body } = await api("/api/search?q=" + encodeURIComponent(q), { headers: authHeaders() });
+  if (status === 401) { sessionExpired(); return; }
+  if (!ok || !body) return;
+  resultsMode = true;
+  curFolders = body.folders || [];
+  curFiles = body.files || [];
+  renderResultsHeader('“' + q + '”');
+  renderFs();
+  updateHome();
+}
+
+// ---- batch delete ----
+async function batchDelete() {
+  const n = selFiles.size + selFolders.size;
+  if (!n) return;
+  if (!confirm(`Delete ${n} item${n === 1 ? "" : "s"}? Folders delete everything inside.`)) return;
+  const ops = [];
+  selFiles.forEach((id) => ops.push(api("/api/files/" + id, { method: "DELETE", headers: authHeaders() })));
+  selFolders.forEach((id) => ops.push(api("/api/folders/" + id, { method: "DELETE", headers: authHeaders() })));
+  const results = await Promise.all(ops);
+  const failed = results.filter((r) => !r.ok).length;
+  exitSelect();
+  if (failed) toast(failed + " couldn't be deleted");
   loadFs(currentFolder);
 }
 
@@ -843,7 +931,14 @@ async function boot() {
   $("file-input").addEventListener("change", (e) => uploadFiles(e.target.files));
   $("view-toggle").addEventListener("click", toggleView);
   $("sort-btn").addEventListener("click", openSort);
+  $("select-btn").addEventListener("click", () => (selectMode ? exitSelect() : enterSelect()));
+  $("search-input").addEventListener("input", onSearchInput);
   document.querySelectorAll(".cat").forEach((b) => b.addEventListener("click", () => openCategory(b.dataset.cat)));
+
+  // selection bar
+  $("sel-move").addEventListener("click", openMoveBatch);
+  $("sel-delete").addEventListener("click", batchDelete);
+  $("sel-cancel").addEventListener("click", exitSelect);
   $("sort-close").addEventListener("click", closeSort);
   $("sort-modal").addEventListener("click", (e) => { if (e.target.id === "sort-modal") closeSort(); });
   wireDropzone();
