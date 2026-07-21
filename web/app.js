@@ -66,12 +66,17 @@ function showAuth() {
   $("app-view").classList.add("hidden");
   $("auth-view").classList.remove("hidden");
 }
+function initials(s) {
+  const parts = (s || "?").trim().split(/[\s@._-]+/).filter(Boolean);
+  return ((parts[0]?.[0] || "?") + (parts[1]?.[0] || "")).toUpperCase();
+}
 function showApp(user) {
   $("auth-view").classList.add("hidden");
   $("app-view").classList.remove("hidden");
-  $("who").textContent = user ? (user.displayName || user.email) : "";
-  switchTab("files"); // always land on Files
-  loadFs(0);
+  const label = user ? (user.displayName || user.email) : "";
+  $("who").textContent = label;
+  const av = $("avatar"); if (av) { av.textContent = initials(label); av.title = label; }
+  loadFs(0); // land on Files
 }
 
 // ---- auth ----
@@ -174,6 +179,9 @@ function updateSelectBar() {
 async function loadFs(folderId) {
   currentFolder = folderId;
   resultsMode = false;
+  setActiveNav("files");
+  showFilesTab();
+  closeSidebar();
   const si = $("search-input"); if (si) si.value = "";
   const { ok, status, body } = await api("/api/fs?folder=" + folderId, { headers: authHeaders() });
   if (status === 401) { sessionExpired(); return; }
@@ -207,6 +215,8 @@ async function openCategory(cat) {
   if (status === 401) { sessionExpired(); return; }
   if (!ok || !body) { toast("Could not load."); return; }
   resultsMode = true;
+  setActiveNav("files");
+  showFilesTab();
   curFolders = [];
   curFiles = body.files || [];
   renderResultsHeader(CATEGORY_TITLE[cat] || "Results");
@@ -314,6 +324,11 @@ function gridCell(kind, item) {
   name.className = "grid-name";
   name.textContent = kind === "folder" ? item.name : decodeName(item.name);
   name.title = name.textContent;
+  if (item.starred) {
+    const star = document.createElement("span");
+    star.className = "grid-star"; star.textContent = "★";
+    thumb.appendChild(star);
+  }
   const menu = menuButton(kind, item); menu.classList.add("grid-menu");
   li.append(thumb, name, menu);
   if (selectMode) li.classList.add("selecting");
@@ -364,6 +379,11 @@ function rowShell(kind, item, icText) {
   const meta = document.createElement("div");
   meta.className = "file-meta clickable";
   li.append(check, ic, meta);
+  if (item.starred) {
+    const star = document.createElement("span");
+    star.className = "star-mark"; star.textContent = "★"; star.title = "Starred";
+    li.append(star);
+  }
   li.addEventListener("click", (e) => {
     if (e.target.closest(".menu-btn")) return;
     rowActivate(li, kind, item);
@@ -411,11 +431,13 @@ function openActions(kind, item) {
   };
   if (kind === "folder") {
     add("Open", () => loadFs(item.id));
+    add(item.starred ? "★ Unstar" : "☆ Star", () => toggleStar("folder", item));
     add("Rename", () => renameFolder(item));
     add("Move", () => openMove("folder", item));
     add("Delete", () => deleteFolder(item), true);
   } else {
     if (isPreviewable(item.mime)) add("Open / preview", () => openPreview(item));
+    add(item.starred ? "★ Unstar" : "☆ Star", () => toggleStar("file", item));
     add("Download", () => downloadFile(item));
     add("Rename", () => renameFileItem(item));
     add("Move", () => openMove("file", item));
@@ -424,6 +446,27 @@ function openActions(kind, item) {
   $("action-modal").classList.remove("hidden");
 }
 function closeActions() { $("action-modal").classList.add("hidden"); }
+
+async function toggleStar(kind, item) {
+  const path = (kind === "folder" ? "/api/folders/" : "/api/files/") + item.id;
+  const { ok } = await api(path, {
+    method: "PATCH", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ starred: !item.starred }),
+  });
+  if (!ok) { toast("Couldn't update star"); return; }
+  refreshCurrentView();
+}
+
+// Reload whatever view is active (folder, recent, or starred).
+function refreshCurrentView() {
+  if ($("nav-starred").classList.contains("active")) loadView("starred");
+  else if ($("nav-recent").classList.contains("active")) loadView("recent");
+  else loadFs(currentFolder);
+}
+
+// ---- New menu ----
+function openNewMenu() { $("new-modal").classList.remove("hidden"); }
+function closeNewMenu() { $("new-modal").classList.add("hidden"); }
 
 async function downloadFile(f) {
   const res = await fetch(API + "/api/files/" + f.id, { headers: authHeaders() });
@@ -581,6 +624,8 @@ async function doSearch(q) {
   if (status === 401) { sessionExpired(); return; }
   if (!ok || !body) return;
   resultsMode = true;
+  setActiveNav("files");
+  showFilesTab();
   curFolders = body.folders || [];
   curFiles = body.files || [];
   renderResultsHeader('“' + q + '”');
@@ -830,15 +875,41 @@ function wireDropzone() {
 // ---- notes ----
 let editingNoteId = null;
 
-function switchTab(tab) {
-  const files = tab === "files";
-  $("nav-files").classList.toggle("active", files);
-  $("nav-notes").classList.toggle("active", !files);
-  $("files-tab").classList.toggle("hidden", !files);
-  $("notes-tab").classList.toggle("hidden", files);
-  if (!files) { showNotesList(); loadNotes(); }
-  closeSidebar(); // collapse the mobile drawer after choosing
+// ---- sidebar navigation ----
+function setActiveNav(nav) {
+  ["files", "recent", "starred", "notes"].forEach((n) => {
+    const el = $("nav-" + n); if (el) el.classList.toggle("active", n === nav);
+  });
 }
+function showFilesTab() { $("files-tab").classList.remove("hidden"); $("notes-tab").classList.add("hidden"); }
+
+function goNotes() {
+  setActiveNav("notes");
+  $("files-tab").classList.add("hidden");
+  $("notes-tab").classList.remove("hidden");
+  showNotesList(); loadNotes();
+  closeSidebar();
+}
+
+// Recent / Starred views (files-tab, results mode).
+async function loadView(kind) {
+  setActiveNav(kind);
+  showFilesTab();
+  closeSidebar();
+  const path = kind === "recent" ? "/api/recent" : "/api/starred";
+  const { ok, status, body } = await api(path, { headers: authHeaders() });
+  if (status === 401) { sessionExpired(); return; }
+  if (!ok || !body) { toast("Could not load."); return; }
+  resultsMode = true;
+  curFolders = body.folders || [];
+  curFiles = body.files || [];
+  renderResultsHeader(kind === "recent" ? "🕓 Recent" : "⭐ Starred");
+  renderFs();
+  updateHome();
+}
+
+// Back-compat shim (used by showApp / helpers).
+function switchTab(tab) { tab === "notes" ? goNotes() : loadFs(0); }
 
 // ---- sidebar (mobile drawer) ----
 function openSidebar() { $("sidebar").classList.add("open"); $("sidebar-backdrop").classList.remove("hidden"); }
@@ -931,8 +1002,6 @@ async function boot() {
   $("tab-register").addEventListener("click", () => setMode("register"));
   $("auth-form").addEventListener("submit", onAuthSubmit);
   $("logout").addEventListener("click", logout);
-  $("new-folder").addEventListener("click", newFolder);
-  $("pick").addEventListener("click", () => $("file-input").click());
   $("file-input").addEventListener("change", (e) => uploadFiles(e.target.files));
   $("view-toggle").addEventListener("click", toggleView);
   $("sort-btn").addEventListener("click", openSort);
@@ -960,8 +1029,18 @@ async function boot() {
   // sidebar / nav
   $("menu-btn").addEventListener("click", openSidebar);
   $("sidebar-backdrop").addEventListener("click", closeSidebar);
-  $("nav-files").addEventListener("click", () => switchTab("files"));
-  $("nav-notes").addEventListener("click", () => switchTab("notes"));
+  $("nav-files").addEventListener("click", () => loadFs(0));
+  $("nav-recent").addEventListener("click", () => loadView("recent"));
+  $("nav-starred").addEventListener("click", () => loadView("starred"));
+  $("nav-notes").addEventListener("click", goNotes);
+
+  // New menu
+  $("new-btn").addEventListener("click", openNewMenu);
+  $("new-close").addEventListener("click", closeNewMenu);
+  $("new-modal").addEventListener("click", (e) => { if (e.target.id === "new-modal") closeNewMenu(); });
+  $("new-folder-item").addEventListener("click", () => { closeNewMenu(); newFolder(); });
+  $("new-upload-item").addEventListener("click", () => { closeNewMenu(); $("file-input").click(); });
+
   $("new-note").addEventListener("click", newNote);
   $("note-back").addEventListener("click", () => { showNotesList(); loadNotes(); });
   $("note-save").addEventListener("click", saveNote);
@@ -970,7 +1049,7 @@ async function boot() {
   // preview modal
   $("preview-close").addEventListener("click", closePreview);
   $("preview-modal").addEventListener("click", (e) => { if (e.target.id === "preview-modal") closePreview(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closePreview(); closeMove(); closeActions(); closeSort(); } });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closePreview(); closeMove(); closeActions(); closeSort(); closeNewMenu(); } });
 
   setMode("login");
 

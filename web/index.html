@@ -50,8 +50,12 @@
         <img src="/favicon.svg" alt="" width="30" height="30" />
         <strong>cloud-serv</strong>
       </div>
+      <button id="new-btn" class="new-btn" type="button"><span class="new-plus">＋</span> New</button>
       <nav class="side-nav">
         <button id="nav-files" class="side-item active" type="button"><span class="si-ic">📁</span> Files</button>
+        <button id="nav-recent" class="side-item" type="button"><span class="si-ic">🕓</span> Recent</button>
+        <button id="nav-starred" class="side-item" type="button"><span class="si-ic">⭐</span> Starred</button>
+        <div class="side-divider"></div>
         <button id="nav-notes" class="side-item" type="button"><span class="si-ic">📝</span> Notes</button>
       </nav>
       <div class="side-foot">
@@ -67,25 +71,18 @@
     <div class="main">
       <header class="topbar">
         <button id="menu-btn" class="menu-btn" type="button" aria-label="Open menu">☰</button>
-        <div class="brand small">
-          <img src="/favicon.svg" alt="" width="24" height="24" />
-          <strong>cloud-serv</strong>
+        <div class="topbar-search">
+          <input id="search-input" type="search" placeholder="🔍  Search files &amp; folders" autocomplete="off" />
         </div>
+        <div id="avatar" class="avatar" title=""></div>
       </header>
 
       <div class="content">
       <!-- ===== Files tab (folder browser) ===== -->
       <div id="files-tab">
-        <div class="fs-search">
-          <input id="search-input" type="search" placeholder="🔍  Search files &amp; folders" autocomplete="off" />
-        </div>
         <div class="fs-toolbar">
           <nav id="breadcrumbs" class="breadcrumbs" aria-label="Path"></nav>
-          <div class="fs-actions">
-            <button id="new-folder" class="btn ghost small" type="button">📁 New</button>
-            <button id="pick" class="btn primary small" type="button">⬆ Upload</button>
-            <input id="file-input" type="file" multiple hidden />
-          </div>
+          <input id="file-input" type="file" multiple hidden />
         </div>
 
         <div id="home-extras">
@@ -159,6 +156,20 @@
     <div id="preview-modal" class="modal hidden" role="dialog" aria-modal="true">
       <button id="preview-close" class="modal-close" type="button" aria-label="Close">✕</button>
       <div id="preview-content" class="modal-content"></div>
+    </div>
+
+    <!-- ===== New menu ===== -->
+    <div id="new-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="sheet">
+        <div class="sheet-head">
+          <strong>New</strong>
+          <button id="new-close" class="btn ghost small" type="button" aria-label="Close">✕</button>
+        </div>
+        <div class="action-list">
+          <button id="new-folder-item" class="action-item" type="button">📁  New folder</button>
+          <button id="new-upload-item" class="action-item" type="button">⬆️  Upload files</button>
+        </div>
+      </div>
     </div>
 
     <!-- ===== Sort ===== -->
