@@ -26,7 +26,6 @@ PROJECT_SOURCES = src/main.cpp \
                   src/security/request_auth.cpp \
                   src/security/rate_limiter.cpp \
                   src/security/sanitizer.cpp \
-                  src/security/validator.cpp \
                   src/storage/file_store.cpp \
                   src/utils/logger.cpp \
                   src/utils/string_utils.cpp

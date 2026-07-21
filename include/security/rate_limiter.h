@@ -53,12 +53,6 @@ public:
     // Cleanup stale entries (call periodically)
     void cleanupOldClients();
 
-    // Get token count for monitoring
-    size_t getClientTokens(const std::string& clientIp);
-
-    // Reset a specific client
-    void resetClient(const std::string& clientIp);
-
     void setEnabled(bool enable);
 };
 

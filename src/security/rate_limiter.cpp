@@ -179,21 +179,4 @@ void RateLimiter::cleanupOldClients() {
     }
 }
 
-size_t RateLimiter::getClientTokens(const std::string& clientIp) {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    auto it = clients_.find(clientIp);
-    if (it == clients_.end()) return max_tokens_;
-
-    ClientBucket bucket = it->second;
-    refillTokens(bucket, read_refill_rate_);
-    return bucket.tokens;
-}
-
-void RateLimiter::resetClient(const std::string& clientIp) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    clients_.erase(clientIp);
-    utils::Logger::get_instance().info("Reset rate limit: " + clientIp);
-}
-
 } // namespace security

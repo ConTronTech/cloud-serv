@@ -15,9 +15,8 @@ namespace routes {
 
 namespace {
 
-// Reject any control char, including \t \r \n (Sanitizer::containsControlChars
-// intentionally permits those, so we check explicitly here — defense-in-depth
-// against header injection / odd whitespace in stored names).
+// Reject any control char, including \t \r \n — defense-in-depth against header
+// injection / odd whitespace in stored names.
 bool hasAnyControlChar(const std::string& s) {
     for (unsigned char c : s) {
         if (c < 0x20 || c == 0x7f) return true;
