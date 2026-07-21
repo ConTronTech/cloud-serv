@@ -80,6 +80,13 @@ public:
     // Search folders by name substring across the whole tree.
     std::vector<Folder> searchFolders(int64_t userId, const std::string& q, int limit);
 
+    // ---- Starred / recent ----
+    bool setFileStarred(int64_t userId, int64_t fileId, bool starred);
+    bool setFolderStarred(int64_t userId, int64_t folderId, bool starred);
+    std::vector<FileMeta> starredFiles(int64_t userId);
+    std::vector<Folder> starredFolders(int64_t userId);
+    std::vector<FileMeta> recentFiles(int64_t userId, int limit);
+
     // ---- Chunked uploads ----
     bool createUploadSession(int64_t userId, const std::string& id, int64_t folderId,
                              const std::string& name, const std::string& mime,

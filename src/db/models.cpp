@@ -27,7 +27,8 @@ json FileMeta::toJson() const {
         {"name", name},
         {"mime", mime},
         {"size", size},
-        {"createdAt", created_at}
+        {"createdAt", created_at},
+        {"starred", starred}
     };
 }
 
@@ -37,7 +38,8 @@ json Folder::toJson() const {
         {"type", "folder"},
         {"parentId", parent_id},
         {"name", name},
-        {"createdAt", created_at}
+        {"createdAt", created_at},
+        {"starred", starred}
     };
 }
 

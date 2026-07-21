@@ -108,6 +108,8 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
             if (!db.moveFolder(*userId, folderId, parentId))
                 return http::jsonError(400, "invalid move");
         }
+        if (body.contains("starred") && body["starred"].is_boolean())
+            db.setFolderStarred(*userId, folderId, body["starred"].get<bool>());
         auto f = db.getFolder(*userId, folderId);
         return http::jsonSuccess(json{{"folder", f ? f->toJson() : json(nullptr)}}.dump());
     });
@@ -153,6 +155,28 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
         return http::jsonSuccess(json{{"files", files}, {"folders", folders}}.dump());
     });
 
+    // ---- Starred ----
+    CROW_ROUTE(app, "/api/starred").methods(crow::HTTPMethod::GET)
+    ([&db](const crow::request& req) {
+        auto userId = security::authenticateRequest(req, db);
+        if (!userId) return http::jsonError(401, "unauthorized");
+        json folders = json::array();
+        for (const auto& f : db.starredFolders(*userId)) folders.push_back(f.toJson());
+        json files = json::array();
+        for (const auto& f : db.starredFiles(*userId)) files.push_back(f.toJson());
+        return http::jsonSuccess(json{{"folders", folders}, {"files", files}}.dump());
+    });
+
+    // ---- Recent (recently added files) ----
+    CROW_ROUTE(app, "/api/recent").methods(crow::HTTPMethod::GET)
+    ([&db](const crow::request& req) {
+        auto userId = security::authenticateRequest(req, db);
+        if (!userId) return http::jsonError(401, "unauthorized");
+        json files = json::array();
+        for (const auto& f : db.recentFiles(*userId, 50)) files.push_back(f.toJson());
+        return http::jsonSuccess(json{{"files", files}}.dump());
+    });
+
     // ---- Rename / move file ----
     CROW_ROUTE(app, "/api/files/<int>").methods(crow::HTTPMethod::PATCH)
     ([&db](const crow::request& req, int fileId) {
@@ -173,6 +197,8 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
             if (!db.folderExists(*userId, folderId)) return http::jsonError(400, "folder not found");
             db.moveFile(*userId, fileId, folderId);
         }
+        if (body.contains("starred") && body["starred"].is_boolean())
+            db.setFileStarred(*userId, fileId, body["starred"].get<bool>());
         auto f = db.getFile(*userId, fileId);
         return http::jsonSuccess(json{{"file", f ? f->toJson() : json(nullptr)}}.dump());
     });

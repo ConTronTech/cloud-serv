@@ -41,6 +41,7 @@ struct FileMeta {
     int64_t size = 0;
     std::string storage_key;     // opaque filename on disk (never exposed)
     std::string created_at;
+    bool starred = false;
 
     json toJson() const;
 };
@@ -66,6 +67,7 @@ struct Folder {
     int64_t parent_id = 0;   // 0 = root
     std::string name;
     std::string created_at;
+    bool starred = false;
 
     json toJson() const;
 };
