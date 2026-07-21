@@ -91,6 +91,73 @@ function setMode(m) {
   $("auth-error").textContent = "";
 }
 
+// ==== E2E crypto (WebCrypto) ====
+// Zero-knowledge: the password derives keys in the browser. The server only ever
+// sees an AUTH key (for login) and wrapped key material it cannot open.
+const te = new TextEncoder();
+const PBKDF2_ITERS = 310000;
+
+function toHex(buf) { return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join(""); }
+function fromHex(s) { const a = new Uint8Array(s.length / 2); for (let i = 0; i < a.length; i++) a[i] = parseInt(s.substr(i * 2, 2), 16); return a; }
+function toB64(buf) { let s = ""; const a = new Uint8Array(buf); for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i]); return btoa(s); }
+function fromB64(s) { const bin = atob(s); const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; }
+function randBytes(n) { return crypto.getRandomValues(new Uint8Array(n)); }
+
+// Derive an AUTH key (sent to the server) + a KEK (stays in the browser).
+async function deriveKeys(password, saltHex) {
+  const base = await crypto.subtle.importKey("raw", te.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: fromHex(saltHex), iterations: PBKDF2_ITERS, hash: "SHA-256" }, base, 512));
+  const kek = await crypto.subtle.importKey("raw", bits.slice(32, 64), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+  return { authKeyB64: toB64(bits.slice(0, 32)), kek };
+}
+function importAes(raw) { return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]); }
+async function wrapBytes(raw, key) {
+  const iv = randBytes(12);
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, raw);
+  return toB64(iv) + "." + toB64(new Uint8Array(ct));
+}
+async function unwrapBytes(wrapped, key) {
+  const [iv, ct] = wrapped.split(".");
+  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromB64(iv) }, key, fromB64(ct)));
+}
+
+// The Data Encryption Key lives in memory + sessionStorage (per-tab, cleared on close).
+let DEK_RAW = null;
+function setDEK(raw) { DEK_RAW = raw; try { sessionStorage.setItem("cs_dek", toB64(raw)); } catch {} }
+function clearDEK() { DEK_RAW = null; try { sessionStorage.removeItem("cs_dek"); } catch {} }
+function restoreDEK() { if (!DEK_RAW) { const s = sessionStorage.getItem("cs_dek"); if (s) DEK_RAW = fromB64(s); } return !!DEK_RAW; }
+
+async function e2eRegister(email, password, displayName) {
+  const saltHex = toHex(randBytes(16));
+  const { authKeyB64, kek } = await deriveKeys(password, saltHex);
+  const dekRaw = randBytes(32);
+  const wrappedDek = await wrapBytes(dekRaw, kek);
+  const recRaw = randBytes(32);
+  const wrappedDekRecovery = await wrapBytes(dekRaw, await importAes(recRaw));
+  const { ok, body } = await api("/api/auth/register", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password: authKeyB64, displayName, salt: saltHex, wrappedDek, wrappedDekRecovery }),
+  });
+  if (!ok || !body || !body.token) return { ok: false, body };
+  setDEK(dekRaw);
+  return { ok: true, token: body.token, user: body.user, recoveryKey: "csr_" + toB64(recRaw) };
+}
+
+async function e2eLogin(email, password) {
+  const s = await api("/api/auth/salt?email=" + encodeURIComponent(email), {});
+  const saltHex = (s.ok && s.body && s.body.salt) ? s.body.salt : toHex(randBytes(16));
+  const { authKeyB64, kek } = await deriveKeys(password, saltHex);
+  const { ok, body } = await api("/api/auth/login", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password: authKeyB64 }),
+  });
+  if (!ok || !body || !body.token) return { ok: false, body };
+  try { setDEK(await unwrapBytes(body.wrappedDek, kek)); }
+  catch { return { ok: false, body: { error: "invalid credentials" } }; }
+  return { ok: true, token: body.token, user: body.user };
+}
+
 async function onAuthSubmit(e) {
   e.preventDefault();
   $("auth-error").textContent = "";
@@ -98,28 +165,20 @@ async function onAuthSubmit(e) {
   const password = $("password").value;
   const displayName = $("display-name").value.trim();
   const btn = $("auth-submit");
-  btn.disabled = true;
+  btn.disabled = true; btn.textContent = mode === "login" ? "Unlocking…" : "Creating…";
 
-  const path = mode === "login" ? "/api/auth/login" : "/api/auth/register";
-  const payload = mode === "login"
-    ? { email, password }
-    : { email, password, displayName };
+  let r;
+  try {
+    r = mode === "login" ? await e2eLogin(email, password) : await e2eRegister(email, password, displayName);
+  } catch (err) { r = { ok: false, body: { error: err.message } }; }
+  btn.disabled = false; setMode(mode);
 
-  const { ok, body } = await api(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  btn.disabled = false;
-
-  if (!ok || !body || !body.token) {
-    $("auth-error").textContent = prettyError(body) || "Something went wrong.";
-    return;
-  }
-  token = body.token;
+  if (!r.ok) { $("auth-error").textContent = prettyError(r.body) || "Something went wrong."; return; }
+  token = r.token;
   localStorage.setItem(TOKEN_KEY, token);
   $("password").value = "";
-  showApp(body.user);
+  if (mode === "register" && r.recoveryKey) showRecoveryKey(r.recoveryKey, r.user);
+  else showApp(r.user);
 }
 
 function prettyError(body) {
@@ -134,10 +193,27 @@ function prettyError(body) {
   return map[e] || e || "";
 }
 
+// One-time recovery key screen shown after registration.
+function showRecoveryKey(key, user) {
+  $("recovery-key").textContent = key;
+  $("recovery-modal").classList.remove("hidden");
+  $("recovery-download").onclick = () => {
+    const blob = new Blob(
+      ["cloud-serv recovery key for " + (user?.email || "") + "\n\n" + key +
+       "\n\nKeep this safe. It is the ONLY way to recover your account if you forget your password.\n"],
+      { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "cloud-serv-recovery-key.txt";
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+  };
+  $("recovery-continue").onclick = () => { $("recovery-modal").classList.add("hidden"); showApp(user); };
+}
+
 async function logout() {
   await api("/api/auth/logout", { method: "POST", headers: authHeaders() });
   token = "";
   localStorage.removeItem(TOKEN_KEY);
+  clearDEK();
   showAuth();
 }
 
@@ -716,7 +792,7 @@ const CHUNK_THRESHOLD = 8 * 1024 * 1024;   // files larger than this upload in c
 const CHUNK_SIZE = 5 * 1024 * 1024;        // per-chunk size (< server MAX_BODY_SIZE)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-function sessionExpired() { token = ""; localStorage.removeItem(TOKEN_KEY); showAuth(); }
+function sessionExpired() { token = ""; localStorage.removeItem(TOKEN_KEY); clearDEK(); showAuth(); }
 
 // Dispatch: small files go in one request, big files stream in chunks.
 async function uploadOne(file, state, folderId) {
@@ -1178,10 +1254,12 @@ async function boot() {
 
   setMode("login");
 
-  if (token) {
+  // Need both a session token AND the decryption key (per-tab). Reopening the app
+  // in a fresh tab clears the key, so you log in again to re-derive it.
+  if (token && restoreDEK()) {
     const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
     if (ok && body && body.user) { showApp(body.user); return; }
-    token = ""; localStorage.removeItem(TOKEN_KEY);
+    token = ""; localStorage.removeItem(TOKEN_KEY); clearDEK();
   }
   showAuth();
 }

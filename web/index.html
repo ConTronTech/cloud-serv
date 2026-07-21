@@ -159,6 +159,20 @@
       <div id="preview-content" class="modal-content"></div>
     </div>
 
+    <!-- ===== Recovery key (shown once after registration) ===== -->
+    <div id="recovery-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="card recovery-card">
+        <h2>Save your recovery key</h2>
+        <p class="muted">Your files are end-to-end encrypted. If you forget your password,
+          this key is the <strong>only</strong> way to recover them — we can't reset it.</p>
+        <div id="recovery-key" class="recovery-key"></div>
+        <div class="recovery-actions">
+          <button id="recovery-download" class="btn ghost" type="button">⬇ Download key file</button>
+          <button id="recovery-continue" class="btn primary" type="button">I've saved it — continue</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ===== New menu ===== -->
     <div id="new-modal" class="modal hidden" role="dialog" aria-modal="true">
       <div class="sheet">
