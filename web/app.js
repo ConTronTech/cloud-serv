@@ -706,12 +706,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function sessionExpired() { token = ""; localStorage.removeItem(TOKEN_KEY); showAuth(); }
 
 // Dispatch: small files go in one request, big files stream in chunks.
-async function uploadOne(file, state) {
-  return file.size > CHUNK_THRESHOLD ? uploadChunked(file, state) : uploadDirect(file, state);
+async function uploadOne(file, state, folderId) {
+  return file.size > CHUNK_THRESHOLD ? uploadChunked(file, state, folderId) : uploadDirect(file, state, folderId);
 }
 
 // Small file: single POST, retrying with backoff if rate-limited (429).
-async function uploadDirect(file, state) {
+async function uploadDirect(file, state, folderId) {
   for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
     let res;
     try {
@@ -719,7 +719,7 @@ async function uploadDirect(file, state) {
         method: "POST",
         headers: authHeaders({
           "X-Filename": encodeURIComponent(file.name), // ASCII-safe header
-          "X-Folder": String(currentFolder),
+          "X-Folder": String(folderId),
           "Content-Type": file.type || "application/octet-stream",
         }),
         body: file,
@@ -745,14 +745,14 @@ async function uploadDirect(file, state) {
 }
 
 // Large file: init -> PUT sequential chunks (resumable) -> complete.
-async function uploadChunked(file, state) {
+async function uploadChunked(file, state, folderId) {
   state.textContent = "Starting…";
   let initRes;
   try {
     initRes = await fetch(API + "/api/uploads/init", {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, folderId: currentFolder }),
+      body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, folderId }),
     });
   } catch { state.textContent = "Network error"; return false; }
   if (initRes.status === 401) { sessionExpired(); return false; }
@@ -803,46 +803,97 @@ async function uploadChunked(file, state) {
   return true;
 }
 
-async function uploadFiles(fileList) {
-  const files = Array.from(fileList);
-  if (!files.length) return;
+// Worker pool over jobs of { file, folderId, label }.
+async function runUploads(jobs) {
+  if (!jobs.length) return;
   const box = $("uploads");
-
-  // Build a row per file up front so progress is visible immediately.
-  const jobs = files.map((file) => {
+  const rows = jobs.map((j) => {
     const row = document.createElement("div");
     row.className = "upload-row";
     const label = document.createElement("span");
-    label.textContent = file.name; // textContent — safe
+    label.textContent = j.label; // textContent — safe
     const state = document.createElement("span");
     state.textContent = "Queued…";
     row.append(label, state);
     box.appendChild(row);
-    return { file, row, state };
+    return { ...j, row, state };
   });
 
-  // Worker pool: at most UPLOAD_CONCURRENCY uploads in flight at once.
   let next = 0;
   async function worker() {
-    while (next < jobs.length) {
-      const j = jobs[next++];
+    while (next < rows.length) {
+      const j = rows[next++];
       j.state.textContent = "Uploading…";
-      const ok = await uploadOne(j.file, j.state);
-      if (ok) {
-        j.state.textContent = "Done ✔";
-        setTimeout(() => j.row.remove(), 1500);
-      } else {
-        j.row.classList.add("err");
-      }
+      const ok = await uploadOne(j.file, j.state, j.folderId);
+      if (ok) { j.state.textContent = "Done ✔"; setTimeout(() => j.row.remove(), 1500); }
+      else j.row.classList.add("err");
     }
   }
-  await Promise.all(
-    Array.from({ length: Math.min(UPLOAD_CONCURRENCY, jobs.length) }, worker)
-  );
+  await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, rows.length) }, worker));
   loadFs(currentFolder);
 }
 
-// ---- drag & drop (folder-aware) ----
+// Flat upload: everything into the current folder.
+async function uploadFiles(fileList) {
+  const files = Array.from(fileList);
+  if (!files.length) return;
+  await runUploads(files.map((f) => ({ file: f, folderId: currentFolder, label: f.name })));
+}
+
+// Recreate the folder hierarchy for {file, path} items under the current folder.
+// Returns Map(dirPath -> folderId); "" maps to the current folder.
+async function ensureFolders(items) {
+  const pathToId = new Map([["", currentFolder]]);
+  const dirs = new Set();
+  for (const it of items) {
+    if (!it.path) continue;
+    const parts = it.path.split("/");
+    for (let i = 1; i <= parts.length; i++) dirs.add(parts.slice(0, i).join("/"));
+  }
+  // shallowest first so each folder's parent already exists
+  const ordered = [...dirs].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b));
+  for (const dir of ordered) {
+    const parts = dir.split("/");
+    const name = parts[parts.length - 1];
+    const parentId = pathToId.get(parts.slice(0, -1).join("/")) ?? currentFolder;
+    const { ok, body } = await api("/api/folders", {
+      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ parentId, name }),
+    });
+    pathToId.set(dir, ok && body && body.folder ? body.folder.id : parentId);
+  }
+  return pathToId;
+}
+
+// Upload {file, path} items, preserving the folder tree.
+async function uploadItems(items) {
+  if (!items.length) { toast("Nothing to upload."); return; }
+  const box = $("uploads");
+  const prep = document.createElement("div");
+  prep.className = "upload-row";
+  prep.textContent = `Creating folders for ${items.length} file${items.length === 1 ? "" : "s"}…`;
+  box.appendChild(prep);
+  const pathToId = await ensureFolders(items);
+  prep.remove();
+  const jobs = items.map((it) => ({
+    file: it.file,
+    folderId: pathToId.get(it.path) ?? currentFolder,
+    label: (it.path ? it.path + "/" : "") + it.file.name,
+  }));
+  await runUploads(jobs);
+}
+
+// From a <input webkitdirectory> selection: paths come from webkitRelativePath.
+function uploadFromDirInput(fileList) {
+  const items = Array.from(fileList).map((f) => {
+    const rel = f.webkitRelativePath || f.name;
+    const parts = rel.split("/"); parts.pop(); // drop the filename
+    return { file: f, path: parts.join("/") };
+  });
+  uploadItems(items);
+}
+
+// ---- drag & drop (folder-tree aware) ----
 // Read every entry from a directory reader (it returns results in batches).
 function readAllEntries(reader) {
   return new Promise((resolve) => {
@@ -856,13 +907,15 @@ function readAllEntries(reader) {
   });
 }
 
-// Recursively collect File objects from a dropped file/folder entry.
-async function collectEntry(entry, out) {
+// Recursively collect {file, path} from a dropped file/folder entry, where
+// `path` is the directory chain (so the tree is recreated on upload).
+async function collectEntry(entry, out, prefix = "") {
   if (entry.isFile) {
-    try { out.push(await new Promise((res, rej) => entry.file(res, rej))); } catch { /* skip */ }
+    try { out.push({ file: await new Promise((res, rej) => entry.file(res, rej)), path: prefix }); } catch { /* skip */ }
   } else if (entry.isDirectory) {
     const entries = await readAllEntries(entry.createReader());
-    for (const e of entries) await collectEntry(e, out);
+    const sub = prefix ? prefix + "/" + entry.name : entry.name;
+    for (const e of entries) await collectEntry(e, out, sub);
   }
 }
 
@@ -875,15 +928,14 @@ function wireDropzone() {
   dz.addEventListener("drop", async (e) => {
     const dt = e.dataTransfer;
     if (!dt) return;
-    // Prefer entries (handles dropped folders); fall back to a flat file list.
+    // Prefer entries (handles dropped folders + nesting); fall back to flat files.
     const entries = dt.items
       ? Array.from(dt.items).map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean)
       : [];
     if (entries.length) {
-      const files = [];
-      for (const entry of entries) await collectEntry(entry, files);
-      if (files.length) uploadFiles(files);
-      else toast("Nothing to upload.");
+      const items = [];
+      for (const entry of entries) await collectEntry(entry, items);
+      uploadItems(items);
     } else if (dt.files && dt.files.length) {
       uploadFiles(dt.files);
     }
@@ -1020,7 +1072,8 @@ async function boot() {
   $("tab-register").addEventListener("click", () => setMode("register"));
   $("auth-form").addEventListener("submit", onAuthSubmit);
   $("logout").addEventListener("click", logout);
-  $("file-input").addEventListener("change", (e) => uploadFiles(e.target.files));
+  $("file-input").addEventListener("change", (e) => { uploadFiles(e.target.files); e.target.value = ""; });
+  $("folder-input").addEventListener("change", (e) => { uploadFromDirInput(e.target.files); e.target.value = ""; });
   $("view-toggle").addEventListener("click", toggleView);
   $("sort-btn").addEventListener("click", openSort);
   $("select-btn").addEventListener("click", () => (selectMode ? exitSelect() : enterSelect()));
@@ -1058,6 +1111,7 @@ async function boot() {
   $("new-modal").addEventListener("click", (e) => { if (e.target.id === "new-modal") closeNewMenu(); });
   $("new-folder-item").addEventListener("click", () => { closeNewMenu(); newFolder(); });
   $("new-upload-item").addEventListener("click", () => { closeNewMenu(); $("file-input").click(); });
+  $("new-uploadfolder-item").addEventListener("click", () => { closeNewMenu(); $("folder-input").click(); });
 
   $("new-note").addEventListener("click", newNote);
   $("note-back").addEventListener("click", () => { showNotesList(); loadNotes(); });
