@@ -1,5 +1,7 @@
 # cloud-serv
 
+[![CI](https://github.com/ConTronTech/cloud-serv/actions/workflows/ci.yml/badge.svg)](https://github.com/ConTronTech/cloud-serv/actions/workflows/ci.yml)
+
 A self-hosted personal cloud suite (files now; notes / contacts / calendar later),
 built from scratch in **modular C++ (Crow)**. One API server + a shared web client,
 with native apps added later. Runs on your own PC; reachable remotely over Tailscale.
@@ -59,15 +61,22 @@ drag-and-drop file manager (upload, download, delete), and offline app-shell
 caching via a service worker. Filenames are always rendered with `textContent`
 (never `innerHTML`), so a filename can't inject HTML.
 
-## Testing / security
+## Testing
 
 ```bash
-make && ./scripts/security-audit.sh   # 16-case attack + regression battery
+bash tests/run.sh     # builds, then runs the whole suite (curl + node, no browser)
 ```
 
-Covers SQL injection, path traversal (API + static), cross-user IDOR, auth
-bypass, input validation, and logout revocation. Runs on a throwaway DB/port,
-so it never touches your real data.
+The suite (`tests/`) starts the server on a throwaway DB + isolated port (rate
+limiting off) and covers auth + E2E key material, files + Range playback,
+folders (tree/move/cycle/recursive-delete), chunked uploads (with sha256
+integrity), notes, search/categories/starred/recent, and a security battery
+(SQLi, path traversal, cross-user IDOR, auth bypass, validation). `tests/
+crypto.test.js` verifies the E2E WebCrypto (key derivation, unwrap, GCM tamper).
+
+**CI:** every push / PR runs `tests/run.sh` on GitHub Actions
+(`.github/workflows/ci.yml`). `scripts/security-audit.sh` remains as a
+standalone attack battery you can run against a build.
 
 ## API quick reference
 
