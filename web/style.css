@@ -208,6 +208,19 @@ img { max-width: 100%; }
 .dz-inner p { margin: 0.35rem 0; }
 
 .uploads { margin: 0.75rem 0; display: grid; gap: 0.5rem; }
+
+/* Overall upload progress (fixed, always visible during a batch) */
+.upload-progress {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(1rem + env(safe-area-inset-bottom));
+  width: min(440px, 92vw);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 0.7rem 0.9rem; box-shadow: var(--shadow); z-index: 30;
+}
+.upload-progress.err { border-color: var(--danger); }
+.up-label { font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; }
+.up-track { height: 8px; background: var(--panel-2); border-radius: 999px; overflow: hidden; }
+.up-fill { height: 100%; width: 0; background: var(--accent); border-radius: 999px; transition: width 0.25s ease; }
 .upload-row { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 0.55rem 0.75rem; font-size: 0.85rem; display: flex; justify-content: space-between; gap: 0.5rem; }
 .upload-row.err { border-color: var(--danger); color: var(--danger); }
 

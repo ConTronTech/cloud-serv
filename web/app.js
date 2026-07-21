@@ -816,11 +816,44 @@ async function uploadChunked(file, state, folderId) {
   return true;
 }
 
+// A fixed, always-visible overall upload progress bar.
+function makeUploadProgress(total) {
+  const bar = document.createElement("div");
+  bar.className = "upload-progress";
+  const label = document.createElement("div"); label.className = "up-label";
+  const track = document.createElement("div"); track.className = "up-track";
+  const fill = document.createElement("div"); fill.className = "up-fill";
+  track.append(fill);
+  bar.append(label, track);
+  $("app-view").appendChild(bar);
+  return {
+    update(done, failed) {
+      fill.style.width = Math.round((done / total) * 100) + "%";
+      label.textContent = `Uploading… ${done}/${total}` + (failed ? ` · ${failed} failed` : "");
+    },
+    finish(done, failed) {
+      fill.style.width = "100%";
+      bar.classList.toggle("err", failed > 0);
+      label.textContent = failed
+        ? `Uploaded ${done - failed}/${done} · ${failed} failed`
+        : `Uploaded ${done} file${done === 1 ? "" : "s"} ✔`;
+      setTimeout(() => bar.remove(), failed ? 6000 : 2500);
+    },
+  };
+}
+
 // Worker pool over jobs of { file, folderId, label }.
 async function runUploads(jobs) {
   if (!jobs.length) return;
   const box = $("uploads");
+  const total = jobs.length;
+  const showRows = total <= 8; // per-file rows only for small batches
+  let done = 0, failed = 0;
+  const progress = makeUploadProgress(total);
+  progress.update(0, 0);
+
   const rows = jobs.map((j) => {
+    if (!showRows) return { ...j, row: null, state: {} };
     const row = document.createElement("div");
     row.className = "upload-row";
     const label = document.createElement("span");
@@ -836,13 +869,20 @@ async function runUploads(jobs) {
   async function worker() {
     while (next < rows.length) {
       const j = rows[next++];
-      j.state.textContent = "Uploading…";
+      if (j.row) j.state.textContent = "Uploading…";
       const ok = await uploadOne(j.file, j.state, j.folderId);
-      if (ok) { j.state.textContent = "Done ✔"; setTimeout(() => j.row.remove(), 1500); }
-      else j.row.classList.add("err");
+      if (ok) { if (j.row) { j.state.textContent = "Done ✔"; setTimeout(() => j.row.remove(), 1500); } }
+      else {
+        failed++;
+        if (j.row) j.row.classList.add("err");
+        else { const r = document.createElement("div"); r.className = "upload-row err"; r.textContent = "✗ " + j.label; box.appendChild(r); }
+      }
+      done++;
+      progress.update(done, failed);
     }
   }
   await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, rows.length) }, worker));
+  progress.finish(done, failed);
   loadFs(currentFolder);
 }
 
