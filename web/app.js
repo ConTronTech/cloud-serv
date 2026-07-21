@@ -122,32 +122,46 @@ async function unwrapBytes(wrapped, key) {
   return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromB64(iv) }, key, fromB64(ct)));
 }
 
-// ---- content encryption (chunked AES-256-GCM) ----
-// Each chunk on the wire/disk is [nonce(12) ‖ ciphertext ‖ tag(16)]; full chunks
+// ---- content encryption (chunked AES-256-GCM, STREAM-style) ----
+// Each frame on the wire/disk is [nonce(12) ‖ ciphertext ‖ tag(16)]; full frames
 // hold ENC_CHUNK plaintext bytes, so decryption can seek by fixed frame size.
+// The frame index + a final-frame flag are bound into the GCM AAD, so an
+// untrusted server cannot reorder, drop (truncate), duplicate, or splice frames
+// without the tag check failing on decrypt.
 const ENC_CHUNK = 1024 * 1024;
 const ENC_OVERHEAD = 12 + 16;
 function concatBytes(list) { const n = list.reduce((s, c) => s + c.length, 0); const o = new Uint8Array(n); let p = 0; for (const c of list) { o.set(c, p); p += c.length; } return o; }
-async function encryptChunk(fileKey, slice) {
+// AAD = big-endian uint32 frame index ‖ final-flag byte.
+function frameAad(index, isFinal) {
+  return new Uint8Array([(index >>> 24) & 0xff, (index >>> 16) & 0xff, (index >>> 8) & 0xff, index & 0xff, isFinal ? 1 : 0]);
+}
+async function encryptChunk(fileKey, slice, index, isFinal) {
   const nonce = randBytes(12);
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, fileKey, slice));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: frameAad(index, isFinal) }, fileKey, slice));
   const frame = new Uint8Array(12 + ct.length); frame.set(nonce, 0); frame.set(ct, 12);
   return frame;
 }
-async function decryptFrame(fileKey, frame) {
-  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: frame.subarray(0, 12) }, fileKey, frame.subarray(12)));
+async function decryptFrame(fileKey, frame, index, isFinal) {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: frame.subarray(0, 12), additionalData: frameAad(index, isFinal) }, fileKey, frame.subarray(12)));
 }
 async function encryptContent(fileKey, plain) {
-  const frames = []; let off = 0;
-  do { frames.push(await encryptChunk(fileKey, plain.subarray(off, Math.min(off + ENC_CHUNK, plain.length)))); off += ENC_CHUNK; }
-  while (off < plain.length);
+  const frames = [];
+  const total = Math.max(1, Math.ceil(plain.length / ENC_CHUNK)); // 0-byte file => one empty final frame
+  let off = 0, i = 0;
+  do {
+    frames.push(await encryptChunk(fileKey, plain.subarray(off, Math.min(off + ENC_CHUNK, plain.length)), i, i === total - 1));
+    off += ENC_CHUNK; i++;
+  } while (off < plain.length);
   return concatBytes(frames);
 }
 async function decryptContent(fileKey, cipher) {
+  if (cipher.length === 0) throw new Error("empty ciphertext"); // a real file has >= 1 frame
   const FRAME = ENC_CHUNK + ENC_OVERHEAD; const parts = [];
-  for (let off = 0; off < cipher.length; ) {
+  let i = 0;
+  for (let off = 0; off < cipher.length; i++) {
     const len = Math.min(FRAME, cipher.length - off);
-    parts.push(await decryptFrame(fileKey, cipher.subarray(off, off + len)));
+    const isFinal = off + len >= cipher.length; // last frame by position
+    parts.push(await decryptFrame(fileKey, cipher.subarray(off, off + len), i, isFinal));
     off += len;
   }
   return concatBytes(parts);

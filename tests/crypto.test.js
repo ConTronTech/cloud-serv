@@ -24,26 +24,35 @@ async function unwrapBytes(w, key) { const [iv, ct] = w.split("."); return new U
 const ENC_CHUNK = 1024 * 1024;   // plaintext bytes per chunk
 const ENC_OVERHEAD = 12 + 16;    // nonce + GCM tag
 function concatBytes(list) { const n = list.reduce((s, c) => s + c.length, 0); const o = new Uint8Array(n); let p = 0; for (const c of list) { o.set(c, p); p += c.length; } return o; }
+// AAD binds each frame to its position + final-flag (STREAM construction) so a
+// server cannot reorder/truncate/duplicate frames without failing the tag check.
+function frameAad(index, isFinal) {
+  return new Uint8Array([(index >>> 24) & 0xff, (index >>> 16) & 0xff, (index >>> 8) & 0xff, index & 0xff, isFinal ? 1 : 0]);
+}
 async function encryptContent(fileKey, plain) {
   const frames = [];
-  let off = 0;
+  const total = Math.max(1, Math.ceil(plain.length / ENC_CHUNK));
+  let off = 0, i = 0;
   do {
     const slice = plain.subarray(off, Math.min(off + ENC_CHUNK, plain.length));
     const nonce = rand(12);
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, fileKey, slice));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: frameAad(i, i === total - 1) }, fileKey, slice));
     const frame = new Uint8Array(12 + ct.length); frame.set(nonce, 0); frame.set(ct, 12);
-    frames.push(frame); off += ENC_CHUNK;
+    frames.push(frame); off += ENC_CHUNK; i++;
   } while (off < plain.length);
   return concatBytes(frames);
 }
 async function decryptContent(fileKey, cipher) {
+  if (cipher.length === 0) throw new Error("empty ciphertext");
   const FRAME = ENC_CHUNK + ENC_OVERHEAD;
   const parts = [];
-  for (let off = 0; off < cipher.length; ) {
+  let i = 0;
+  for (let off = 0; off < cipher.length; i++) {
     const len = Math.min(FRAME, cipher.length - off);
+    const isFinal = off + len >= cipher.length;
     const nonce = cipher.subarray(off, off + 12);
     const ctTag = cipher.subarray(off + 12, off + len);
-    parts.push(new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, fileKey, ctTag)));
+    parts.push(new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce, additionalData: frameAad(i, isFinal) }, fileKey, ctTag)));
     off += len;
   }
   return concatBytes(parts);
@@ -114,6 +123,37 @@ const ok = (name, cond) => { console.log((cond ? "  PASS: " : "  FAIL: ") + name
     let failed = false;
     try { await decryptContent(fileKey, cipher); } catch { failed = true; }
     ok("content: tampered chunk rejected (GCM)", failed);
+  }
+
+  // ---- untrusted-server frame integrity (STREAM AAD) ----
+  // These simulate a malicious server rearranging the ciphertext a user's own
+  // key can otherwise "validly" decrypt frame-by-frame.
+  const FRAME = ENC_CHUNK + ENC_OVERHEAD;
+  // reordered frames rejected (swap frame 0 and frame 1 of a 3-frame file)
+  {
+    const cipher = await encryptContent(fileKey, bigBytes(ENC_CHUNK * 2 + 500));
+    const swapped = new Uint8Array(cipher);
+    swapped.set(cipher.subarray(FRAME, 2 * FRAME), 0);
+    swapped.set(cipher.subarray(0, FRAME), FRAME);
+    let failed = false;
+    try { await decryptContent(fileKey, swapped); } catch { failed = true; }
+    ok("content: reordered frames rejected (AAD index)", failed);
+  }
+  // truncated file rejected (drop the final frame of a 2-frame file)
+  {
+    const cipher = await encryptContent(fileKey, bigBytes(ENC_CHUNK + 500));
+    const truncated = cipher.subarray(0, FRAME); // keep only frame 0
+    let failed = false;
+    try { await decryptContent(fileKey, truncated); } catch { failed = true; }
+    ok("content: truncated file rejected (AAD final-flag)", failed);
+  }
+  // duplicated final frame (append) rejected
+  {
+    const cipher = await encryptContent(fileKey, bigBytes(ENC_CHUNK + 500));
+    const appended = concatBytes([cipher, cipher.subarray(FRAME)]); // repeat last frame
+    let failed = false;
+    try { await decryptContent(fileKey, appended); } catch { failed = true; }
+    ok("content: appended/duplicated frame rejected (AAD)", failed);
   }
 
   console.log(`\nRESULTS: ${pass} passed, ${fail} failed`);

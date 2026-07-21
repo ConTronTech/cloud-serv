@@ -35,23 +35,31 @@ async function unwrapBytes(w, key) { const [iv, ct] = w.split("."); return new U
 
 const ENC_CHUNK = 1024 * 1024;
 function concatBytes(list) { const n = list.reduce((s, c) => s + c.length, 0); const o = new Uint8Array(n); let p = 0; for (const c of list) { o.set(c, p); p += c.length; } return o; }
+function frameAad(index, isFinal) {
+  return new Uint8Array([(index >>> 24) & 0xff, (index >>> 16) & 0xff, (index >>> 8) & 0xff, index & 0xff, isFinal ? 1 : 0]);
+}
 async function encryptContent(fileKey, plain) {
-  const frames = []; let off = 0;
+  const frames = [];
+  const total = Math.max(1, Math.ceil(plain.length / ENC_CHUNK));
+  let off = 0, i = 0;
   do {
     const slice = plain.subarray(off, Math.min(off + ENC_CHUNK, plain.length));
     const nonce = rand(12);
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, fileKey, slice));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: frameAad(i, i === total - 1) }, fileKey, slice));
     const fr = new Uint8Array(12 + ct.length); fr.set(nonce, 0); fr.set(ct, 12); frames.push(fr);
-    off += ENC_CHUNK;
+    off += ENC_CHUNK; i++;
   } while (off < plain.length);
   return concatBytes(frames);
 }
 async function decryptContent(fileKey, cipher) {
+  if (cipher.length === 0) throw new Error("empty ciphertext");
   const FRAME = ENC_CHUNK + 28; const parts = [];
-  for (let off = 0; off < cipher.length; ) {
+  let i = 0;
+  for (let off = 0; off < cipher.length; i++) {
     const len = Math.min(FRAME, cipher.length - off);
+    const isFinal = off + len >= cipher.length;
     const fr = cipher.subarray(off, off + len);
-    parts.push(new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: fr.subarray(0, 12) }, fileKey, fr.subarray(12))));
+    parts.push(new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: fr.subarray(0, 12), additionalData: frameAad(i, isFinal) }, fileKey, fr.subarray(12))));
     off += len;
   }
   return concatBytes(parts);
