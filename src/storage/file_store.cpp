@@ -15,6 +15,20 @@ FileStore::FileStore(const std::string& baseDir) : baseDir_(baseDir) {
     }
 }
 
+namespace {
+// Storage keys are always server-generated hex (Crypto::randomHex). Enforce that
+// invariant here as defense-in-depth: a key is only ever a bare filename, so it
+// can never contain a path separator or ".." that would escape the user's dir.
+bool isSafeKey(const std::string& key) {
+    if (key.empty() || key.size() > 128) return false;
+    for (char c : key) {
+        bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!hex) return false;
+    }
+    return true;
+}
+} // namespace
+
 std::string FileStore::userDir(int64_t userId) const {
     return baseDir_ + "/" + std::to_string(userId);
 }
@@ -25,6 +39,7 @@ std::string FileStore::pathFor(int64_t userId, const std::string& storageKey) co
 
 bool FileStore::write(int64_t userId, const std::string& storageKey,
                       const char* data, size_t size) const {
+    if (!isSafeKey(storageKey)) return false;
     std::error_code ec;
     fs::create_directories(userDir(userId), ec);
     if (ec) {
@@ -40,6 +55,7 @@ bool FileStore::write(int64_t userId, const std::string& storageKey,
 
 bool FileStore::append(int64_t userId, const std::string& storageKey,
                        const char* data, size_t size) const {
+    if (!isSafeKey(storageKey)) return false;
     std::error_code ec;
     fs::create_directories(userDir(userId), ec);
     if (ec) {
@@ -53,6 +69,7 @@ bool FileStore::append(int64_t userId, const std::string& storageKey,
 }
 
 int64_t FileStore::sizeOf(int64_t userId, const std::string& storageKey) const {
+    if (!isSafeKey(storageKey)) return -1;
     std::error_code ec;
     auto n = fs::file_size(pathFor(userId, storageKey), ec);
     if (ec) return -1;
@@ -60,6 +77,7 @@ int64_t FileStore::sizeOf(int64_t userId, const std::string& storageKey) const {
 }
 
 bool FileStore::remove(int64_t userId, const std::string& storageKey) const {
+    if (!isSafeKey(storageKey)) return false;
     std::error_code ec;
     fs::remove(pathFor(userId, storageKey), ec);
     return !ec;

@@ -28,6 +28,15 @@ want "no creds" "unauthorized" "$(curl -s "http://$API/api/files")"
 want "garbage token" "unauthorized" "$(curl -s "http://$API/api/files" -H 'authorization: Bearer deadbeef')"
 want "bad key no fallthrough" "unauthorized" "$(curl -s "http://$API/api/files" -H 'X-API-Key: bad' -H "authorization: Bearer $T1")"
 
+echo "== CSRF / CORS =="
+# A cross-origin whose authority merely CONTAINS our host as a substring must be
+# blocked (regression for the old find(host)!=npos check).
+want "CSRF substring-origin blocked" "cross-origin" "$(curl -s -H "authorization: Bearer $T1" -H "Origin: http://$API.attacker.com" -X POST "http://$API/api/folders" -d '{"name":"x"}')"
+# True same-origin still passes the CSRF check.
+want "same-origin POST allowed" '"folder"' "$(curl -s -H "authorization: Bearer $T1" -H "Origin: http://$API" -X POST "http://$API/api/folders" -d '{"name":"ok"}')"
+# With no CORS origins configured, preflight must not echo Allow-Origin.
+if curl -s -i -X OPTIONS "http://$API/api/files" -H "Origin: http://evil.com" | grep -qi "access-control-allow-origin"; then bad "CORS echoes unconfigured origin"; else ok "CORS denies unconfigured origin"; fi
+
 echo "== input validation + logout =="
 want "malformed json" "invalid json" "$(curl -s "http://$API/api/auth/login" --data-binary '{bad')"
 TX=$(tok_of "$(curl -s "http://$API/api/auth/login" -d '{"email":"s1@e.cc","password":"supersecret"}')")

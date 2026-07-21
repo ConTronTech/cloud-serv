@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <cstring>
 #include <vector>
+#include <stdexcept>
 
 namespace security {
 
@@ -35,6 +36,11 @@ std::string Crypto::randomHex(size_t nbytes) {
     if (RAND_bytes(buf.data(), static_cast<int>(nbytes)) != 1) {
         std::ifstream urandom("/dev/urandom", std::ios::binary);
         urandom.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(nbytes));
+        // Fail CLOSED: if both CSPRNG sources fail we must never return the
+        // zero-initialized buffer — that would make tokens/keys/salts predictable.
+        if (!urandom || static_cast<size_t>(urandom.gcount()) != nbytes) {
+            throw std::runtime_error("CSPRNG unavailable — refusing to emit predictable randomness");
+        }
     }
     return toHex(buf.data(), nbytes);
 }
@@ -50,6 +56,9 @@ std::string Crypto::hashPassword(const std::string& password) {
     if (RAND_bytes(salt, kSaltBytes) != 1) {
         std::ifstream urandom("/dev/urandom", std::ios::binary);
         urandom.read(reinterpret_cast<char*>(salt), kSaltBytes);
+        if (!urandom || urandom.gcount() != kSaltBytes) {
+            throw std::runtime_error("CSPRNG unavailable — refusing to hash with a predictable salt");
+        }
     }
 
     unsigned char out[kKeyBytes];
@@ -83,10 +92,17 @@ bool Crypto::verifyPassword(const std::string& password, const std::string& stor
     const std::string& hashHex = parts[3];
     if (saltHex.size() % 2 != 0 || hashHex.empty()) return false;
 
-    // Decode salt hex
+    // Decode salt hex. Guard against malformed (non-hex) stored data: std::stoi
+    // throws on bad input, and an unguarded throw here would crash verifyPassword.
     std::vector<unsigned char> salt(saltHex.size() / 2);
-    for (size_t i = 0; i < salt.size(); i++) {
-        salt[i] = static_cast<unsigned char>(std::stoi(saltHex.substr(i * 2, 2), nullptr, 16));
+    try {
+        for (size_t i = 0; i < salt.size(); i++) {
+            const std::string byteHex = saltHex.substr(i * 2, 2);
+            if (byteHex.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) return false;
+            salt[i] = static_cast<unsigned char>(std::stoi(byteHex, nullptr, 16));
+        }
+    } catch (...) {
+        return false;
     }
 
     size_t keyLen = hashHex.size() / 2;

@@ -2,6 +2,7 @@
 #include "utils/logger.h"
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <cctype>
 
 namespace http {
 
@@ -12,13 +13,25 @@ size_t SecurityMiddleware::max_body_size = 10 * 1024 * 1024; // 10MB default
 // CORS allowed origins (must be before before_handle which references it)
 static std::vector<std::string> s_cors_origins;
 
+// Extract the "host[:port]" authority from an Origin/Referer URL, lowercased.
+// Returns "" if the URL has no scheme://authority (fail closed at the call site).
+static std::string authorityOf(const std::string& url) {
+    auto p = url.find("://");
+    if (p == std::string::npos) return "";
+    std::string rest = url.substr(p + 3);
+    auto slash = rest.find('/');
+    if (slash != std::string::npos) rest = rest.substr(0, slash);
+    for (char& c : rest) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return rest; // host[:port]
+}
+
 void SecurityMiddleware::before_handle(crow::request& req, crow::response& res, context& ctx) {
     ctx.start_time = std::chrono::steady_clock::now();
 
     // Handle CORS preflight
     if (req.method == crow::HTTPMethod::OPTIONS) {
         std::string origin = req.get_header_value("Origin");
-        bool allowed = s_cors_origins.empty(); // if no origins configured, deny CORS
+        bool allowed = false; // no CORS origins configured => deny cross-origin (same-origin never preflights)
         for (const auto& o : s_cors_origins) {
             if (o == origin || o == "*") { allowed = true; break; }
         }
@@ -75,20 +88,24 @@ void SecurityMiddleware::before_handle(crow::request& req, crow::response& res, 
         if (apiKey.empty() && (!origin.empty() || !referer.empty())) {
             bool originOk = false;
             std::string checkUrl = origin.empty() ? referer : origin;
-            
-            // Check against CORS origins
-            for (const auto& o : s_cors_origins) {
-                if (checkUrl.find(o) == 0) { originOk = true; break; }
-            }
-            
-            // Check if origin matches the Host header (true same-origin)
-            if (!originOk) {
+            // Compare the request's origin AUTHORITY (host[:port]) exactly — never a
+            // substring — so "victimhost.attacker.com" can't satisfy "victimhost".
+            std::string reqAuth = authorityOf(checkUrl);
+
+            if (!reqAuth.empty()) {
+                // True same-origin: authority equals our own Host header.
                 std::string host = req.get_header_value("Host");
-                if (!host.empty() && checkUrl.find(host) != std::string::npos) {
-                    originOk = true;
+                for (char& c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (!host.empty() && reqAuth == host) originOk = true;
+
+                // Or an explicitly allow-listed CORS origin (exact authority match).
+                if (!originOk) {
+                    for (const auto& o : s_cors_origins) {
+                        if (o == "*" || reqAuth == authorityOf(o)) { originOk = true; break; }
+                    }
                 }
             }
-            
+
             if (!originOk) {
                 utils::Logger::get_instance().warn("CSRF blocked: origin=" + origin +
                     " referer=" + referer + " from " + ctx.client_ip);

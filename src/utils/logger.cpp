@@ -123,7 +123,15 @@ void Logger::write_log(LogLevel level, const std::string& message) {
         return;  // Don't log if below current level
     }
 
-    std::string formatted = format_message(level, message);
+    // Strip control chars (esp. CR/LF) so user-controlled fields — client IP,
+    // X-Forwarded-For, URL path, filenames — can't forge extra log lines.
+    std::string safe = message;
+    for (char& c : safe) {
+        unsigned char u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7f) c = ' ';
+    }
+
+    std::string formatted = format_message(level, safe);
 
     // Docker-friendly: all logs to stdout (Docker captures and manages them)
     if (level >= LogLevel::ERROR) {
