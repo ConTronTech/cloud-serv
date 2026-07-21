@@ -61,6 +61,19 @@ bool isValidDisplayName(const std::string& name) {
     return true;
 }
 
+// An encrypted name is an opaque "iv.ct" base64 blob (E2E). We can't read it,
+// but we bound its size and keep it to the base64 alphabet so nothing odd is
+// stored or echoed back into a JSON/HTTP context.
+bool isValidEncName(const std::string& s) {
+    if (s.empty() || s.size() > 4096) return false;
+    for (unsigned char c : s) {
+        bool okChar = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                      (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=' || c == '.';
+        if (!okChar) return false;
+    }
+    return true;
+}
+
 // Cap on bytes served per Range response — bounds memory for a single request
 // while the client keeps requesting further ranges as it plays/seeks.
 const int64_t RANGE_CHUNK_CAP = 8 * 1024 * 1024;
@@ -120,9 +133,18 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
-        std::string name = urlDecode(req.get_header_value("X-Filename"));
-        if (name.empty()) return http::jsonError(400, "missing X-Filename header");
-        if (!isValidDisplayName(name)) return http::jsonError(400, "invalid filename");
+        // E2E: the filename may be encrypted (X-Enc-Name). When present we store
+        // the plaintext name blank and keep only the opaque blob; otherwise the
+        // legacy plaintext X-Filename path (still used by non-E2E clients/tests).
+        std::string encName = req.get_header_value("X-Enc-Name");
+        std::string name;
+        if (!encName.empty()) {
+            if (!isValidEncName(encName)) return http::jsonError(400, "invalid enc name");
+        } else {
+            name = urlDecode(req.get_header_value("X-Filename"));
+            if (name.empty()) return http::jsonError(400, "missing X-Filename header");
+            if (!isValidDisplayName(name)) return http::jsonError(400, "invalid filename");
+        }
         // Empty (0-byte) files are allowed — a cloud legitimately stores them.
 
         int64_t folderId = 0; // 0 = root
@@ -147,13 +169,14 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
             return http::jsonError(500, "storage write failed");
         }
 
-        int64_t id = db.addFile(*userId, folderId, name, mime, size, storageKey, wrappedKey);
+        int64_t id = db.addFile(*userId, folderId, name, mime, size, storageKey, wrappedKey, encName);
         if (id < 0) {
             store.remove(*userId, storageKey);  // don't leak an orphan blob
             return http::jsonError(500, "could not record file");
         }
 
-        json out = {{"id", id}, {"name", name}, {"mime", mime}, {"size", size}, {"folderId", folderId}};
+        json out = {{"id", id}, {"name", name}, {"mime", mime}, {"size", size},
+                    {"folderId", folderId}, {"encName", encName}};
         return http::jsonSuccess(out.dump());
     });
 

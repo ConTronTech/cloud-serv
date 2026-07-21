@@ -168,7 +168,8 @@ async function encryptFileForUpload(file) {
   const { raw, key } = await newFileKey();
   const cipher = await encryptContent(key, plain);
   const wrappedKey = await wrapFileKey(raw);
-  return { cipher, wrappedKey, plainSize: plain.length };
+  const encName = await encryptName(file.name);
+  return { cipher, wrappedKey, plainSize: plain.length, encName };
 }
 
 // Fetch a file's stored content and return its plaintext bytes. A file with no
@@ -186,6 +187,31 @@ async function fetchPlaintext(item) {
 async function objectUrlFor(item) {
   const bytes = await fetchPlaintext(item);
   return URL.createObjectURL(new Blob([bytes], { type: item.mime || "application/octet-stream" }));
+}
+
+// ---- E2E name encryption ----
+// Display names are encrypted under the DEK (like content keys), so the server
+// only ever stores opaque blobs. Empty encName = legacy plaintext (see dispName).
+const _nameDec = new TextDecoder();
+async function encryptName(name) { return wrapBytes(new TextEncoder().encode(name), await dekKey()); }
+async function decryptName(enc) { return _nameDec.decode(await unwrapBytes(enc, await dekKey())); }
+// Decrypt encName -> item._name for every item in a listing, before it renders.
+async function hydrateNames(...lists) {
+  for (const items of lists) {
+    if (!Array.isArray(items)) continue;
+    for (const it of items) {
+      if (it && it.encName) {
+        try { it._name = await decryptName(it.encName); }
+        catch { it._name = "🔒 locked"; }
+      }
+    }
+  }
+}
+// The name to show: decrypted plaintext for E2E items, else the legacy name.
+function dispName(item) {
+  if (!item) return "";
+  if (item.encName) return item._name != null ? item._name : "🔒 locked";
+  return decodeName(item.name);
 }
 
 // The Data Encryption Key lives in memory + sessionStorage (per-tab, cleared on close).
@@ -328,9 +354,10 @@ async function loadFs(folderId) {
   const { ok, status, body } = await api("/api/fs?folder=" + folderId, { headers: authHeaders() });
   if (status === 401) { sessionExpired(); return; }
   if (!ok || !body) { toast("Could not load folder."); return; }
-  renderBreadcrumbs($("breadcrumbs"), body.breadcrumbs || [], (id) => loadFs(id));
   curFolders = body.folders || [];
   curFiles = body.files || [];
+  await hydrateNames(curFolders, curFiles, body.breadcrumbs || []);
+  renderBreadcrumbs($("breadcrumbs"), body.breadcrumbs || [], (id) => loadFs(id));
   renderFs();
   updateHome();
   loadUsage(); // sidebar storage chip stays current
@@ -361,6 +388,7 @@ async function openCategory(cat) {
   showFilesTab();
   curFolders = [];
   curFiles = body.files || [];
+  await hydrateNames(curFiles);
   renderResultsHeader(CATEGORY_TITLE[cat] || "Results");
   renderFs();
   updateHome();
@@ -383,7 +411,7 @@ function sortItems(items, isFile) {
     let r;
     if (sortBy === "size" && isFile) r = (a.size || 0) - (b.size || 0);
     else if (sortBy === "date") r = (a.createdAt || "").localeCompare(b.createdAt || "");
-    else r = decodeName(a.name).localeCompare(decodeName(b.name), undefined, { sensitivity: "base", numeric: true });
+    else r = dispName(a).localeCompare(dispName(b), undefined, { sensitivity: "base", numeric: true });
     return r * dir;
   });
 }
@@ -486,7 +514,7 @@ function gridCell(kind, item) {
   }
   const name = document.createElement("div");
   name.className = "grid-name";
-  name.textContent = kind === "folder" ? item.name : decodeName(item.name);
+  name.textContent = dispName(item);
   name.title = name.textContent;
   if (item.starred) {
     const star = document.createElement("span");
@@ -516,7 +544,7 @@ function renderBreadcrumbs(el, crumbs, onNav) {
     el.appendChild(sep);
     const b = document.createElement("button");
     b.className = "crumb"; b.type = "button";
-    b.textContent = c.name; // textContent — safe
+    b.textContent = dispName(c); // textContent — safe
     b.addEventListener("click", () => onNav(c.id));
     el.appendChild(b);
   }
@@ -569,9 +597,9 @@ function listRow(kind, item, icText, displayName, modified, size) {
   return li;
 }
 
-function folderRow(f) { return listRow("folder", f, "📁", f.name, fmtDate(f.createdAt), "—"); }
+function folderRow(f) { return listRow("folder", f, "📁", dispName(f), fmtDate(f.createdAt), "—"); }
 function fileRow(f) {
-  return listRow("file", f, iconFor(f.mime), decodeName(f.name), fmtDate(f.createdAt), fmtSize(f.size));
+  return listRow("file", f, iconFor(f.mime), dispName(f), fmtDate(f.createdAt), fmtSize(f.size));
 }
 
 // Sortable column header for list view.
@@ -602,7 +630,7 @@ function setSort(by) {
 function openActions(kind, item) {
   const list = $("action-list");
   list.textContent = "";
-  $("action-title").textContent = kind === "folder" ? item.name : decodeName(item.name);
+  $("action-title").textContent = dispName(item);
   const add = (label, fn, danger) => {
     const b = document.createElement("button");
     b.className = "action-item" + (danger ? " danger" : "");
@@ -655,13 +683,13 @@ async function downloadFile(f) {
   catch { toast("Download failed."); return; }
   const url = URL.createObjectURL(new Blob([bytes], { type: f.mime || "application/octet-stream" }));
   const a = document.createElement("a");
-  a.href = url; a.download = decodeName(f.name);
+  a.href = url; a.download = dispName(f);
   document.body.appendChild(a); a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
 
 async function deleteFile(f) {
-  if (!confirm(`Delete "${decodeName(f.name)}"?`)) return;
+  if (!confirm(`Delete "${dispName(f)}"?`)) return;
   const { ok } = await api("/api/files/" + f.id, { method: "DELETE", headers: authHeaders() });
   if (!ok) { toast("Delete failed."); return; }
   loadFs(currentFolder);
@@ -674,39 +702,40 @@ async function newFolder() {
   const { ok, body } = await api("/api/folders", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ parentId: currentFolder, name: name.trim() }),
+    body: JSON.stringify({ parentId: currentFolder, encName: await encryptName(name.trim()) }),
   });
   if (!ok) { toast(prettyError(body) || "Could not create folder"); return; }
   loadFs(currentFolder);
 }
 
 async function renameFolder(f) {
-  const name = prompt("Rename folder:", f.name);
-  if (name == null || !name.trim() || name.trim() === f.name) return;
+  const cur = dispName(f);
+  const name = prompt("Rename folder:", cur);
+  if (name == null || !name.trim() || name.trim() === cur) return;
   const { ok } = await api("/api/folders/" + f.id, {
     method: "PATCH",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ name: name.trim() }),
+    body: JSON.stringify({ encName: await encryptName(name.trim()) }),
   });
   if (!ok) { toast("Rename failed"); return; }
   loadFs(currentFolder);
 }
 
 async function deleteFolder(f) {
-  if (!confirm(`Delete folder "${f.name}" and everything inside it?`)) return;
+  if (!confirm(`Delete folder "${dispName(f)}" and everything inside it?`)) return;
   const { ok } = await api("/api/folders/" + f.id, { method: "DELETE", headers: authHeaders() });
   if (!ok) { toast("Delete failed"); return; }
   loadFs(currentFolder);
 }
 
 async function renameFileItem(f) {
-  const cur = decodeName(f.name);
+  const cur = dispName(f);
   const name = prompt("Rename file:", cur);
   if (name == null || !name.trim() || name.trim() === cur) return;
   const { ok } = await api("/api/files/" + f.id, {
     method: "PATCH",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ name: name.trim() }),
+    body: JSON.stringify({ encName: await encryptName(name.trim()) }),
   });
   if (!ok) { toast("Rename failed"); return; }
   loadFs(currentFolder);
@@ -743,6 +772,7 @@ async function loadMoveFs(folderId) {
   moveCurrentFolder = folderId;
   const { ok, body } = await api("/api/fs?folder=" + folderId, { headers: authHeaders() });
   if (!ok || !body) { toast("Could not load folders."); return; }
+  await hydrateNames(body.folders || [], body.breadcrumbs || []);
   renderBreadcrumbs($("move-breadcrumbs"), body.breadcrumbs || [], (id) => loadMoveFs(id));
   const list = $("move-list");
   list.textContent = "";
@@ -758,7 +788,7 @@ async function loadMoveFs(folderId) {
     li.className = "fs-item clickable";
     const ic = document.createElement("div"); ic.className = "file-ic"; ic.textContent = "📁";
     const meta = document.createElement("div"); meta.className = "file-meta";
-    const name = document.createElement("div"); name.className = "file-name"; name.textContent = f.name;
+    const name = document.createElement("div"); name.className = "file-name"; name.textContent = dispName(f);
     meta.append(name);
     li.append(ic, meta);
     li.addEventListener("click", () => loadMoveFs(f.id));
@@ -809,6 +839,7 @@ async function doSearch(q) {
   showFilesTab();
   curFolders = body.folders || [];
   curFiles = body.files || [];
+  await hydrateNames(curFolders, curFiles);
   renderResultsHeader('“' + q + '”');
   renderFs();
   updateHome();
@@ -863,7 +894,7 @@ async function openPreview(file) {
   el.className = "preview-media";
   const cap = document.createElement("div");
   cap.className = "preview-cap";
-  cap.textContent = decodeName(file.name); // textContent — safe
+  cap.textContent = dispName(file); // textContent — safe
   c.textContent = "";
   c.append(el, cap);
 }
@@ -901,7 +932,7 @@ async function uploadDirect(file, state, folderId) {
       res = await fetch(API + "/api/files", {
         method: "POST",
         headers: authHeaders({
-          "X-Filename": encodeURIComponent(file.name), // ASCII-safe header
+          "X-Enc-Name": enc.encName, // encrypted filename (opaque to the server)
           "X-Folder": String(folderId),
           "X-Wrapped-Key": enc.wrappedKey,
           "X-Plain-Size": String(enc.plainSize),
@@ -948,7 +979,7 @@ async function uploadChunked(file, state, folderId) {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
-        name: file.name, mime: file.type || "application/octet-stream",
+        encName: enc.encName, mime: file.type || "application/octet-stream",
         size: total, folderId,
         wrappedKey: enc.wrappedKey, plainSize: enc.plainSize,
       }),
@@ -1097,7 +1128,7 @@ async function ensureFolders(items) {
     const parentId = pathToId.get(parts.slice(0, -1).join("/")) ?? currentFolder;
     const { ok, body } = await api("/api/folders", {
       method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ parentId, name }),
+      body: JSON.stringify({ parentId, encName: await encryptName(name) }),
     });
     pathToId.set(dir, ok && body && body.folder ? body.folder.id : parentId);
   }
@@ -1212,6 +1243,7 @@ async function loadView(kind) {
   resultsMode = true;
   curFolders = body.folders || [];
   curFiles = body.files || [];
+  await hydrateNames(curFolders, curFiles);
   renderResultsHeader(kind === "recent" ? "🕓 Recent" : "⭐ Starred");
   renderFs();
   updateHome();

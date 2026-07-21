@@ -24,6 +24,17 @@ bool validName(const std::string& name) {
     return name != "." && name != "..";
 }
 
+// Opaque "iv.ct" base64 blob for an E2E-encrypted name (see files.cpp).
+bool validEncName(const std::string& s) {
+    if (s.empty() || s.size() > 4096) return false;
+    for (unsigned char c : s) {
+        bool okChar = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                      (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=' || c == '.';
+        if (!okChar) return false;
+    }
+    return true;
+}
+
 std::string strField(const json& j, const char* key) {
     if (j.contains(key) && j[key].is_string()) return j[key].get<std::string>();
     return "";
@@ -48,8 +59,15 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         json body = json::parse(req.body, nullptr, false);
         if (body.is_discarded() || !body.is_object()) return http::jsonError(400, "invalid json");
 
-        std::string name = strField(body, "name");
-        if (!validName(name)) return http::jsonError(400, "invalid filename");
+        // E2E: an encrypted name (opaque) means we store the plaintext name blank.
+        std::string encName = strField(body, "encName");
+        std::string name;
+        if (!encName.empty()) {
+            if (!validEncName(encName)) return http::jsonError(400, "invalid enc name");
+        } else {
+            name = strField(body, "name");
+            if (!validName(name)) return http::jsonError(400, "invalid filename");
+        }
 
         std::string mime = strField(body, "mime");
         if (mime.empty() || mime.size() > 255 || anyControlChar(mime))
@@ -71,7 +89,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         if (!store.write(*userId, storageKey, nullptr, 0))  // create empty blob
             return http::jsonError(500, "storage init failed");
         if (!db.createUploadSession(*userId, uploadId, folderId, name, mime, size, storageKey,
-                                    wrappedKey, plainSize)) {
+                                    wrappedKey, plainSize, encName)) {
             store.remove(*userId, storageKey);
             return http::jsonError(500, "could not create upload");
         }
@@ -139,7 +157,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         // otherwise the bytes received.
         int64_t displaySize = s->plain_size > 0 ? s->plain_size : s->received;
         int64_t fileId = db.addFile(*userId, s->folder_id, s->name, s->mime, displaySize,
-                                    s->storage_key, s->wrapped_key);
+                                    s->storage_key, s->wrapped_key, s->enc_name);
         if (fileId < 0) return http::jsonError(500, "could not finalize");
         db.deleteUploadSession(*userId, id); // keep the blob; it's now a real file
 

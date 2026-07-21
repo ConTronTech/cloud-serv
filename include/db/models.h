@@ -47,6 +47,7 @@ struct FileMeta {
     std::string created_at;
     bool starred = false;
     std::string wrapped_key;     // E2E: per-file content key wrapped by the user's DEK ("" = plaintext)
+    std::string enc_name;        // E2E: display name encrypted under the DEK ("" = plaintext, see `name`)
 
     json toJson() const;
 };
@@ -73,6 +74,7 @@ struct Folder {
     std::string name;
     std::string created_at;
     bool starred = false;
+    std::string enc_name;    // E2E: display name encrypted under the DEK ("" = plaintext, see `name`)
 
     json toJson() const;
 };
@@ -91,4 +93,5 @@ struct UploadSession {
     std::string created_at;
     std::string wrapped_key;     // E2E: wrapped content key (empty = plaintext)
     int64_t plain_size = 0;      // plaintext size for display (0 = use received)
+    std::string enc_name;        // E2E: display name encrypted under the DEK ("" = plaintext)
 };

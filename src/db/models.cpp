@@ -29,7 +29,8 @@ json FileMeta::toJson() const {
         {"size", size},
         {"createdAt", created_at},
         {"starred", starred},
-        {"wrappedKey", wrapped_key}
+        {"wrappedKey", wrapped_key},
+        {"encName", enc_name}
     };
 }
 
@@ -40,7 +41,8 @@ json Folder::toJson() const {
         {"parentId", parent_id},
         {"name", name},
         {"createdAt", created_at},
-        {"starred", starred}
+        {"starred", starred},
+        {"encName", enc_name}
     };
 }
 

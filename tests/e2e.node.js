@@ -91,32 +91,51 @@ async function main() {
   lj.wrappedDek === wrappedDek ? ok("server round-trips wrappedDek untouched") : bad("wrappedDek mismatch");
   const auth = { authorization: "Bearer " + token };
 
-  // Encrypt a file client-side and upload the ciphertext.
+  // Encrypt a file client-side (name AND contents) and upload the ciphertext.
   const marker = "TOP-SECRET-PLAINTEXT-MARKER";
+  const nameMarker = "MY-PRIVATE-FILENAME-2026.txt";
   const plaintext = te.encode(marker + " " + "x".repeat(5000));
   const dekKey = await importAes(dek);
   const fileRaw = rand(32);
   const cipher = await encryptContent(await importAes(fileRaw), plaintext);
   const wrappedKey = await wrapBytes(fileRaw, dekKey);
+  const encName = await wrapBytes(te.encode(nameMarker), dekKey);
   r = await fetch(API + "/api/files", {
     method: "POST",
-    headers: { ...auth, "X-Filename": "secret.txt", "X-Folder": "0", "X-Wrapped-Key": wrappedKey, "X-Plain-Size": String(plaintext.length), "content-type": "text/plain" },
+    headers: { ...auth, "X-Enc-Name": encName, "X-Folder": "0", "X-Wrapped-Key": wrappedKey, "X-Plain-Size": String(plaintext.length), "content-type": "application/octet-stream" },
     body: cipher,
   });
   const uj = await r.json();
-  uj.id ? ok("upload encrypted file") : bad("upload " + r.status);
+  uj.id ? ok("upload encrypted file (encrypted name)") : bad("upload " + r.status);
   uj.size === plaintext.length ? ok("stored display size = plaintext size") : bad("size " + uj.size);
+  uj.name === "" ? ok("server stores blank plaintext name") : bad("plaintext name stored: " + JSON.stringify(uj.name));
 
-  // On disk: no plaintext, and the blob is byte-for-byte our ciphertext.
+  // Create a folder with an encrypted name too.
+  const folderNameMarker = "PRIVATE-FOLDER-NAME";
+  const folderEnc = await wrapBytes(te.encode(folderNameMarker), dekKey);
+  r = await fetch(API + "/api/folders", {
+    method: "POST", headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ parentId: 0, encName: folderEnc }),
+  });
+  (await r.json()).folder ? ok("create folder with encrypted name") : bad("folder create " + r.status);
+
+  // On disk: no plaintext contents, and the blob is byte-for-byte our ciphertext.
   const disk = walk(STORAGE).map((f) => fs.readFileSync(f));
-  const leaked = disk.some((b) => b.includes(Buffer.from(marker)));
-  leaked ? bad("PLAINTEXT LEAKED TO DISK") : ok("no plaintext anywhere on disk");
+  disk.some((b) => b.includes(Buffer.from(marker))) ? bad("PLAINTEXT CONTENT LEAKED TO DISK") : ok("no plaintext content on disk");
   disk.some((b) => b.equals(Buffer.from(cipher))) ? ok("on-disk blob is the ciphertext") : bad("ciphertext not found on disk");
 
-  // The listing exposes wrappedKey so the client can decrypt.
+  // In the database file (incl. WAL): the filename / folder name must not appear.
+  const dbDir = path.dirname(STORAGE);
+  const dbBlobs = fs.readdirSync(dbDir).filter((f) => f.startsWith("cloud.db")).map((f) => fs.readFileSync(path.join(dbDir, f)));
+  const nameLeaked = dbBlobs.some((b) => b.includes(Buffer.from(nameMarker)) || b.includes(Buffer.from(folderNameMarker)));
+  nameLeaked ? bad("PLAINTEXT NAME LEAKED TO DATABASE") : ok("no plaintext name in the database");
+
+  // The listing exposes wrappedKey + encName so the client can decrypt both.
   r = await fetch(API + "/api/files", { headers: auth });
   const listed = (await r.json()).files.find((f) => f.id === uj.id);
   listed && listed.wrappedKey === wrappedKey ? ok("listing returns wrappedKey") : bad("wrappedKey not in listing");
+  const backName = listed && listed.encName ? new TextDecoder().decode(await unwrapBytes(listed.encName, dekKey)) : "";
+  backName === nameMarker ? ok("encName decrypts to original filename") : bad("name decrypt mismatch: " + backName);
 
   // Download + decrypt with the key recovered via the DEK → original bytes.
   r = await fetch(API + "/api/files/" + uj.id + "/content", { headers: auth });

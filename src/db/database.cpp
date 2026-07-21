@@ -107,6 +107,7 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 parent_id INTEGER NOT NULL DEFAULT 0,   -- 0 = root
                 name TEXT NOT NULL,
                 starred INTEGER NOT NULL DEFAULT 0,
+                enc_name TEXT DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
@@ -122,6 +123,7 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 storage_key TEXT NOT NULL,
                 starred INTEGER NOT NULL DEFAULT 0,
                 wrapped_key TEXT DEFAULT '',
+                enc_name TEXT DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
@@ -147,6 +149,7 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 storage_key TEXT NOT NULL,
                 wrapped_key TEXT DEFAULT '',
                 plain_size INTEGER DEFAULT 0,
+                enc_name TEXT DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
@@ -174,6 +177,9 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
         sqlite3_exec(c.h, "ALTER TABLE files ADD COLUMN wrapped_key TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN wrapped_key TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN plain_size INTEGER DEFAULT 0;", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE files ADD COLUMN enc_name TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE folders ADD COLUMN enc_name TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN enc_name TEXT DEFAULT '';", nullptr, nullptr, nullptr);
 
         utils::Logger::get_instance().info("Database initialized: " + dbPath_);
     } catch (const std::exception& e) {
@@ -433,12 +439,12 @@ bool CloudDB::revokeApiKey(int64_t userId, int64_t keyId) {
 
 int64_t CloudDB::addFile(int64_t userId, int64_t folderId, const std::string& name,
                          const std::string& mime, int64_t size, const std::string& storageKey,
-                         const std::string& wrappedKey) {
+                         const std::string& wrappedKey, const std::string& encName) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
-        Stmt q(c.h, "INSERT INTO files(user_id, folder_id, name, mime, size, storage_key, wrapped_key) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?)");
+        Stmt q(c.h, "INSERT INTO files(user_id, folder_id, name, mime, size, storage_key, wrapped_key, enc_name) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)");
         q.bind(1, userId);
         q.bind(2, folderId);
         q.bind(3, name);
@@ -446,6 +452,7 @@ int64_t CloudDB::addFile(int64_t userId, int64_t folderId, const std::string& na
         q.bind(5, size);
         q.bind(6, storageKey);
         q.bind(7, wrappedKey);
+        q.bind(8, encName);
         if (sqlite3_step(q.s) != SQLITE_DONE) return -1;
         return sqlite3_last_insert_rowid(c.h);
     } catch (const std::exception& e) {
@@ -459,7 +466,7 @@ std::vector<FileMeta> CloudDB::listFiles(int64_t userId, int64_t folderId) {
     std::vector<FileMeta> out;
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at, starred, wrapped_key "
+        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at, starred, wrapped_key, enc_name "
                     "FROM files WHERE user_id = ? AND folder_id = ? ORDER BY name COLLATE NOCASE");
         q.bind(1, userId);
         q.bind(2, folderId);
@@ -473,7 +480,7 @@ std::vector<FileMeta> CloudDB::listFiles(int64_t userId, int64_t folderId) {
             f.size = q.colInt64(5);
             f.storage_key = q.colText(6);
             f.created_at = q.colText(7);
-            f.starred = q.colInt64(8) != 0; f.wrapped_key = q.colText(9);
+            f.starred = q.colInt64(8) != 0; f.wrapped_key = q.colText(9); f.enc_name = q.colText(10);
             out.push_back(f);
         }
     } catch (const std::exception& e) {
@@ -486,7 +493,7 @@ std::optional<FileMeta> CloudDB::getFile(int64_t userId, int64_t fileId) {
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at, starred, wrapped_key "
+        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at, starred, wrapped_key, enc_name "
                     "FROM files WHERE id = ? AND user_id = ?");
         q.bind(1, fileId);
         q.bind(2, userId);
@@ -500,7 +507,7 @@ std::optional<FileMeta> CloudDB::getFile(int64_t userId, int64_t fileId) {
         f.size = q.colInt64(5);
         f.storage_key = q.colText(6);
         f.created_at = q.colText(7);
-        f.starred = q.colInt64(8) != 0; f.wrapped_key = q.colText(9);
+        f.starred = q.colInt64(8) != 0; f.wrapped_key = q.colText(9); f.enc_name = q.colText(10);
         return f;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("getFile: " + std::string(e.what()));
@@ -524,12 +531,17 @@ bool CloudDB::moveFile(int64_t userId, int64_t fileId, int64_t folderId) {
     }
 }
 
-bool CloudDB::renameFile(int64_t userId, int64_t fileId, const std::string& name) {
+bool CloudDB::renameFile(int64_t userId, int64_t fileId, const std::string& name,
+                         const std::string& encName) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
-        Stmt q(c.h, "UPDATE files SET name = ? WHERE id = ? AND user_id = ?");
-        q.bind(1, name);
+        // E2E: when the client sends an encrypted name, we store it opaque and
+        // blank the plaintext column; otherwise the legacy plaintext path.
+        Stmt q(c.h, encName.empty()
+                        ? "UPDATE files SET name = ? WHERE id = ? AND user_id = ?"
+                        : "UPDATE files SET enc_name = ?, name = '' WHERE id = ? AND user_id = ?");
+        q.bind(1, encName.empty() ? name : encName);
         q.bind(2, fileId);
         q.bind(3, userId);
         q.exec();
@@ -587,7 +599,7 @@ std::vector<FileMeta> CloudDB::searchFiles(int64_t userId, const std::string& q,
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
         std::string sql =
-            "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at, starred, wrapped_key "
+            "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at, starred, wrapped_key, enc_name "
             "FROM files WHERE user_id = ?";
         if (!q.empty()) sql += " AND name LIKE ? ESCAPE '\\'";
         if (category == "image")         sql += " AND mime LIKE 'image/%'";
@@ -615,7 +627,7 @@ std::vector<FileMeta> CloudDB::searchFiles(int64_t userId, const std::string& q,
             f.size = st.colInt64(5);
             f.storage_key = st.colText(6);
             f.created_at = st.colText(7);
-            f.starred = st.colInt64(8) != 0; f.wrapped_key = st.colText(9);
+            f.starred = st.colInt64(8) != 0; f.wrapped_key = st.colText(9); f.enc_name = st.colText(10);
             out.push_back(f);
         }
     } catch (const std::exception& e) {
@@ -630,7 +642,7 @@ std::vector<Folder> CloudDB::searchFolders(int64_t userId, const std::string& q,
     if (q.empty()) return out;
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt st(c.h, "SELECT id, user_id, parent_id, name, created_at, starred FROM folders "
+        Stmt st(c.h, "SELECT id, user_id, parent_id, name, created_at, starred, enc_name FROM folders "
                      "WHERE user_id = ? AND name LIKE ? ESCAPE '\\' "
                      "ORDER BY name COLLATE NOCASE LIMIT ?");
         st.bind(1, userId);
@@ -643,7 +655,7 @@ std::vector<Folder> CloudDB::searchFolders(int64_t userId, const std::string& q,
             f.parent_id = st.colInt64(2);
             f.name = st.colText(3);
             f.created_at = st.colText(4);
-            f.starred = st.colInt64(5) != 0;
+            f.starred = st.colInt64(5) != 0; f.enc_name = st.colText(6);
             out.push_back(f);
         }
     } catch (const std::exception& e) {
@@ -691,14 +703,14 @@ std::vector<FileMeta> CloudDB::starredFiles(int64_t userId) {
     std::vector<FileMeta> out;
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at, starred, wrapped_key "
+        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at, starred, wrapped_key, enc_name "
                     "FROM files WHERE user_id = ? AND starred = 1 ORDER BY name COLLATE NOCASE");
         q.bind(1, userId);
         while (q.step()) {
             FileMeta f;
             f.id = q.colInt64(0); f.user_id = q.colInt64(1); f.folder_id = q.colInt64(2);
             f.name = q.colText(3); f.mime = q.colText(4); f.size = q.colInt64(5);
-            f.storage_key = q.colText(6); f.created_at = q.colText(7); f.starred = q.colInt64(8) != 0; f.wrapped_key = q.colText(9);
+            f.storage_key = q.colText(6); f.created_at = q.colText(7); f.starred = q.colInt64(8) != 0; f.wrapped_key = q.colText(9); f.enc_name = q.colText(10);
             out.push_back(f);
         }
     } catch (const std::exception& e) {
@@ -712,13 +724,13 @@ std::vector<Folder> CloudDB::starredFolders(int64_t userId) {
     std::vector<Folder> out;
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, parent_id, name, created_at, starred FROM folders "
+        Stmt q(c.h, "SELECT id, user_id, parent_id, name, created_at, starred, enc_name FROM folders "
                     "WHERE user_id = ? AND starred = 1 ORDER BY name COLLATE NOCASE");
         q.bind(1, userId);
         while (q.step()) {
             Folder f;
             f.id = q.colInt64(0); f.user_id = q.colInt64(1); f.parent_id = q.colInt64(2);
-            f.name = q.colText(3); f.created_at = q.colText(4); f.starred = q.colInt64(5) != 0;
+            f.name = q.colText(3); f.created_at = q.colText(4); f.starred = q.colInt64(5) != 0; f.enc_name = q.colText(6);
             out.push_back(f);
         }
     } catch (const std::exception& e) {
@@ -732,7 +744,7 @@ std::vector<FileMeta> CloudDB::recentFiles(int64_t userId, int limit) {
     std::vector<FileMeta> out;
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at, starred, wrapped_key "
+        Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, storage_key, created_at, starred, wrapped_key, enc_name "
                     "FROM files WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?");
         q.bind(1, userId);
         q.bind(2, static_cast<int64_t>(limit > 0 ? limit : 50));
@@ -740,7 +752,7 @@ std::vector<FileMeta> CloudDB::recentFiles(int64_t userId, int limit) {
             FileMeta f;
             f.id = q.colInt64(0); f.user_id = q.colInt64(1); f.folder_id = q.colInt64(2);
             f.name = q.colText(3); f.mime = q.colText(4); f.size = q.colInt64(5);
-            f.storage_key = q.colText(6); f.created_at = q.colText(7); f.starred = q.colInt64(8) != 0; f.wrapped_key = q.colText(9);
+            f.storage_key = q.colText(6); f.created_at = q.colText(7); f.starred = q.colInt64(8) != 0; f.wrapped_key = q.colText(9); f.enc_name = q.colText(10);
             out.push_back(f);
         }
     } catch (const std::exception& e) {
@@ -766,7 +778,8 @@ bool CloudDB::folderExists(int64_t userId, int64_t folderId) {
     }
 }
 
-int64_t CloudDB::createFolder(int64_t userId, int64_t parentId, const std::string& name) {
+int64_t CloudDB::createFolder(int64_t userId, int64_t parentId, const std::string& name,
+                              const std::string& encName) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
@@ -776,10 +789,11 @@ int64_t CloudDB::createFolder(int64_t userId, int64_t parentId, const std::strin
             chk.bind(2, userId);
             if (!chk.step()) return -1; // parent must exist and be owned
         }
-        Stmt q(c.h, "INSERT INTO folders(user_id, parent_id, name) VALUES(?, ?, ?)");
+        Stmt q(c.h, "INSERT INTO folders(user_id, parent_id, name, enc_name) VALUES(?, ?, ?, ?)");
         q.bind(1, userId);
         q.bind(2, parentId);
         q.bind(3, name);
+        q.bind(4, encName);
         if (sqlite3_step(q.s) != SQLITE_DONE) return -1;
         return sqlite3_last_insert_rowid(c.h);
     } catch (const std::exception& e) {
@@ -793,7 +807,7 @@ std::vector<Folder> CloudDB::listFolders(int64_t userId, int64_t parentId) {
     std::vector<Folder> out;
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, parent_id, name, created_at, starred FROM folders "
+        Stmt q(c.h, "SELECT id, user_id, parent_id, name, created_at, starred, enc_name FROM folders "
                     "WHERE user_id = ? AND parent_id = ? ORDER BY name COLLATE NOCASE");
         q.bind(1, userId);
         q.bind(2, parentId);
@@ -804,7 +818,7 @@ std::vector<Folder> CloudDB::listFolders(int64_t userId, int64_t parentId) {
             f.parent_id = q.colInt64(2);
             f.name = q.colText(3);
             f.created_at = q.colText(4);
-            f.starred = q.colInt64(5) != 0;
+            f.starred = q.colInt64(5) != 0; f.enc_name = q.colText(6);
             out.push_back(f);
         }
     } catch (const std::exception& e) {
@@ -817,7 +831,7 @@ std::optional<Folder> CloudDB::getFolder(int64_t userId, int64_t folderId) {
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, parent_id, name, created_at, starred FROM folders "
+        Stmt q(c.h, "SELECT id, user_id, parent_id, name, created_at, starred, enc_name FROM folders "
                     "WHERE id = ? AND user_id = ?");
         q.bind(1, folderId);
         q.bind(2, userId);
@@ -828,7 +842,7 @@ std::optional<Folder> CloudDB::getFolder(int64_t userId, int64_t folderId) {
         f.parent_id = q.colInt64(2);
         f.name = q.colText(3);
         f.created_at = q.colText(4);
-        f.starred = q.colInt64(5) != 0;
+        f.starred = q.colInt64(5) != 0; f.enc_name = q.colText(6);
         return f;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("getFolder: " + std::string(e.what()));
@@ -836,12 +850,15 @@ std::optional<Folder> CloudDB::getFolder(int64_t userId, int64_t folderId) {
     }
 }
 
-bool CloudDB::renameFolder(int64_t userId, int64_t folderId, const std::string& name) {
+bool CloudDB::renameFolder(int64_t userId, int64_t folderId, const std::string& name,
+                           const std::string& encName) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
-        Stmt q(c.h, "UPDATE folders SET name = ? WHERE id = ? AND user_id = ?");
-        q.bind(1, name);
+        Stmt q(c.h, encName.empty()
+                        ? "UPDATE folders SET name = ? WHERE id = ? AND user_id = ?"
+                        : "UPDATE folders SET enc_name = ?, name = '' WHERE id = ? AND user_id = ?");
+        q.bind(1, encName.empty() ? name : encName);
         q.bind(2, folderId);
         q.bind(3, userId);
         q.exec();
@@ -951,12 +968,13 @@ std::vector<Folder> CloudDB::folderPath(int64_t userId, int64_t folderId) {
 bool CloudDB::createUploadSession(int64_t userId, const std::string& id, int64_t folderId,
                                   const std::string& name, const std::string& mime,
                                   int64_t size, const std::string& storageKey,
-                                  const std::string& wrappedKey, int64_t plainSize) {
+                                  const std::string& wrappedKey, int64_t plainSize,
+                                  const std::string& encName) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
         Stmt q(c.h, "INSERT INTO upload_sessions(id, user_id, folder_id, name, mime, size, received, "
-                    "storage_key, wrapped_key, plain_size) VALUES(?, ?, ?, ?, ?, ?, 0, ?, ?, ?)");
+                    "storage_key, wrapped_key, plain_size, enc_name) VALUES(?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)");
         q.bind(1, id);
         q.bind(2, userId);
         q.bind(3, folderId);
@@ -966,6 +984,7 @@ bool CloudDB::createUploadSession(int64_t userId, const std::string& id, int64_t
         q.bind(7, storageKey);
         q.bind(8, wrappedKey);
         q.bind(9, plainSize);
+        q.bind(10, encName);
         return sqlite3_step(q.s) == SQLITE_DONE;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("createUploadSession: " + std::string(e.what()));
@@ -978,7 +997,7 @@ std::optional<UploadSession> CloudDB::getUploadSession(int64_t userId, const std
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
         Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, received, storage_key, created_at, "
-                    "wrapped_key, plain_size FROM upload_sessions WHERE id = ? AND user_id = ?");
+                    "wrapped_key, plain_size, enc_name FROM upload_sessions WHERE id = ? AND user_id = ?");
         q.bind(1, id);
         q.bind(2, userId);
         if (!q.step()) return std::nullopt;
@@ -994,6 +1013,7 @@ std::optional<UploadSession> CloudDB::getUploadSession(int64_t userId, const std
         u.created_at = q.colText(8);
         u.wrapped_key = q.colText(9);
         u.plain_size = q.colInt64(10);
+        u.enc_name = q.colText(11);
         return u;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("getUploadSession: " + std::string(e.what()));

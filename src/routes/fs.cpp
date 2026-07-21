@@ -23,6 +23,17 @@ bool validName(const std::string& name) {
     return name != "." && name != "..";
 }
 
+// Opaque "iv.ct" base64 blob for an E2E-encrypted name (see files.cpp).
+bool validEncName(const std::string& s) {
+    if (s.empty() || s.size() > 4096) return false;
+    for (unsigned char c : s) {
+        bool okChar = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                      (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=' || c == '.';
+        if (!okChar) return false;
+    }
+    return true;
+}
+
 std::string strField(const json& j, const char* key) {
     if (j.contains(key) && j[key].is_string()) return j[key].get<std::string>();
     return "";
@@ -78,11 +89,18 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
 
         json body = json::parse(req.body, nullptr, false);
         if (body.is_discarded() || !body.is_object()) return http::jsonError(400, "invalid json");
-        std::string name = strField(body, "name");
-        if (!validName(name)) return http::jsonError(400, "invalid folder name");
+        // E2E: an encrypted folder name (opaque) means we store the plaintext blank.
+        std::string encName = strField(body, "encName");
+        std::string name;
+        if (!encName.empty()) {
+            if (!validEncName(encName)) return http::jsonError(400, "invalid enc name");
+        } else {
+            name = strField(body, "name");
+            if (!validName(name)) return http::jsonError(400, "invalid folder name");
+        }
         int64_t parentId = intField(body, "parentId", 0);
 
-        int64_t id = db.createFolder(*userId, parentId, name);
+        int64_t id = db.createFolder(*userId, parentId, name, encName);
         if (id < 0) return http::jsonError(400, "could not create folder");
         auto f = db.getFolder(*userId, id);
         return http::jsonSuccess(json{{"folder", f ? f->toJson() : json(nullptr)}}.dump());
@@ -98,7 +116,11 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
         if (body.is_discarded() || !body.is_object()) return http::jsonError(400, "invalid json");
         if (!db.getFolder(*userId, folderId)) return http::jsonError(404, "not found");
 
-        if (body.contains("name")) {
+        if (body.contains("encName")) {
+            std::string encName = strField(body, "encName");
+            if (!validEncName(encName)) return http::jsonError(400, "invalid enc name");
+            db.renameFolder(*userId, folderId, "", encName);
+        } else if (body.contains("name")) {
             std::string name = strField(body, "name");
             if (!validName(name)) return http::jsonError(400, "invalid folder name");
             db.renameFolder(*userId, folderId, name);
@@ -187,7 +209,11 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
         if (body.is_discarded() || !body.is_object()) return http::jsonError(400, "invalid json");
         if (!db.getFile(*userId, fileId)) return http::jsonError(404, "not found");
 
-        if (body.contains("name")) {
+        if (body.contains("encName")) {
+            std::string encName = strField(body, "encName");
+            if (!validEncName(encName)) return http::jsonError(400, "invalid enc name");
+            db.renameFile(*userId, fileId, "", encName);
+        } else if (body.contains("name")) {
             std::string name = strField(body, "name");
             if (!validName(name)) return http::jsonError(400, "invalid filename");
             db.renameFile(*userId, fileId, name);
