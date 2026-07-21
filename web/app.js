@@ -183,14 +183,14 @@ async function loadFs(folderId) {
   curFiles = body.files || [];
   renderFs();
   updateHome();
+  loadUsage(); // sidebar storage chip stays current
 }
 
-// Storage chip + category row are only shown at the root, in normal (non-results) mode.
+// Category row is only shown at the root, in normal (non-results) mode.
 function updateHome() {
   const atRoot = currentFolder === 0 && !resultsMode;
   $("home-extras").classList.toggle("hidden", !atRoot);
   $("dropzone").classList.toggle("hidden", resultsMode);
-  if (atRoot) loadUsage();
 }
 
 async function loadUsage() {
@@ -837,7 +837,12 @@ function switchTab(tab) {
   $("files-tab").classList.toggle("hidden", !files);
   $("notes-tab").classList.toggle("hidden", files);
   if (!files) { showNotesList(); loadNotes(); }
+  closeSidebar(); // collapse the mobile drawer after choosing
 }
+
+// ---- sidebar (mobile drawer) ----
+function openSidebar() { $("sidebar").classList.add("open"); $("sidebar-backdrop").classList.remove("hidden"); }
+function closeSidebar() { $("sidebar").classList.remove("open"); $("sidebar-backdrop").classList.add("hidden"); }
 
 function showNotesList() {
   $("note-editor").classList.add("hidden");
@@ -952,7 +957,9 @@ async function boot() {
   $("action-close").addEventListener("click", closeActions);
   $("action-modal").addEventListener("click", (e) => { if (e.target.id === "action-modal") closeActions(); });
 
-  // notes
+  // sidebar / nav
+  $("menu-btn").addEventListener("click", openSidebar);
+  $("sidebar-backdrop").addEventListener("click", closeSidebar);
   $("nav-files").addEventListener("click", () => switchTab("files"));
   $("nav-notes").addEventListener("click", () => switchTab("notes"));
   $("new-note").addEventListener("click", newNote);
