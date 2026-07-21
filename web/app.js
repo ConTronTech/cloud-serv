@@ -159,6 +159,35 @@ async function newFileKey() { const raw = randBytes(32); return { raw, key: awai
 async function wrapFileKey(raw) { return wrapBytes(raw, await dekKey()); }
 async function unwrapFileKey(wrapped) { return importAes(await unwrapBytes(wrapped, await dekKey())); }
 
+// ---- E2E upload/download plumbing ----
+// Encrypt a File for upload. Returns the ciphertext bytes, the per-file key
+// wrapped by the DEK, and the plaintext size (stored server-side for display).
+// Throws if the DEK is missing — we never silently store plaintext.
+async function encryptFileForUpload(file) {
+  const plain = new Uint8Array(await file.arrayBuffer());
+  const { raw, key } = await newFileKey();
+  const cipher = await encryptContent(key, plain);
+  const wrappedKey = await wrapFileKey(raw);
+  return { cipher, wrappedKey, plainSize: plain.length };
+}
+
+// Fetch a file's stored content and return its plaintext bytes. A file with no
+// wrappedKey is a legacy plaintext blob and is returned as-is.
+async function fetchPlaintext(item) {
+  const res = await fetch(API + "/api/files/" + item.id + "/content", { headers: authHeaders() });
+  if (!res.ok) throw new Error("fetch " + res.status);
+  const cipher = new Uint8Array(await res.arrayBuffer());
+  if (!item.wrappedKey) return cipher;
+  const key = await unwrapFileKey(item.wrappedKey);
+  return decryptContent(key, cipher);
+}
+
+// A blob: URL of a file's decrypted content. Caller revokes it when done.
+async function objectUrlFor(item) {
+  const bytes = await fetchPlaintext(item);
+  return URL.createObjectURL(new Blob([bytes], { type: item.mime || "application/octet-stream" }));
+}
+
 // The Data Encryption Key lives in memory + sessionStorage (per-tab, cleared on close).
 let DEK_RAW = null;
 function setDEK(raw) { DEK_RAW = raw; try { sessionStorage.setItem("cs_dek", toB64(raw)); } catch {} }
@@ -438,7 +467,15 @@ function gridCell(kind, item) {
     thumb.classList.add("is-folder"); thumb.textContent = "📁";
   } else if ((item.mime || "").startsWith("image/")) {
     const img = document.createElement("img");
-    img.loading = "lazy"; img.alt = ""; img.src = API + "/api/files/" + item.id + "/content";
+    img.loading = "lazy"; img.alt = "";
+    if (item.wrappedKey) {
+      // E2E: fetch + decrypt, then swap in a blob URL (revoked once decoded).
+      objectUrlFor(item)
+        .then((u) => { img.src = u; img.addEventListener("load", () => URL.revokeObjectURL(u), { once: true }); })
+        .catch(() => {});
+    } else {
+      img.src = API + "/api/files/" + item.id + "/content"; // legacy plaintext
+    }
     thumb.appendChild(img);
   } else {
     thumb.classList.add("is-type"); thumb.textContent = iconFor(item.mime);
@@ -613,10 +650,10 @@ function openNewMenu() { $("new-modal").classList.remove("hidden"); }
 function closeNewMenu() { $("new-modal").classList.add("hidden"); }
 
 async function downloadFile(f) {
-  const res = await fetch(API + "/api/files/" + f.id, { headers: authHeaders() });
-  if (!res.ok) { toast("Download failed."); return; }
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
+  let bytes;
+  try { bytes = await fetchPlaintext(f); }
+  catch { toast("Download failed."); return; }
+  const url = URL.createObjectURL(new Blob([bytes], { type: f.mime || "application/octet-stream" }));
   const a = document.createElement("a");
   a.href = url; a.download = decodeName(f.name);
   document.body.appendChild(a); a.click(); a.remove();
@@ -798,28 +835,43 @@ function isPreviewable(mime) { return /^(image|video|audio)\//.test(mime || "");
 // Opens media inline using the content endpoint. The <img>/<video>/<audio> src
 // authenticates via the session cookie (no Authorization header possible), and
 // video/audio stream with Range so they seek without downloading the whole file.
-function openPreview(file) {
+let previewObjectUrl = null; // revoked when the preview closes
+
+async function openPreview(file) {
   const modal = $("preview-modal");
   const c = $("preview-content");
-  c.textContent = "";
-  const src = API + "/api/files/" + file.id + "/content";
   const mime = file.mime || "";
   let el;
-  if (mime.startsWith("image/")) { el = document.createElement("img"); el.src = src; }
-  else if (mime.startsWith("video/")) { el = document.createElement("video"); el.src = src; el.controls = true; el.autoplay = true; el.playsInline = true; }
-  else if (mime.startsWith("audio/")) { el = document.createElement("audio"); el.src = src; el.controls = true; el.autoplay = true; }
+  if (mime.startsWith("image/")) el = document.createElement("img");
+  else if (mime.startsWith("video/")) { el = document.createElement("video"); el.controls = true; el.autoplay = true; el.playsInline = true; }
+  else if (mime.startsWith("audio/")) { el = document.createElement("audio"); el.controls = true; el.autoplay = true; }
   else return;
+
+  c.textContent = "Loading…";
+  modal.classList.remove("hidden");
+
+  // E2E: fetch + decrypt into a blob URL (download-then-play). Video/audio load
+  // the whole file into memory for now; streamed decrypt is a later phase.
+  let url;
+  try { url = await objectUrlFor(file); }
+  catch { c.textContent = "Preview failed."; return; }
+  if (modal.classList.contains("hidden")) { URL.revokeObjectURL(url); return; } // closed while loading
+
+  if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+  previewObjectUrl = url;
+  el.src = url;
   el.className = "preview-media";
   const cap = document.createElement("div");
   cap.className = "preview-cap";
   cap.textContent = decodeName(file.name); // textContent — safe
+  c.textContent = "";
   c.append(el, cap);
-  modal.classList.remove("hidden");
 }
 
 function closePreview() {
   $("preview-content").textContent = ""; // detaching stops video/audio playback
   $("preview-modal").classList.add("hidden");
+  if (previewObjectUrl) { URL.revokeObjectURL(previewObjectUrl); previewObjectUrl = null; }
 }
 
 // ---- upload ----
@@ -836,8 +888,13 @@ async function uploadOne(file, state, folderId) {
   return file.size > CHUNK_THRESHOLD ? uploadChunked(file, state, folderId) : uploadDirect(file, state, folderId);
 }
 
-// Small file: single POST, retrying with backoff if rate-limited (429).
+// Small file: encrypt client-side, then single POST, retrying with backoff if
+// rate-limited (429).
 async function uploadDirect(file, state, folderId) {
+  let enc;
+  try { enc = await encryptFileForUpload(file); }
+  catch { state.textContent = "Encryption failed"; return false; }
+
   for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
     let res;
     try {
@@ -846,9 +903,11 @@ async function uploadDirect(file, state, folderId) {
         headers: authHeaders({
           "X-Filename": encodeURIComponent(file.name), // ASCII-safe header
           "X-Folder": String(folderId),
+          "X-Wrapped-Key": enc.wrappedKey,
+          "X-Plain-Size": String(enc.plainSize),
           "Content-Type": file.type || "application/octet-stream",
         }),
-        body: file,
+        body: enc.cipher,
       });
     } catch { state.textContent = "Network error"; return false; }
 
@@ -870,15 +929,29 @@ async function uploadDirect(file, state, folderId) {
   return false;
 }
 
-// Large file: init -> PUT sequential chunks (resumable) -> complete.
+// Large file: encrypt client-side, then init -> PUT sequential ciphertext
+// chunks (resumable) -> complete. We encrypt the whole file up front (memory-
+// bound; streaming encrypt is a later optimization); wire chunks are just
+// slices of the ciphertext, so resume/offset logic is unchanged.
 async function uploadChunked(file, state, folderId) {
+  state.textContent = "Encrypting…";
+  let enc;
+  try { enc = await encryptFileForUpload(file); }
+  catch { state.textContent = "Encryption failed"; return false; }
+  const cipher = enc.cipher;
+  const total = cipher.length;
+
   state.textContent = "Starting…";
   let initRes;
   try {
     initRes = await fetch(API + "/api/uploads/init", {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ name: file.name, mime: file.type || "application/octet-stream", size: file.size, folderId }),
+      body: JSON.stringify({
+        name: file.name, mime: file.type || "application/octet-stream",
+        size: total, folderId,
+        wrappedKey: enc.wrappedKey, plainSize: enc.plainSize,
+      }),
     });
   } catch { state.textContent = "Network error"; return false; }
   if (initRes.status === 401) { sessionExpired(); return false; }
@@ -891,8 +964,8 @@ async function uploadChunked(file, state, folderId) {
   const abort = () => fetch(API + "/api/uploads/" + uploadId, { method: "DELETE", headers: authHeaders() }).catch(() => {});
 
   let offset = 0;
-  while (offset < file.size) {
-    const chunk = file.slice(offset, Math.min(offset + CHUNK_SIZE, file.size));
+  while (offset < total) {
+    const chunk = cipher.subarray(offset, Math.min(offset + CHUNK_SIZE, total));
     let done = false;
     for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
       let res;
@@ -916,7 +989,7 @@ async function uploadChunked(file, state, folderId) {
       return false;
     }
     if (!done) { abort(); return false; }
-    state.textContent = "Uploading… " + Math.floor((offset / file.size) * 100) + "%";
+    state.textContent = "Uploading… " + Math.floor((offset / total) * 100) + "%";
   }
 
   const comp = await fetch(API + "/api/uploads/" + uploadId + "/complete", { method: "POST", headers: authHeaders() });
