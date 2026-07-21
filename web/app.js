@@ -246,21 +246,34 @@ function sortItems(items, isFile) {
   });
 }
 
+// A "Folders" / "Files" section divider (Android/Drive style, folder-first).
+function sectionLabel(text, count, grid) {
+  const li = document.createElement("li");
+  li.className = "section-label" + (grid ? " grid-span" : "");
+  li.textContent = count != null ? `${text} · ${count}` : text;
+  return li;
+}
+
 // Renders the current folder contents in the active view + sort (no refetch).
+// Folder-first: folders are grouped under a "Folders" header, then "Files".
 function renderFs() {
   const list = $("fs-list");
-  list.className = viewMode === "grid" ? "fs-grid" : "fs-list";
+  const grid = viewMode === "grid";
+  list.className = grid ? "fs-grid" : "fs-list";
   list.textContent = "";
   const folders = sortItems(curFolders, false);
   const files = sortItems(curFiles, true);
   $("fs-empty").classList.toggle("hidden", folders.length + files.length > 0);
-  if (viewMode === "grid") {
-    for (const f of folders) list.appendChild(gridCell("folder", f));
-    for (const f of files) list.appendChild(gridCell("file", f));
-  } else {
-    if (folders.length + files.length) list.appendChild(listHeader());
-    for (const f of folders) list.appendChild(folderRow(f));
-    for (const f of files) list.appendChild(fileRow(f));
+
+  if (!grid && (folders.length + files.length)) list.appendChild(listHeader());
+
+  if (folders.length) {
+    list.appendChild(sectionLabel("Folders", folders.length, grid));
+    for (const f of folders) list.appendChild(grid ? gridCell("folder", f) : folderRow(f));
+  }
+  if (files.length) {
+    list.appendChild(sectionLabel("Files", files.length, grid));
+    for (const f of files) list.appendChild(grid ? gridCell("file", f) : fileRow(f));
   }
   refreshControls();
 }

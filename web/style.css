@@ -271,6 +271,13 @@ img { max-width: 100%; }
 
 .fs-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
 
+/* Folder-first section dividers */
+.section-label {
+  list-style: none; color: var(--muted); font-size: 0.75rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em; padding: 0.7rem 0.3rem 0.1rem;
+}
+.fs-grid .section-label.grid-span { grid-column: 1 / -1; }
+
 /* Grid view */
 .fs-grid {
   list-style: none; margin: 0; padding: 0;
