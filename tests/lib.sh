@@ -46,6 +46,8 @@ RATE_LIMIT_ENABLED=false
 LOG_LEVEL=WARN
 REGISTRATION_INVITE_CODE=test-invite
 EOF
+  # Optional extra config lines (later keys win), e.g. EXTRA_CONFIG=$'RATE_LIMIT_ENABLED=true\nBURST_SIZE=5'
+  [ -n "${EXTRA_CONFIG:-}" ] && printf '%s\n' "$EXTRA_CONFIG" >> "$TESTDIR/config.env"
   launch_server || return 1
 }
 
