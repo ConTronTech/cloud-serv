@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <fstream>
 
+#include <sys/stat.h>
+
 namespace fs = std::filesystem;
 
 FileStore::FileStore(const std::string& baseDir) : baseDir_(baseDir) {
@@ -46,11 +48,14 @@ bool FileStore::write(int64_t userId, const std::string& storageKey,
         utils::Logger::get_instance().error("FileStore::write mkdir: " + ec.message());
         return false;
     }
+    ::chmod(userDir(userId).c_str(), S_IRWXU);  // owner-only, not the ambient umask
 
     std::ofstream out(pathFor(userId, storageKey), std::ios::binary | std::ios::trunc);
     if (!out) return false;
     if (size > 0) out.write(data, static_cast<std::streamsize>(size));
-    return out.good();
+    out.close();
+    ::chmod(pathFor(userId, storageKey).c_str(), 0600);
+    return !out.fail();
 }
 
 bool FileStore::append(int64_t userId, const std::string& storageKey,
@@ -62,10 +67,13 @@ bool FileStore::append(int64_t userId, const std::string& storageKey,
         utils::Logger::get_instance().error("FileStore::append mkdir: " + ec.message());
         return false;
     }
+    ::chmod(userDir(userId).c_str(), S_IRWXU);  // owner-only, not the ambient umask
     std::ofstream out(pathFor(userId, storageKey), std::ios::binary | std::ios::app);
     if (!out) return false;
     if (size > 0) out.write(data, static_cast<std::streamsize>(size));
-    return out.good();
+    out.close();
+    ::chmod(pathFor(userId, storageKey).c_str(), 0600);
+    return !out.fail();
 }
 
 int64_t FileStore::sizeOf(int64_t userId, const std::string& storageKey) const {

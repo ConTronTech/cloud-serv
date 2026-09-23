@@ -11,7 +11,7 @@ namespace routes {
 //   POST   /api/auth/login          {email,password}              -> {token,user}
 //   GET    /api/auth/me                                           -> {user}
 //   POST   /api/auth/logout                                       -> {ok}
-//   POST   /api/auth/api-keys       {name?}          -> {key, info}   (key shown once)
+//   POST   /api/auth/api-keys       {name?}          -> {key, info}   (key shown once)  (session auth only; API keys rejected)
 //   GET    /api/auth/api-keys                        -> {keys:[...]}
 //   DELETE /api/auth/api-keys/<id>                   -> {ok}
 //

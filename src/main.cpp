@@ -1,4 +1,5 @@
 #include <crow.h>
+#include <sys/stat.h>
 #include "core/config.h"
 #include "db/database.h"
 #include "storage/file_store.h"
@@ -11,6 +12,7 @@
 #include "routes/static_files.h"
 #include "security/rate_limiter.h"
 #include "security/sanitizer.h"
+#include "security/tls.h"
 #include "utils/logger.h"
 #include "utils/string_utils.h"
 
@@ -111,7 +113,10 @@ int main(int argc, char* argv[]) {
         {
             std::error_code ec;
             std::filesystem::path p(db_path);
-            if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+            if (p.has_parent_path()) {
+                std::filesystem::create_directories(p.parent_path(), ec);
+                ::chmod(p.parent_path().c_str(), S_IRWXU);  // owner-only DB directory
+            }
         }
         CloudDB db(db_path);
         FileStore store(storage_dir);
@@ -139,9 +144,22 @@ int main(int argc, char* argv[]) {
         std::string web_dir = config.get("env", "WEB_DIR", "web");
         routes::registerStaticRoutes(app, web_dir);
 
+        // 8b. TLS (self-signed, in-daemon). Regenerates the cert if it doesn't
+        //     cover the box's current Tailscale IP. TLS_ENABLED=false = plain HTTP (dev).
+        bool tlsEnabled = config.get_bool("env", "TLS_ENABLED", true);
+        if (tlsEnabled) {
+            std::string certPath = config.get("env", "TLS_CERT_PATH", "data/tls/server.crt");
+            std::string keyPath = config.get("env", "TLS_KEY_PATH", "data/tls/server.key");
+            security::tls::ensure_server_cert(certPath, keyPath);
+            app.ssl_file(certPath, keyPath);
+        } else {
+            utils::Logger::get_instance().warn("TLS disabled (TLS_ENABLED=false) — serving plain HTTP");
+        }
+
         // 9. Startup banner
         int port = config.get_int("env", "PORT", 8080);
-        utils::Logger::get_instance().info("API @ http://0.0.0.0:" + std::to_string(port));
+        utils::Logger::get_instance().info(std::string("API @ ") + (tlsEnabled ? "https" : "http") +
+                                           "://0.0.0.0:" + std::to_string(port));
         utils::Logger::get_instance().info("  POST   /api/auth/register");
         utils::Logger::get_instance().info("  POST   /api/auth/login");
         utils::Logger::get_instance().info("  GET    /api/auth/me");

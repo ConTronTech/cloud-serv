@@ -3,6 +3,10 @@
 #include "utils/string_utils.h"
 #include <algorithm>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <cstring>
+
 namespace security {
 
 RateLimiter::RateLimiter()
@@ -109,6 +113,30 @@ bool RateLimiter::allowRequest(const std::string& clientIp, bool isWrite) {
     return false;
 }
 
+// Validate an IP literal and canonicalize it. IPv6 loopback and IPv4-mapped
+// forms collapse to their IPv4 equivalents so they match TRUSTED_PROXIES.
+// Returns "" if the token is not an IP literal.
+static std::string normalizeIp(const std::string& s) {
+    in_addr a4{};
+    if (inet_pton(AF_INET, s.c_str(), &a4) == 1) {
+        char buf[INET_ADDRSTRLEN];
+        return inet_ntop(AF_INET, &a4, buf, sizeof buf) ? buf : "";
+    }
+    in6_addr a6{};
+    if (inet_pton(AF_INET6, s.c_str(), &a6) == 1) {
+        static const unsigned char mapped[12] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff};
+        static const unsigned char zeros[15] = {0};
+        if (std::memcmp(a6.s6_addr, zeros, 15) == 0 && a6.s6_addr[15] == 1) return "127.0.0.1";
+        if (std::memcmp(a6.s6_addr, mapped, 12) == 0) {
+            char buf[INET_ADDRSTRLEN];
+            return inet_ntop(AF_INET, a6.s6_addr + 12, buf, sizeof buf) ? buf : "";
+        }
+        char buf[INET6_ADDRSTRLEN];
+        return inet_ntop(AF_INET6, &a6, buf, sizeof buf) ? buf : "";
+    }
+    return "";
+}
+
 std::string RateLimiter::resolveClientIp(const std::string& directIp,
                                           const std::string& forwardedFor) const {
     // If no forwarded header or no trusted proxies, use direct IP
@@ -116,48 +144,34 @@ std::string RateLimiter::resolveClientIp(const std::string& directIp,
         return directIp;
     }
 
-    // Check if direct connection is from a trusted proxy
-    bool fromTrustedProxy = false;
-    for (const auto& proxy : trusted_proxies_) {
-        if (directIp == proxy) {
-            fromTrustedProxy = true;
-            break;
-        }
-    }
-
-    if (!fromTrustedProxy) {
-        // Direct IP is not a trusted proxy — ignore X-Forwarded-For
-        // (could be spoofed by the client)
-        return directIp;
-    }
-
-    // Parse X-Forwarded-For: client, proxy1, proxy2
-    // The leftmost non-trusted IP is the real client
-    auto parts = utils::StringUtils::split(forwardedFor, ',');
-    for (auto& part : parts) {
-        std::string ip = utils::StringUtils::trim(part);
-        if (ip.empty()) continue;
-
-        // Check if this IP is also a trusted proxy
-        bool isTrusted = false;
+    auto isTrusted = [this](const std::string& ip) {
         for (const auto& proxy : trusted_proxies_) {
-            if (ip == proxy) {
-                isTrusted = true;
-                break;
-            }
+            std::string np = normalizeIp(proxy);
+            if (ip == (np.empty() ? proxy : np)) return true;
         }
+        return false;
+    };
 
-        if (!isTrusted) {
-            // This is the real client IP
-            return ip;
-        }
+    std::string direct = normalizeIp(directIp);
+    if (direct.empty()) direct = directIp;
+
+    // Direct peer must be a trusted proxy, else X-Forwarded-For is client-controlled.
+    if (!isTrusted(direct)) return directIp;
+
+    // Proxies APPEND to X-Forwarded-For, so the left side is client-supplied.
+    // Walk right-to-left, skipping trusted hops; the rightmost untrusted,
+    // valid IP literal is the address our trusted proxy actually saw.
+    auto parts = utils::StringUtils::split(forwardedFor, ',');
+    for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+        std::string tok = utils::StringUtils::trim(*it);
+        if (tok.empty()) continue;
+        std::string ip = normalizeIp(tok);
+        if (ip.empty()) return directIp;   // garbage in the chain: don't trust it
+        if (isTrusted(ip)) continue;
+        return ip;
     }
 
-    // All IPs in chain are trusted proxies — use the first one
-    if (!parts.empty()) {
-        return utils::StringUtils::trim(parts[0]);
-    }
-
+    // Entire chain is trusted proxies.
     return directIp;
 }
 
@@ -177,6 +191,47 @@ void RateLimiter::cleanupOldClients() {
             ++it;
         }
     }
+}
+
+int LoginThrottle::retryAfterSeconds(const std::string& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = entries_.find(key);
+    if (it == entries_.end()) return 0;
+    auto now = std::chrono::steady_clock::now();
+    if (it->second.lockedUntil <= now) return 0;
+    return static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+        it->second.lockedUntil - now).count()) + 1;
+}
+
+void LoginThrottle::recordFailure(const std::string& key) {
+    constexpr int kFree = 5;            // failures before any lockout
+    constexpr int kMaxLockSec = 900;    // 15 min cap
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto now = std::chrono::steady_clock::now();
+
+    // Bound memory: drop stale entries (idle > 1h) when the map grows large.
+    if (entries_.size() > 10000) {
+        for (auto it = entries_.begin(); it != entries_.end();) {
+            if (now - it->second.last > std::chrono::hours(1)) it = entries_.erase(it);
+            else ++it;
+        }
+        if (entries_.size() > 10000) entries_.clear();
+    }
+
+    auto& e = entries_[key];
+    if (now - e.last > std::chrono::hours(1)) e.failures = 0;
+    e.last = now;
+    e.failures++;
+    if (e.failures >= kFree) {
+        int shift = std::min(e.failures - kFree, 10);
+        int lock = std::min(30 * (1 << shift), kMaxLockSec);   // 30s, 60s, 120s ...
+        e.lockedUntil = now + std::chrono::seconds(lock);
+    }
+}
+
+void LoginThrottle::recordSuccess(const std::string& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_.erase(key);
 }
 
 } // namespace security

@@ -16,6 +16,10 @@ namespace security {
 // Returns the owning user id, or std::nullopt if neither is valid.
 std::optional<int64_t> authenticateRequest(const crow::request& req, CloudDB& db);
 
+// Like authenticateRequest but ONLY accepts a login session (Bearer or cookie),
+// never an X-API-Key. Used for account/API-key management endpoints.
+std::optional<int64_t> authenticateSession(const crow::request& req, CloudDB& db);
+
 // Extract the token from an "Authorization: Bearer <token>" header value.
 // Returns empty string if the header is missing or malformed.
 std::string bearerToken(const std::string& authHeader);
@@ -24,8 +28,8 @@ std::string bearerToken(const std::string& authHeader);
 std::string cookieSessionToken(const std::string& cookieHeader);
 
 // Build the Set-Cookie value that stores a session token, or clears it when
-// `clear` is true. HttpOnly + SameSite=Strict; Secure is added when `secure`.
+// `clear` is true. HttpOnly + SameSite=Strict; Secure by default (TLS is always on).
 std::string sessionCookie(const std::string& token, int maxAgeSeconds,
-                          bool secure = false, bool clear = false);
+                          bool secure = true, bool clear = false);
 
 } // namespace security

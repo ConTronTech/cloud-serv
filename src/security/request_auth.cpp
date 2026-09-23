@@ -67,4 +67,16 @@ std::optional<int64_t> authenticateRequest(const crow::request& req, CloudDB& db
     return std::nullopt;
 }
 
+std::optional<int64_t> authenticateSession(const crow::request& req, CloudDB& db) {
+    // An API key presented anywhere disqualifies the request.
+    if (!req.get_header_value("X-API-Key").empty()) return std::nullopt;
+
+    std::string token = bearerToken(req.get_header_value("Authorization"));
+    if (!token.empty()) return db.userForSession(Crypto::sha256Hex(token));
+
+    std::string cookieTok = cookieSessionToken(req.get_header_value("Cookie"));
+    if (!cookieTok.empty()) return db.userForSession(Crypto::sha256Hex(cookieTok));
+    return std::nullopt;
+}
+
 } // namespace security

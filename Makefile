@@ -2,6 +2,7 @@
 
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -pthread \
+           -DCROW_ENABLE_SSL \
            -Iinclude \
            -Ilibs \
            -MMD -MP
@@ -26,6 +27,7 @@ PROJECT_SOURCES = src/main.cpp \
                   src/security/request_auth.cpp \
                   src/security/rate_limiter.cpp \
                   src/security/sanitizer.cpp \
+                  src/security/tls.cpp \
                   src/storage/file_store.cpp \
                   src/utils/logger.cpp \
                   src/utils/string_utils.cpp

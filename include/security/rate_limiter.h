@@ -56,4 +56,20 @@ public:
     void setEnabled(bool enable);
 };
 
+// Per-account failed-login throttle (keyed by lowercase email), independent of
+// the per-IP RateLimiter. Exponential backoff after `freeAttempts` failures.
+// Applies equally to unknown emails so it can't be used to enumerate accounts.
+class LoginThrottle {
+public:
+    // Seconds the caller must wait before another attempt (0 = allowed).
+    int retryAfterSeconds(const std::string& key);
+    void recordFailure(const std::string& key);
+    void recordSuccess(const std::string& key);
+
+private:
+    struct Entry { int failures = 0; std::chrono::steady_clock::time_point lockedUntil; std::chrono::steady_clock::time_point last; };
+    std::unordered_map<std::string, Entry> entries_;
+    std::mutex mutex_;
+};
+
 } // namespace security

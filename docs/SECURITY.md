@@ -22,7 +22,7 @@ adversary learns neither file **contents** nor **names**.
 
 ```
 password ──PBKDF2-HMAC-SHA256(310k, per-user 16-byte salt)──▶ 512 bits
-                                                             ├─ [0:32]  AUTH key  → sent to server (server stores scrypt(AUTH key))
+                                                             ├─ [0:32]  AUTH key  → sent to server (server stores PBKDF2-HMAC-SHA256(AUTH key, 200000 iterations))
                                                              └─ [32:64] KEK       → stays in the browser, never sent
 DEK  = random 256-bit data key
         ├─ wrapped by KEK              (unlock with password)
@@ -73,15 +73,14 @@ Current suite: **112 assertions, 0 failures**, also run in CI on every push/PR.
    object. *Mitigation (queued):* bind a client-chosen file UUID into both the content AAD
    and the encrypted metadata, and verify they match on download.
 2. **Offline password attack by a malicious server.** A hostile server can capture the AUTH
-   key at login (or use the stored `scrypt(AUTH key)`) and mount an offline dictionary attack
+   key at login (or use the stored PBKDF2 hash of the AUTH key) and mount an offline dictionary attack
    against the password at PBKDF2 cost per guess. This is inherent to password-derived-key
    E2E. Mitigations: use a strong password; the **recovery key is random 256-bit and immune**
    to this. *Hardening (queued):* raise PBKDF2 iterations toward the OWASP 600k guidance
    (Argon2id isn't in WebCrypto).
-3. **Metadata visible to the server:** exact file **sizes**, encrypted-**name lengths**, file
-   **mime type** (still plaintext — drives icons/preview/categories), **folder structure**,
-   timestamps, and item counts. Contents and names are not. Encrypting mime and padding
-   sizes/names are possible future tightenings.
+3. **Metadata visible to the server:** exact file **sizes**, encrypted-**name lengths**, **folder structure**,
+   timestamps, and item counts. Contents, names and mime type are not (mime was encrypted in
+   E2E Phase 3.5). Padding sizes/names is a possible future tightening.
 4. **DEK lives in `sessionStorage`** (per-tab) for reload UX. Any successful XSS in the page
    could exfiltrate it. Mitigated by a strict CSP (`script-src 'self'`) and a
    `textContent`-only / no-`innerHTML` rendering discipline, but it remains the sharpest
@@ -90,6 +89,30 @@ Current suite: **112 assertions, 0 failures**, also run in CI on every push/PR.
 ## Before exposure (Tailscale)
 
 - Set `RATE_LIMIT_ENABLED=true` in `config.env` (currently `false` for testing).
-- Terminate TLS at a reverse proxy in front of the tailnet endpoint. Note: the transport
-  only protects the AUTH key in transit — the zero-knowledge guarantees do **not** depend on
-  transport security.
+- **TLS is terminated in the daemon, over Tailscale — no reverse proxy.** `TLS_ENABLED`
+  (default `true`), `TLS_CERT_PATH` (default `data/tls/server.crt`), `TLS_KEY_PATH` (default
+  `data/tls/server.key`). The self-signed EC P-256 cert (10 years, OpenSSL C API,
+  `src/security/tls.cpp`) is regenerated at startup if missing or if its SAN doesn't cover the
+  Tailscale IP (`tailscale ip -4`, else an interface in 100.64.0.0/10).
+  `scripts/setup-tailscale.sh` installs/brings up Tailscale. `TLS_ENABLED=false` serves plain
+  HTTP for local dev and tests. The transport only protects the AUTH key in transit — the
+  zero-knowledge guarantees do **not** depend on transport security.
+- **Storage permissions:** per-user blob dirs and the DB dir are `0700`, blob files `0600`, TLS
+  key `0600` in a `0700` directory. Known small gap: the base `STORAGE_DIR` root itself is not
+  chmod `0700`; it is protected only when it sits under the `0700` data directory.
+- **Login/session hardening:** rate limiter walks `X-Forwarded-For` right-to-left with IP
+  validation; per-email login throttle (5 free failures, then 30s doubling to a 15 min cap,
+  429 + `Retry-After`, also for unknown emails); session cookie is always `Secure` and
+  HttpOnly (the web client stores/sends no token); API-key create/list/revoke require a login
+  session (an `X-API-Key` request is rejected).
+- **Known trade-off (M6):** the throttle is keyed by email only, so anyone can lock a known
+  email out of logging in for up to 15 minutes. Possible follow-up: key on email+IP, or a higher
+  threshold for the email-only bucket.
+- **Open (M7):** `/register` still distinguishes already-registered emails (the current
+  success-shaped decoy — user id 0, no `Set-Cookie` — is distinguishable and is *not* a fix).
+  Decide between (a) generic 409 + tight registration rate limit, risk accepted, or (b) closing
+  open registration (admin-created / invite-only accounts).
+- **Open design decision (certificate):** browsers require a trusted cert for service workers
+  and PWA install. A self-signed cert that was clicked through generally will not let the
+  service worker register, and Android needs it trusted to install the PWA. The better option is
+  a real cert from `tailscale cert` for the machine's `.ts.net` name.

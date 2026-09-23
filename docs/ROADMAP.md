@@ -66,7 +66,13 @@ under a new password" flow isn't wired into the UI yet.
 
 - **Flip `RATE_LIMIT_ENABLED` back to `true`** in `config.env` — it's currently `false` for
   testing (limits are already tuned generous for bulk uploads).
-- Reverse proxy / TLS in front of the Tailscale endpoint.
+- ~~Reverse proxy / TLS in front~~ — **done differently:** the daemon terminates its own HTTPS
+  (self-signed EC P-256, auto-regenerated when the SAN misses the Tailscale IP; `TLS_ENABLED`,
+  `TLS_CERT_PATH`, `TLS_KEY_PATH`; `scripts/setup-tailscale.sh`). No reverse proxy.
+- **`RATE_LIMIT_ENABLED` is still `false` in `config.env`** — flip it before exposing.
+- **Open:** self-signed certs block service-worker/PWA install; decide on `tailscale cert`
+  (real cert for the `.ts.net` name).
+- **Open:** M7 (registration enumeration) — see the sweep's Remediation status.
 
 ---
 

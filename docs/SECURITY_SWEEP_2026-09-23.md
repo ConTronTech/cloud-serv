@@ -21,6 +21,22 @@ gaps consistent with what `SECURITY.md` already scopes as accepted risk.
 
 ---
 
+## Remediation status
+
+Original findings below are unchanged. Fixed so far:
+
+- **H1** — fixed: rate limiter walks `X-Forwarded-For` right to left with IP validation.
+- **M6** — fixed: per-email `LoginThrottle` (5 free failures, then 30s doubling to a 15 min cap; 429 + `Retry-After`; applies to unknown emails too).
+- **M8** — fixed: session cookie is always `Secure`.
+- **M9** — fixed: web client no longer stores or sends a token; HttpOnly cookie only.
+- **M10** — fixed: API-key create/list/revoke require a login session; `X-API-Key` requests are rejected there.
+- **L20** — fixed: per-user blob dirs and DB dir `0700`, blob files `0600`, TLS key `0600` in a `0700` dir. Small known gap: the base `STORAGE_DIR` root is not itself `0700` (protected only under the `0700` data dir).
+- **M7** — **OPEN.** The current success-shaped decoy (user id 0, no `Set-Cookie`) on re-registering a registered email is distinguishable from a real registration, so it does not stop enumeration and is not a fix. Pending decision: (a) revert to a generic 409 plus a tight registration rate limit and accept the documented risk, or (b) close open registration (admin-created or invite-only accounts).
+- **M6 known trade-off:** the throttle is keyed by email only, so anyone can lock a known email out for up to 15 minutes. Possible follow-up: key on email+IP, or a higher threshold for the email-only bucket.
+- **TLS:** the daemon now terminates its own HTTPS (see `SECURITY.md`). Open design decision: a clicked-through self-signed cert generally won't let the service worker register and Android needs it trusted for PWA install; `tailscale cert` for the `.ts.net` name is the better option.
+
+---
+
 ## Findings by severity
 
 ### High

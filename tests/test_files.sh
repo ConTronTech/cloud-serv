@@ -10,6 +10,11 @@ FID=$(id_of "$UP")
 want "list shows file" '"name":"hello.txt"' "$(A "http://$API/api/files")"
 want "download returns content" "hello world" "$(A "http://$API/api/files/$FID")"
 
+echo "== storage permissions =="
+BLOB=$(find "$TESTDIR/storage" -type f | head -1)
+want "blob file mode 600" "600" "$(stat -c %a "$BLOB")"
+want "per-user blob dir mode 700" "700" "$(stat -c %a "$(dirname "$BLOB")")"
+
 echo "== unicode + spaces (X-Filename decoded) =="
 A -X POST "http://$API/api/files" -H "X-Filename: My%20Report%20caf%C3%A9.pdf" -H "content-type: application/pdf" --data-binary "x" >/dev/null
 want "name decoded (space + unicode)" 'My Report caf' "$(A "http://$API/api/files")"

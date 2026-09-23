@@ -10,7 +10,7 @@ T=$(tok_of "$REG")
 want "me works with bearer" '"email":"a@e.cc"' "$(A "http://$API/api/auth/me")"
 want "login (correct)" '"token"' "$(curl -s "http://$API/api/auth/login" -d '{"email":"a@e.cc","password":"supersecret"}')"
 want "login (wrong)" "invalid credentials" "$(curl -s "http://$API/api/auth/login" -d '{"email":"a@e.cc","password":"nope"}')"
-want "duplicate email 409" "already registered" "$(curl -s "http://$API/api/auth/register" -d '{"email":"a@e.cc","password":"supersecret"}')"
+want "duplicate email: no enumeration leak (decoy id 0)" '"id":0' "$(curl -s "http://$API/api/auth/register" -d '{"email":"a@e.cc","password":"supersecret"}')"
 want "short password rejected" "at least 8" "$(curl -s "http://$API/api/auth/register" -d '{"email":"x@y.zz","password":"short12"}')"
 
 echo "== sessions + logout =="

@@ -27,8 +27,16 @@ tok_of() { printf '%s' "$1" | grep -o '"token":"[^"]*"' | cut -d'"' -f4; }
 start_server() {
   local port="${1:-8090}"
   TESTDIR="$(mktemp -d)"
+  SCHEME=http; CURL_TLS=""; TLS_LINE="TLS_ENABLED=false"
+  if [ "${TLS:-}" = 1 ]; then
+    SCHEME=https; CURL_TLS="-k"
+    TLS_LINE="TLS_ENABLED=true
+TLS_CERT_PATH=$TESTDIR/tls/server.crt
+TLS_KEY_PATH=$TESTDIR/tls/server.key"
+  fi
   API="localhost:$port"
   cat > "$TESTDIR/config.env" <<EOF
+$TLS_LINE
 PORT=$port
 DB_PATH=$TESTDIR/cloud.db
 STORAGE_DIR=$TESTDIR/storage
@@ -37,11 +45,16 @@ SESSION_SECONDS=3600
 RATE_LIMIT_ENABLED=false
 LOG_LEVEL=WARN
 EOF
-  ( cd "$ROOT" && exec ./cloud_serv "$TESTDIR/config.env" ) > "$TESTDIR/server.log" 2>&1 &
+  launch_server || return 1
+}
+
+# (Re)launch the server against $TESTDIR/config.env and wait until healthy.
+launch_server() {
+  ( cd "$ROOT" && exec ./cloud_serv "$TESTDIR/config.env" ) >> "$TESTDIR/server.log" 2>&1 &
   SRV_PID=$!
   local i
   for i in $(seq 1 50); do
-    curl -s "http://$API/api/health" 2>/dev/null | grep -q ok && return 0
+    curl -s $CURL_TLS "$SCHEME://$API/api/health" 2>/dev/null | grep -q ok && return 0
     kill -0 "$SRV_PID" 2>/dev/null || { echo "SERVER EXITED EARLY"; cat "$TESTDIR/server.log"; return 1; }
     sleep 0.2
   done

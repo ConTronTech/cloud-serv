@@ -3,15 +3,15 @@
 // element properties — never innerHTML — so filenames can never inject HTML.
 
 const API = ""; // same origin
-const TOKEN_KEY = "cs_token";
-let token = localStorage.getItem(TOKEN_KEY) || "";
+// Auth is the HttpOnly session cookie only; no token is kept in JS or localStorage.
+try { localStorage.removeItem("cs_token"); } catch { /* ignore */ }
 let mode = "login"; // or "register"
 
 const $ = (id) => document.getElementById(id);
 
 // ---- tiny helpers ----
 function authHeaders(extra = {}) {
-  return token ? { Authorization: "Bearer " + token, ...extra } : extra;
+  return extra; // session cookie is sent automatically (same-origin)
 }
 
 async function api(path, opts = {}) {
@@ -367,8 +367,6 @@ async function onAuthSubmit(e) {
   btn.disabled = false; setMode(mode);
 
   if (!r.ok) { $("auth-error").textContent = prettyError(r.body) || "Something went wrong."; return; }
-  token = r.token;
-  localStorage.setItem(TOKEN_KEY, token);
   $("password").value = "";
   if (mode === "register" && r.recoveryKey) showRecoveryKey(r.recoveryKey, r.user);
   else showApp(r.user);
@@ -404,8 +402,6 @@ function showRecoveryKey(key, user) {
 
 async function logout() {
   await api("/api/auth/logout", { method: "POST", headers: authHeaders() });
-  token = "";
-  localStorage.removeItem(TOKEN_KEY);
   clearDEK();
   showAuth();
 }
@@ -1045,7 +1041,7 @@ const CHUNK_THRESHOLD = 8 * 1024 * 1024;   // files larger than this upload in c
 const CHUNK_SIZE = 5 * 1024 * 1024;        // per-chunk size (< server MAX_BODY_SIZE)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-function sessionExpired() { token = ""; localStorage.removeItem(TOKEN_KEY); clearDEK(); showAuth(); }
+function sessionExpired() { clearDEK(); showAuth(); }
 
 // Dispatch: small files go in one request, big files stream in chunks.
 async function uploadOne(file, state, folderId) {
@@ -1402,7 +1398,7 @@ function showNoteEditor() {
 
 async function loadNotes() {
   const { ok, status, body } = await api("/api/notes", { headers: authHeaders() });
-  if (status === 401) { token = ""; localStorage.removeItem(TOKEN_KEY); showAuth(); return; }
+  if (status === 401) { showAuth(); return; }
   if (!ok || !body) { toast("Could not load notes."); return; }
   const list = $("note-list");
   list.textContent = "";
@@ -1530,12 +1526,12 @@ async function boot() {
 
   setMode("login");
 
-  // Need both a session token AND the decryption key (per-tab). Reopening the app
+  // Need both a valid session cookie AND the decryption key (per-tab). Reopening the app
   // in a fresh tab clears the key, so you log in again to re-derive it.
-  if (token && restoreDEK()) {
+  if (restoreDEK()) {
     const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
     if (ok && body && body.user) { showApp(body.user); return; }
-    token = ""; localStorage.removeItem(TOKEN_KEY); clearDEK();
+    clearDEK();
   }
   showAuth();
 }

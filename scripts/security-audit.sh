@@ -19,6 +19,7 @@ want(){ if printf '%s' "$3" | grep -qF -- "$2"; then ok "$1"; else bad "$1 (got:
 # Isolated config: throwaway data dir + test port, so real data is untouched.
 TMPCONF="$TMPDATA/config.env"
 cat > "$TMPCONF" <<EOF
+TLS_ENABLED=false
 PORT=$PORT
 DB_PATH=$TMPDATA/cloud.db
 STORAGE_DIR=$TMPDATA/storage
