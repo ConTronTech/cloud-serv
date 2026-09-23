@@ -18,6 +18,13 @@ Roadmap:
 4. ⬜ Tailscale remote access + HTTPS (front with a reverse proxy).
 5. ⬜ (Optional) native Android app.
 
+## Docs
+
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — what's done, what's next.
+- [`docs/SECURITY.md`](docs/SECURITY.md) — E2E threat model, key hierarchy, what's verified.
+- [`docs/CRYPTO_SPEC.md`](docs/CRYPTO_SPEC.md) — implementation-grade crypto spec for a second client.
+- [`docs/SECURITY_SWEEP_2026-09-23.md`](docs/SECURITY_SWEEP_2026-09-23.md) — full security-sweep findings (not yet all fixed).
+
 ## Architecture
 
 ```
