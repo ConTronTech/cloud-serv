@@ -108,11 +108,27 @@ Current suite: **112 assertions, 0 failures**, also run in CI on every push/PR.
 - **Known trade-off (M6):** the throttle is keyed by email only, so anyone can lock a known
   email out of logging in for up to 15 minutes. Possible follow-up: key on email+IP, or a higher
   threshold for the email-only bucket.
-- **Open (M7):** `/register` still distinguishes already-registered emails (the current
-  success-shaped decoy — user id 0, no `Set-Cookie` — is distinguishable and is *not* a fix).
-  Decide between (a) generic 409 + tight registration rate limit, risk accepted, or (b) closing
-  open registration (admin-created / invite-only accounts).
-- **Open design decision (certificate):** browsers require a trusted cert for service workers
-  and PWA install. A self-signed cert that was clicked through generally will not let the
-  service worker register, and Android needs it trusted to install the PWA. The better option is
-  a real cert from `tailscale cert` for the machine's `.ts.net` name.
+- **M7 (fixed):** self-registration is gated by a shared invite code. `REGISTRATION_INVITE_CODE`
+  in `config.env` (empty = registration disabled entirely, the shipped default) and
+  `POST /api/auth/register` must carry `inviteCode`. A wrong code, an already-registered email, a
+  missing code, and registration-disabled all return the identical
+  `403 {"error":"registration is not open"}` (constant-time code compare; the password hash is
+  computed on every path), so responses can't enumerate emails. Residual, accepted: someone who
+  holds the invite code can still learn whether an email is taken. Operators must set the code to
+  create any account, including the first.
+- **Certificate (Tailscale-issued, self-signed fallback):** `TLS_PREFER_TAILSCALE_CERT` (default
+  `true`). At startup the daemon first tries a real, browser-trusted cert via the Tailscale CLI
+  (`tailscale status --json` for the MagicDNS name, then `tailscale cert --cert-file/--key-file`;
+  hostname validated to `[a-z0-9.-]`, every argument shell-quoted). This is what lets service
+  workers and Android PWA install work without a warning. If Tailscale is missing, logged out,
+  MagicDNS is off, or the command fails, it falls back to the self-signed generator — and that
+  fallback still has the trust caveat (clicked-through self-signed certs generally block service
+  workers; Android needs trust to install the PWA). An existing cert is preserved (not
+  overwritten) when it parses, is not within 24h of expiry, and either covers the Tailscale IP or
+  is not self-signed, so a transient tailscaled failure can't destroy a good cert; a self-signed
+  cert missing the Tailscale IP is still regenerated.
+- **Open (certificate minor points):** `tailscale cert` runs on every start when preferred (a
+  boot-time network call; Tailscale caches, so normally quick); the invocation goes through
+  `popen`/a shell (mitigated by strict hostname validation + quoting) rather than fork/exec; the
+  real path was only tested with a fake `tailscale` on PATH, so smoke-test it once on the real
+  box after `scripts/setup-tailscale.sh`.

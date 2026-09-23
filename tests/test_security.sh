@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"
 start_server 8097 || exit 1
-T1=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"s1@e.cc","password":"supersecret"}')")
-T2=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"s2@e.cc","password":"supersecret"}')")
+T1=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"s1@e.cc","password":"supersecret","inviteCode":"test-invite"}')")
+T2=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"s2@e.cc","password":"supersecret","inviteCode":"test-invite"}')")
 
 echo "== SQL injection =="
 printf '{"email":"s1@e.cc\\u0027 OR 1=1--","password":"x"}' > "$TESTDIR/sqli.json"
@@ -39,7 +39,7 @@ if curl -s -i -X OPTIONS "http://$API/api/files" -H "Origin: http://evil.com" | 
 
 echo "== input validation + logout =="
 want "malformed json" "invalid json" "$(curl -s "http://$API/api/auth/login" --data-binary '{bad')"
-TX=$(tok_of "$(curl -s "http://$API/api/auth/login" -d '{"email":"s1@e.cc","password":"supersecret"}')")
+TX=$(tok_of "$(curl -s "http://$API/api/auth/login" -d '{"email":"s1@e.cc","password":"supersecret","inviteCode":"test-invite"}')")
 curl -s -X POST "http://$API/api/auth/logout" -H "authorization: Bearer $TX" >/dev/null
 want "revoked session unauthorized" "unauthorized" "$(curl -s "http://$API/api/auth/me" -H "authorization: Bearer $TX")"
 

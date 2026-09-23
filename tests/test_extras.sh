@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"
 start_server 8096 || exit 1
-T=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"x@e.cc","password":"supersecret"}')")
+T=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"x@e.cc","password":"supersecret","inviteCode":"test-invite"}')")
 
 # varied files
 A -X POST "http://$API/api/files" -H "X-Filename: caf.jpg" -H "content-type: image/jpeg" --data-binary "img" >/dev/null

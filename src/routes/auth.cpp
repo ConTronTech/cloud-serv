@@ -3,6 +3,7 @@
 #include "security/rate_limiter.h"
 #include "security/request_auth.h"
 #include "utils/logger.h"
+#include "core/config.h"
 
 #include <nlohmann/json.hpp>
 #include <ctime>
@@ -46,9 +47,13 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
 
     static security::LoginThrottle loginThrottle;
 
+    // Self-registration is gated by a shared invite code. Empty = disabled.
+    const std::string inviteCode =
+        core::Config::get_instance().get("env", "REGISTRATION_INVITE_CODE", "");
+
     // ---- Register ----
     CROW_ROUTE(app, "/api/auth/register").methods(crow::HTTPMethod::POST)
-    ([&db, sessionSeconds](const crow::request& req) {
+    ([&db, sessionSeconds, inviteCode](const crow::request& req) {
         json body; std::string err;
         if (!parseJsonObject(req, body, err)) return http::jsonError(400, err);
 
@@ -60,14 +65,14 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         if (!isValidEmail(email)) return http::jsonError(400, "invalid email");
         if (password.size() < 8) return http::jsonError(400, "password must be at least 8 characters");
 
-        int64_t userId = db.createUser(email, displayName, security::Crypto::hashPassword(password));
-        if (userId < 0) {
-            // Don't reveal that the email is taken: answer with the same shape as a
-            // success, but with a throwaway token, no cookie and no session. The
-            // decoy is unusable, so the client just lands back on the login screen.
-            json user = {{"id", 0}, {"email", email}, {"displayName", displayName}};
-            return http::jsonSuccess(json{{"token", security::Crypto::randomHex(32)}, {"user", user}}.dump());
-        }
+        // Wrong invite code, registration disabled (empty config) and an already-taken
+        // email all yield the identical generic 403, so none can be told apart (no
+        // email enumeration). The hash is computed on every path to even out timing.
+        std::string pwHash = security::Crypto::hashPassword(password);
+        bool inviteOk = !inviteCode.empty() &&
+            security::Crypto::constantTimeEquals(strField(body, "inviteCode"), inviteCode);
+        int64_t userId = inviteOk ? db.createUser(email, displayName, pwHash) : -1;
+        if (userId < 0) return http::jsonError(403, "registration is not open");
 
         // E2E key material — client-generated, opaque to us. Stored so we can hand
         // it back at login; without the user's password/recovery key it's useless.

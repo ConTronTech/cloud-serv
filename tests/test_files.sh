@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"
 start_server 8092 || exit 1
-T=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"f@e.cc","password":"supersecret"}')")
+T=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"f@e.cc","password":"supersecret","inviteCode":"test-invite"}')")
 
 echo "== upload / list / download =="
 UP=$(A -X POST "http://$API/api/files" -H "X-Filename: hello.txt" -H "content-type: text/plain" --data-binary "hello world")

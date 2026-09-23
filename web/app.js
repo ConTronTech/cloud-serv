@@ -102,6 +102,8 @@ function setMode(m) {
   $("tab-login").classList.toggle("active", login);
   $("tab-register").classList.toggle("active", !login);
   $("name-row").classList.toggle("hidden", login);
+  $("invite-row").classList.toggle("hidden", login);
+  $("invite-code").required = !login;
   $("auth-submit").textContent = login ? "Log in" : "Create account";
   $("password").setAttribute("autocomplete", login ? "current-password" : "new-password");
   $("auth-error").textContent = "";
@@ -321,7 +323,7 @@ function setDEK(raw) { DEK_RAW = raw; try { sessionStorage.setItem("cs_dek", toB
 function clearDEK() { DEK_RAW = null; try { sessionStorage.removeItem("cs_dek"); } catch {} clearThumbCache(); }
 function restoreDEK() { if (!DEK_RAW) { const s = sessionStorage.getItem("cs_dek"); if (s) DEK_RAW = fromB64(s); } return !!DEK_RAW; }
 
-async function e2eRegister(email, password, displayName) {
+async function e2eRegister(email, password, displayName, inviteCode) {
   const saltHex = toHex(randBytes(16));
   const { authKeyB64, kek } = await deriveKeys(password, saltHex);
   const dekRaw = randBytes(32);
@@ -330,7 +332,7 @@ async function e2eRegister(email, password, displayName) {
   const wrappedDekRecovery = await wrapBytes(dekRaw, await importAes(recRaw));
   const { ok, body } = await api("/api/auth/register", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password: authKeyB64, displayName, salt: saltHex, wrappedDek, wrappedDekRecovery }),
+    body: JSON.stringify({ email, password: authKeyB64, displayName, inviteCode, salt: saltHex, wrappedDek, wrappedDekRecovery }),
   });
   if (!ok || !body || !body.token) return { ok: false, body };
   setDEK(dekRaw);
@@ -362,7 +364,7 @@ async function onAuthSubmit(e) {
 
   let r;
   try {
-    r = mode === "login" ? await e2eLogin(email, password) : await e2eRegister(email, password, displayName);
+    r = mode === "login" ? await e2eLogin(email, password) : await e2eRegister(email, password, displayName, $("invite-code").value.trim());
   } catch (err) { r = { ok: false, body: { error: err.message } }; }
   btn.disabled = false; setMode(mode);
 
@@ -376,7 +378,7 @@ function prettyError(body) {
   const e = body && body.error;
   const map = {
     "invalid credentials": "Wrong email or password.",
-    "email already registered": "That email is already registered.",
+    "registration is not open": "Registration failed — check the invite code, or registration is closed.",
     "invalid email": "Please enter a valid email.",
     "password must be at least 8 characters": "Password must be at least 8 characters.",
     "unauthorized": "Session expired — please log in again.",

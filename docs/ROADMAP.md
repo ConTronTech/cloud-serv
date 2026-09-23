@@ -70,9 +70,15 @@ under a new password" flow isn't wired into the UI yet.
   (self-signed EC P-256, auto-regenerated when the SAN misses the Tailscale IP; `TLS_ENABLED`,
   `TLS_CERT_PATH`, `TLS_KEY_PATH`; `scripts/setup-tailscale.sh`). No reverse proxy.
 - **`RATE_LIMIT_ENABLED` is still `false` in `config.env`** — flip it before exposing.
-- **Open:** self-signed certs block service-worker/PWA install; decide on `tailscale cert`
-  (real cert for the `.ts.net` name).
-- **Open:** M7 (registration enumeration) — see the sweep's Remediation status.
+- **Done:** `TLS_PREFER_TAILSCALE_CERT` (default `true`) first tries a real, browser-trusted
+  cert via `tailscale cert` for the MagicDNS name (service workers / Android PWA install work
+  without a warning); self-signed remains the fallback and that fallback still has the trust
+  caveat. **Open:** smoke-test the real Tailscale path once on the real box after
+  `scripts/setup-tailscale.sh` (only tested with a fake `tailscale` so far); it runs on every
+  start and uses `popen` (validated + quoted).
+- **Done:** M7 fixed — registration requires `REGISTRATION_INVITE_CODE` / `inviteCode`
+  (empty = disabled, the default; set it in `config.env` to create the first account and any
+  later ones); uniform `403` on every failure path. See the sweep's Remediation status.
 
 ---
 

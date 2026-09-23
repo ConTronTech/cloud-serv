@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"
 start_server 8093 || exit 1
-T=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"d@e.cc","password":"supersecret"}')")
+T=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"d@e.cc","password":"supersecret","inviteCode":"test-invite"}')")
 fid_in(){ A "$1" | tr '}' '\n' | grep -F "\"name\":\"$2\"" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2; }
 
 echo "== create tree + navigation =="

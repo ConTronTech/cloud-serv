@@ -85,7 +85,7 @@ async function main() {
 
   let r = await fetch(API + "/api/auth/register", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email, password: authKeyB64, displayName: "e2e", salt: saltHex, wrappedDek, wrappedDekRecovery }),
+    body: JSON.stringify({ email, password: authKeyB64, displayName: "e2e", inviteCode: "test-invite", salt: saltHex, wrappedDek, wrappedDekRecovery }),
   });
   r.ok ? ok("register (auth key, not password)") : bad("register " + r.status);
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"
 start_server 8095 || exit 1
-T1=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"n1@e.cc","password":"supersecret"}')")
-T2=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"n2@e.cc","password":"supersecret"}')")
+T1=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"n1@e.cc","password":"supersecret","inviteCode":"test-invite"}')")
+T2=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"n2@e.cc","password":"supersecret","inviteCode":"test-invite"}')")
 
 echo "== notes CRUD =="
 C=$(curl -s -H "authorization: Bearer $T1" -X POST "http://$API/api/notes" -d '{"title":"Shopping","body":"milk\neggs"}')

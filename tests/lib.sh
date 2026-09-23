@@ -44,13 +44,14 @@ WEB_DIR=$ROOT/web
 SESSION_SECONDS=3600
 RATE_LIMIT_ENABLED=false
 LOG_LEVEL=WARN
+REGISTRATION_INVITE_CODE=test-invite
 EOF
   launch_server || return 1
 }
 
 # (Re)launch the server against $TESTDIR/config.env and wait until healthy.
 launch_server() {
-  ( cd "$ROOT" && exec ./cloud_serv "$TESTDIR/config.env" ) >> "$TESTDIR/server.log" 2>&1 &
+  ( cd "$ROOT" && export PATH="${EXTRA_PATH:+$EXTRA_PATH:}$PATH" && exec ./cloud_serv "$TESTDIR/config.env" ) >> "$TESTDIR/server.log" 2>&1 &
   SRV_PID=$!
   local i
   for i in $(seq 1 50); do

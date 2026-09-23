@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <ctime>
 #include <memory>
 #include <filesystem>
 #include <set>
@@ -76,15 +77,21 @@ std::string san_string(const std::string& tsIp) {
     return san;
 }
 
-// True if the cert at cert_path parses and its SAN covers ip.
-bool certCoversIp(const std::string& cert_path, const std::string& ip) {
+// Usable existing cert: parses, not expiring within 24h, and either covers the
+// Tailscale IP or is NOT self-signed. A Tailscale/Let's Encrypt cert only has
+// the DNS name in its SAN (never the IP), so a non-self-signed cert must be
+// preserved — otherwise a transient tailscaled failure at boot would overwrite
+// a trusted cert with a self-signed one.
+bool certUsable(const std::string& cert_path, const std::string& ip) {
     FILE* f = fopen(cert_path.c_str(), "r");
     if (!f) return false;
     X509Ptr x(PEM_read_X509(f, nullptr, nullptr, nullptr));
     fclose(f);
     if (!x) return false;
-    if (ip.empty()) return true;
-    return X509_check_ip_asc(x.get(), ip.c_str(), 0) == 1;
+    time_t soon = time(nullptr) + 24 * 3600;
+    if (X509_cmp_time(X509_get0_notAfter(x.get()), &soon) <= 0) return false;
+    if (ip.empty() || X509_check_ip_asc(x.get(), ip.c_str(), 0) == 1) return true;
+    return X509_check_issued(x.get(), x.get()) != X509_V_OK;  // not self-signed
 }
 
 void generate(const std::string& cert_path, const std::string& key_path, const std::string& tsIp) {
@@ -165,6 +172,87 @@ void generate(const std::string& cert_path, const std::string& key_path, const s
     ::chmod(cert_path.c_str(), 0644);
 }
 
+// Runs a command via popen and captures stdout. NOTE: popen goes through a shell,
+// which is acceptable here ONLY because every argument is derived from tailscale's
+// own output or operator-owned config (TLS_CERT_PATH/TLS_KEY_PATH), never from
+// attacker-reachable input; paths are additionally single-quote escaped.
+bool runCapture(const std::string& cmd, std::string& out, int* rcOut = nullptr) {
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return false;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), p)) > 0 && out.size() < (1u << 20)) out.append(buf, n);
+    int rc = pclose(p);
+    if (rcOut) *rcOut = rc;
+    return rc == 0;
+}
+
+std::string shQuote(const std::string& s) {
+    std::string r = "'";
+    for (char c : s) { if (c == '\'') r += "'\\''"; else r += c; }
+    return r + "'";
+}
+
+bool validHostname(const std::string& h) {
+    if (h.empty() || h.size() > 253) return false;
+    for (char c : h)
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) return false;
+    return h.find('.') != std::string::npos;
+}
+
+// This box's MagicDNS name (e.g. host.tailnet.ts.net) from `tailscale status --json`
+// -> Self.DNSName. Empty if tailscale is missing, logged out, or MagicDNS is off.
+std::string detect_tailscale_hostname() {
+    std::string out;
+    if (!runCapture("tailscale status --json 2>/dev/null", out)) return "";
+    size_t self = out.find("\"Self\"");
+    if (self == std::string::npos) return "";
+    size_t k = out.find("\"DNSName\"", self);
+    if (k == std::string::npos) return "";
+    size_t q1 = out.find('"', out.find(':', k) + 1);
+    if (q1 == std::string::npos) return "";
+    size_t q2 = out.find('"', q1 + 1);
+    if (q2 == std::string::npos) return "";
+    std::string h = out.substr(q1 + 1, q2 - q1 - 1);
+    while (!h.empty() && h.back() == '.') h.pop_back();
+    for (auto& c : h) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return validHostname(h) ? h : "";
+}
+
+// Preferred path: real Tailscale-issued cert. Returns true if cert/key are in place.
+bool tryTailscaleCert(const std::string& cert_path, const std::string& key_path) {
+    auto& log = utils::Logger::get_instance();
+    std::string host = detect_tailscale_hostname();
+    if (host.empty()) {
+        log.warn("TLS: no Tailscale MagicDNS name available (tailscale missing/logged out/MagicDNS off) — falling back to self-signed");
+        return false;
+    }
+    for (const auto& p : {cert_path, key_path}) {
+        std::filesystem::path parent = std::filesystem::path(p).parent_path();
+        if (parent.empty()) continue;
+        std::error_code ec;
+        std::filesystem::create_directories(parent, ec);
+    }
+    std::filesystem::path kp = std::filesystem::path(key_path).parent_path();
+    if (!kp.empty()) ::chmod(kp.c_str(), S_IRWXU);
+
+    std::string cmd = "tailscale cert --cert-file " + shQuote(cert_path) + " --key-file " +
+                      shQuote(key_path) + " " + shQuote(host) + " 2>&1";
+    std::string out;
+    int rc = -1;
+    if (!runCapture(cmd, out, &rc) || !std::filesystem::exists(cert_path) ||
+        !std::filesystem::exists(key_path)) {
+        while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+        log.warn("TLS: `tailscale cert " + host + "` failed (" + out.substr(0, 300) +
+                 ") — falling back to self-signed");
+        return false;
+    }
+    ::chmod(key_path.c_str(), 0600);
+    ::chmod(cert_path.c_str(), 0644);
+    log.info("TLS: using Tailscale-issued certificate for " + host);
+    return true;
+}
+
 } // namespace
 
 std::string detect_tailscale_ip() {
@@ -184,12 +272,14 @@ std::string detect_tailscale_ip() {
     return "";
 }
 
-bool ensure_server_cert(const std::string& cert_path, const std::string& key_path) {
+bool ensure_server_cert(const std::string& cert_path, const std::string& key_path,
+                        bool preferTailscaleCert) {
     auto& log = utils::Logger::get_instance();
+    if (preferTailscaleCert && tryTailscaleCert(cert_path, key_path)) return true;
     std::string tsIp = detect_tailscale_ip();
 
     bool haveFiles = std::filesystem::exists(cert_path) && std::filesystem::exists(key_path);
-    if (haveFiles && certCoversIp(cert_path, tsIp)) {
+    if (haveFiles && certUsable(cert_path, tsIp)) {
         // Keep permissions tight on an existing key too.
         ::chmod(key_path.c_str(), 0600);
         std::filesystem::path kp = std::filesystem::path(key_path).parent_path();
@@ -198,7 +288,7 @@ bool ensure_server_cert(const std::string& cert_path, const std::string& key_pat
     }
 
     if (haveFiles)
-        log.info("TLS: existing cert does not cover Tailscale IP " + tsIp + " (or is unreadable) — regenerating");
+        log.info("TLS: existing cert is unusable (expired/unreadable or self-signed without Tailscale IP " + tsIp + ") — regenerating");
     else
         log.info("TLS: generating self-signed certificate at " + cert_path);
     generate(cert_path, key_path, tsIp);

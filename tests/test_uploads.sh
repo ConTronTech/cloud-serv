@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"
 start_server 8094 || exit 1
-T=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"u@e.cc","password":"supersecret"}')")
+T=$(tok_of "$(curl -s "http://$API/api/auth/register" -d '{"email":"u@e.cc","password":"supersecret","inviteCode":"test-invite"}')")
 
 echo "== chunked upload + integrity =="
 head -c 25000 /dev/urandom > "$TESTDIR/big.bin"

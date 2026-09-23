@@ -150,7 +150,8 @@ int main(int argc, char* argv[]) {
         if (tlsEnabled) {
             std::string certPath = config.get("env", "TLS_CERT_PATH", "data/tls/server.crt");
             std::string keyPath = config.get("env", "TLS_KEY_PATH", "data/tls/server.key");
-            security::tls::ensure_server_cert(certPath, keyPath);
+            security::tls::ensure_server_cert(certPath, keyPath,
+                config.get_bool("env", "TLS_PREFER_TAILSCALE_CERT", true));
             app.ssl_file(certPath, keyPath);
         } else {
             utils::Logger::get_instance().warn("TLS disabled (TLS_ENABLED=false) — serving plain HTTP");
