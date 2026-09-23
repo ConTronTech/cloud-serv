@@ -67,11 +67,12 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
 
         // Wrong invite code, registration disabled (empty config) and an already-taken
         // email all yield the identical generic 403, so none can be told apart (no
-        // email enumeration). The hash is computed on every path to even out timing.
-        std::string pwHash = security::Crypto::hashPassword(password);
+        // email enumeration). The (expensive) hash is only paid once the invite code checks out.
         bool inviteOk = !inviteCode.empty() &&
             security::Crypto::constantTimeEquals(strField(body, "inviteCode"), inviteCode);
-        int64_t userId = inviteOk ? db.createUser(email, displayName, pwHash) : -1;
+        if (!inviteOk) return http::jsonError(403, "registration is not open");
+        std::string pwHash = security::Crypto::hashPassword(password);
+        int64_t userId = db.createUser(email, displayName, pwHash);
         if (userId < 0) return http::jsonError(403, "registration is not open");
 
         // E2E key material — client-generated, opaque to us. Stored so we can hand
@@ -116,12 +117,23 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         std::string email = toLower(strField(body, "email"));
         std::string password = strField(body, "password");
 
-        // Per-account backoff (independent of the per-IP limiter).
-        if (int wait = loginThrottle.retryAfterSeconds(email)) {
+        // Reject before the throttle/DB so attacker-sized emails are never stored.
+        if (email.size() > 254) return http::jsonError(400, "invalid email");
+
+        // Per-account backoff (independent of the per-IP limiter). On success this
+        // reserves a slot that recordFailure/recordSuccess below must finalize.
+        if (int wait = loginThrottle.acquire(email)) {
             auto res = http::jsonError(429, "too many failed attempts, try again later");
             res.add_header("Retry-After", std::to_string(wait));
             return res;
         }
+
+        // The slot acquired above must be finalized exactly once. If anything below
+        // throws before that, hand the slot back so the account isn't left stuck.
+        struct SlotGuard {
+            security::LoginThrottle& t; const std::string& key; bool done = false;
+            ~SlotGuard() { if (!done) t.release(key); }
+        } slot{loginThrottle, email};
 
         auto user = db.findUserByEmail(email);
         // Verify even when the user is missing, to keep timing ~constant and avoid
@@ -134,9 +146,11 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
 
         if (!user || !ok) {
             loginThrottle.recordFailure(email);
+            slot.done = true;
             return http::jsonError(401, "invalid credentials");
         }
         loginThrottle.recordSuccess(email);
+        slot.done = true;
 
         std::string token = security::Crypto::randomHex(32);
         int64_t expiresAt = static_cast<int64_t>(::time(nullptr)) + sessionSeconds;
@@ -153,7 +167,8 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
     // ---- Me ----
     CROW_ROUTE(app, "/api/auth/me").methods(crow::HTTPMethod::GET)
     ([&db](const crow::request& req) {
-        auto userId = security::authenticateRequest(req, db);
+        // Session-only: the response carries the wrapped DEK + salt, which an API key must not reach.
+        auto userId = security::authenticateSession(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
         auto user = db.findUserById(*userId);
         if (!user) return http::jsonError(401, "unauthorized");

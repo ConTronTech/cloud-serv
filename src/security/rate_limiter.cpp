@@ -193,33 +193,65 @@ void RateLimiter::cleanupOldClients() {
     }
 }
 
-int LoginThrottle::retryAfterSeconds(const std::string& key) {
+namespace {
+constexpr int kFree = 5;            // failures before any lockout
+constexpr int kMaxLockSec = 900;    // 15 min cap
+constexpr size_t kMaxEntries = 10000;
+}
+
+// Bound memory without ever bulk-clearing: drop stale entries, then evict
+// least-recently-used ones, sparing locked / in-flight entries unless nothing
+// else remains.
+void LoginThrottle::evictIfOversized(std::chrono::steady_clock::time_point now) {
+    if (entries_.size() <= kMaxEntries) return;
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (it->second.pending == 0 && now - it->second.last > std::chrono::hours(1)) it = entries_.erase(it);
+        else ++it;
+    }
+    while (entries_.size() > kMaxEntries) {
+        auto victim = entries_.end();
+        bool victimProtected = true;
+        for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+            bool prot = it->second.pending > 0 || it->second.lockedUntil > now;
+            if (victim == entries_.end() ||
+                (victimProtected && !prot) ||
+                (prot == victimProtected && it->second.last < victim->second.last)) {
+                victim = it;
+                victimProtected = prot;
+            }
+        }
+        if (victim == entries_.end()) break;
+        entries_.erase(victim);
+    }
+}
+
+int LoginThrottle::acquire(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = entries_.find(key);
-    if (it == entries_.end()) return 0;
     auto now = std::chrono::steady_clock::now();
-    if (it->second.lockedUntil <= now) return 0;
-    return static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
-        it->second.lockedUntil - now).count()) + 1;
+    auto it = entries_.find(key);
+    if (it == entries_.end()) {
+        evictIfOversized(now);
+        it = entries_.emplace(key, Entry{}).first;
+        it->second.last = now;
+    }
+    Entry& e = it->second;
+    if (e.pending == 0 && now - e.last > std::chrono::hours(1)) e.failures = 0;
+    if (e.lockedUntil > now) {
+        return static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+            e.lockedUntil - now).count()) + 1;
+    }
+    // In-flight attempts count as potential failures, so concurrent callers can't
+    // collectively exceed the free budget; past it, attempts are serialized.
+    if (e.pending >= std::max(1, kFree - e.failures)) return 1;
+    e.pending++;
+    return 0;
 }
 
 void LoginThrottle::recordFailure(const std::string& key) {
-    constexpr int kFree = 5;            // failures before any lockout
-    constexpr int kMaxLockSec = 900;    // 15 min cap
     std::lock_guard<std::mutex> lock(mutex_);
     auto now = std::chrono::steady_clock::now();
-
-    // Bound memory: drop stale entries (idle > 1h) when the map grows large.
-    if (entries_.size() > 10000) {
-        for (auto it = entries_.begin(); it != entries_.end();) {
-            if (now - it->second.last > std::chrono::hours(1)) it = entries_.erase(it);
-            else ++it;
-        }
-        if (entries_.size() > 10000) entries_.clear();
-    }
-
     auto& e = entries_[key];
-    if (now - e.last > std::chrono::hours(1)) e.failures = 0;
+    if (e.pending > 0) e.pending--;
     e.last = now;
     e.failures++;
     if (e.failures >= kFree) {
@@ -232,6 +264,12 @@ void LoginThrottle::recordFailure(const std::string& key) {
 void LoginThrottle::recordSuccess(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     entries_.erase(key);
+}
+
+void LoginThrottle::release(const std::string& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = entries_.find(key);
+    if (it != entries_.end() && it->second.pending > 0) it->second.pending--;
 }
 
 } // namespace security

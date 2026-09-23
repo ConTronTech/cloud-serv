@@ -51,6 +51,8 @@ Dependencies (Ubuntu/Debian): `libasio-dev` (Crow), `libssl-dev` (crypto),
 
 ```bash
 make
+cp -n config.env.example config.env   # config.env is git-ignored: it holds secrets
+# edit config.env: set REGISTRATION_INVITE_CODE (empty = nobody can register). Never commit it.
 ./cloud_serv config.env      # listens on https://0.0.0.0:<PORT from config.env> (default 8080)
 ```
 

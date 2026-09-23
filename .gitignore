@@ -11,3 +11,7 @@ data/
 # Local overrides
 config.local.env
 .DS_Store
+
+# Real runtime config: holds secrets (REGISTRATION_INVITE_CODE). Copy config.env.example
+# to config.env and edit locally; never commit it.
+config.env

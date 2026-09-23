@@ -77,12 +77,28 @@ std::string san_string(const std::string& tsIp) {
     return san;
 }
 
-// Usable existing cert: parses, not expiring within 24h, and either covers the
+// True if the private key at key_path is the key for the certificate at cert_path.
+bool keyMatchesCert(const std::string& cert_path, const std::string& key_path) {
+    FILE* f = fopen(cert_path.c_str(), "r");
+    if (!f) return false;
+    X509Ptr x(PEM_read_X509(f, nullptr, nullptr, nullptr));
+    fclose(f);
+    if (!x) return false;
+    FILE* kf = fopen(key_path.c_str(), "r");
+    if (!kf) return false;
+    PkeyPtr pk(PEM_read_PrivateKey(kf, nullptr, nullptr, nullptr));
+    fclose(kf);
+    if (!pk) return false;
+    return X509_check_private_key(x.get(), pk.get()) == 1;
+}
+
+// Usable existing cert: the key matches it, parses, not expiring within 24h, and either covers the
 // Tailscale IP or is NOT self-signed. A Tailscale/Let's Encrypt cert only has
 // the DNS name in its SAN (never the IP), so a non-self-signed cert must be
 // preserved — otherwise a transient tailscaled failure at boot would overwrite
 // a trusted cert with a self-signed one.
-bool certUsable(const std::string& cert_path, const std::string& ip) {
+bool certUsable(const std::string& cert_path, const std::string& key_path, const std::string& ip) {
+    if (!keyMatchesCert(cert_path, key_path)) return false;
     FILE* f = fopen(cert_path.c_str(), "r");
     if (!f) return false;
     X509Ptr x(PEM_read_X509(f, nullptr, nullptr, nullptr));
@@ -91,7 +107,13 @@ bool certUsable(const std::string& cert_path, const std::string& ip) {
     time_t soon = time(nullptr) + 24 * 3600;
     if (X509_cmp_time(X509_get0_notAfter(x.get()), &soon) <= 0) return false;
     if (ip.empty() || X509_check_ip_asc(x.get(), ip.c_str(), 0) == 1) return true;
-    return X509_check_issued(x.get(), x.get()) != X509_V_OK;  // not self-signed
+    // Self-signed = issuer==subject AND the cert verifies under its own key.
+    // Not X509_check_issued(x, x): it enforces keyUsage, and our own certs carry
+    // keyUsage=digitalSignature (no keyCertSign), so it reports
+    // X509_V_ERR_KEYUSAGE_NO_CERTSIGN even for a genuine self-signed cert.
+    bool selfSigned = X509_NAME_cmp(X509_get_issuer_name(x.get()), X509_get_subject_name(x.get())) == 0 &&
+                      X509_verify(x.get(), X509_get0_pubkey(x.get())) == 1;
+    return !selfSigned;
 }
 
 void generate(const std::string& cert_path, const std::string& key_path, const std::string& tsIp) {
@@ -170,6 +192,7 @@ void generate(const std::string& cert_path, const std::string& key_path, const s
     fclose(cf);
     if (!ok) fail("writing cert failed");
     ::chmod(cert_path.c_str(), 0644);
+    if (!keyMatchesCert(cert_path, key_path)) fail("generated certificate does not match its private key");
 }
 
 // Runs a command via popen and captures stdout. NOTE: popen goes through a shell,
@@ -279,7 +302,7 @@ bool ensure_server_cert(const std::string& cert_path, const std::string& key_pat
     std::string tsIp = detect_tailscale_ip();
 
     bool haveFiles = std::filesystem::exists(cert_path) && std::filesystem::exists(key_path);
-    if (haveFiles && certUsable(cert_path, tsIp)) {
+    if (haveFiles && certUsable(cert_path, key_path, tsIp)) {
         // Keep permissions tight on an existing key too.
         ::chmod(key_path.c_str(), 0600);
         std::filesystem::path kp = std::filesystem::path(key_path).parent_path();
@@ -288,7 +311,7 @@ bool ensure_server_cert(const std::string& cert_path, const std::string& key_pat
     }
 
     if (haveFiles)
-        log.info("TLS: existing cert is unusable (expired/unreadable or self-signed without Tailscale IP " + tsIp + ") — regenerating");
+        log.info("TLS: existing cert is unusable (expired/unreadable/key mismatch or self-signed without Tailscale IP " + tsIp + ") — regenerating");
     else
         log.info("TLS: generating self-signed certificate at " + cert_path);
     generate(cert_path, key_path, tsIp);

@@ -61,13 +61,25 @@ public:
 // Applies equally to unknown emails so it can't be used to enumerate accounts.
 class LoginThrottle {
 public:
-    // Seconds the caller must wait before another attempt (0 = allowed).
-    int retryAfterSeconds(const std::string& key);
-    void recordFailure(const std::string& key);
-    void recordSuccess(const std::string& key);
+    // Atomically check the lockout and reserve an attempt slot. Returns 0 if the
+    // caller may proceed (it MUST then call recordFailure or recordSuccess exactly
+    // once), else the seconds to wait (no slot reserved).
+    int acquire(const std::string& key);
+    void recordFailure(const std::string& key);   // finalizes a reserved slot
+    void recordSuccess(const std::string& key);   // finalizes a reserved slot
+    // Gives back a reserved slot WITHOUT counting a failure. Only for abnormal exits
+    // (an exception between acquire and the finalizer) so a stuck slot can't lock an
+    // account out until restart.
+    void release(const std::string& key);
 
 private:
-    struct Entry { int failures = 0; std::chrono::steady_clock::time_point lockedUntil; std::chrono::steady_clock::time_point last; };
+    struct Entry {
+        int failures = 0;
+        int pending = 0;   // reserved, not yet finalized attempts
+        std::chrono::steady_clock::time_point lockedUntil;
+        std::chrono::steady_clock::time_point last;
+    };
+    void evictIfOversized(std::chrono::steady_clock::time_point now);
     std::unordered_map<std::string, Entry> entries_;
     std::mutex mutex_;
 };

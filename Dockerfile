@@ -20,6 +20,10 @@ COPY . .
 # Build
 RUN make clean && make
 
+# config.env is untracked (it holds secrets); fall back to the example so a fresh
+# clone still builds. Mount or bake your real config.env over this for real use.
+RUN cp -n config.env.example config.env
+
 # Runtime data dir (SQLite DB + uploaded blobs)
 RUN mkdir -p data
 

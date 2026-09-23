@@ -54,6 +54,39 @@ NAIVE=$(printf '%s' "cloud-serv-salt-v1|ghost@x.cc" | sha256sum | cut -c1-32)
 if printf '%s' "$D1" | grep -qF "$NAIVE"; then bad "decoy salt is attacker-computable (sha256)"; else ok "decoy salt not attacker-computable (HMAC-keyed)"; fi
 want "login returns wrapped DEK" '"wrappedDek":"WDEK"' "$(curl -s "http://$API/api/auth/login" -d '{"email":"e@e.cc","password":"AUTHKEYb64xxxxxxxxxxxxxxxx"}')"
 
+echo "== login hardening =="
+LOGIN="http://$API/api/auth/login"
+LONG=$(head -c 300 /dev/zero | tr '\0' 'a')
+C=$(curl -s -o /dev/null -w '%{http_code}' "$LOGIN" -d "{\"email\":\"$LONG@e.cc\",\"password\":\"x\"}")
+[ "$C" = "400" ] && ok "over-254-char login email -> 400" || bad "long email status: $C"
+lockseq() { # email, correct-password
+  local i out c
+  for i in 1 2 3 4 5; do curl -s -o /dev/null "$LOGIN" -d "{\"email\":\"$1\",\"password\":\"wrong$i\"}"; done
+  out=$(curl -s -i "$LOGIN" -d "{\"email\":\"$1\",\"password\":\"wrong6\"}")
+  case "$out" in *' 429'*) ok "$1: 6th attempt 429";; *) bad "$1: 6th not 429: $(printf '%s' "$out" | head -1)";; esac
+  printf '%s' "$out" | grep -qi '^retry-after: [0-9]' && ok "$1: Retry-After present" || bad "$1: no Retry-After"
+  c=$(curl -s -o /dev/null -w '%{http_code}' "$LOGIN" -d "{\"email\":\"$1\",\"password\":\"$2\"}")
+  [ "$c" = "429" ] && ok "$1: 7th (correct pw while locked) 429" || bad "$1: 7th status $c"
+}
+lockseq "e@e.cc" "AUTHKEYb64xxxxxxxxxxxxxxxx"
+lockseq "nobody-here@e.cc" "whatever123"
+C=$(curl -s -o /dev/null -w '%{http_code}' "$LOGIN" -d '{"email":"a@e.cc","password":"supersecret"}')
+[ "$C" = "200" ] && ok "unrelated account unaffected by lockouts" || bad "a@e.cc login status $C"
+
+echo "== /me is session-only =="
+AK3=$(A -X POST "http://$API/api/auth/api-keys" -d '{"name":"me-test"}')
+KEY3=$(printf '%s' "$AK3" | grep -o '"key":"[^"]*"' | cut -d'"' -f4)
+R=$(curl -s -w '|%{http_code}' "http://$API/api/auth/me" -H "X-API-Key: $KEY3")
+case "$R" in *'|401') ok "/me with API key -> 401";; *) bad "/me with API key: $R";; esac
+printf '%s' "$R" | grep -q 'wrappedDek' && bad "/me leaked wrappedDek to API key" || ok "/me API key response has no wrappedDek"
+JAR="$TESTDIR/jar"
+curl -s -c "$JAR" "$LOGIN" -d '{"email":"a@e.cc","password":"supersecret"}' >/dev/null
+ME_C=$(curl -s -b "$JAR" "http://$API/api/auth/me")
+want "/me with session cookie returns salt" '"salt"' "$ME_C"
+want "/me with session cookie returns wrappedDek" '"wrappedDek"' "$ME_C"
+ME_B=$(A "http://$API/api/auth/me")
+want "/me with bearer returns salt+wrappedDek" '"wrappedDek"' "$ME_B"
+
 echo "== registration disabled (empty invite code) =="
 kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null
 sed -i 's/^REGISTRATION_INVITE_CODE=.*/REGISTRATION_INVITE_CODE=/' "$TESTDIR/config.env"

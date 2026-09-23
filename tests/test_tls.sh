@@ -41,6 +41,15 @@ EOF
 chmod +x "$TESTDIR/fakebin/tailscale"
 stop() { kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null; }
 
+echo "== daemon-generated cert missing Tailscale IP is regenerated (first boot without tailscale) =="
+stop
+rm -f "$CRT" "$KEY"
+launch_server || { bad "first boot failed"; finish; exit 1; }
+FG0=$(fp); stop
+EXTRA_PATH="$TESTDIR/fakebin" launch_server || { bad "restart with fake tailscale failed"; finish; exit 1; }
+[ "$FG0" != "$(fp)" ] && ok "daemon-generated cert regenerated" || bad "daemon-generated cert not regenerated"
+want "regenerated SAN contains 100.64.1.2" "100.64.1.2" "$(openssl x509 -in "$CRT" -noout -ext subjectAltName 2>&1)"
+
 echo "== CA-signed cert preserved when Tailscale IP detected but not in SAN =="
 stop
 CA="$TESTDIR/ca"; mkdir -p "$CA"
