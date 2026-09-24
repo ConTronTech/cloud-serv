@@ -2,6 +2,7 @@
 
 #include <string>
 #include <cstdint>
+#include <optional>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -20,9 +21,17 @@ struct User {
     std::string kdf_salt;              // salt the client uses to derive keys from the password
     std::string wrapped_dek;          // Data Encryption Key wrapped by the password-derived KEK
     std::string wrapped_dek_recovery; // DEK wrapped by the recovery key
+    // ---- Administration (server-managed; never part of the E2E key material) ----
+    std::string role = "user";         // "user" | "admin"
+    std::string status = "active";     // "active" | "suspended"
+    std::optional<int64_t> storage_quota_bytes; // nullopt = unlimited
 
     // Public view — omits password_hash.
     json toJson() const;
+    // Admin listing view: adds server-visible aggregates (bytes used, file
+    // count) that are already part of the documented threat model (sizes/
+    // counts are metadata the server can see) — never a name or content.
+    json toAdminJson(int64_t usedBytes, int64_t fileCount) const;
 };
 
 struct ApiKeyInfo {
@@ -96,4 +105,21 @@ struct UploadSession {
     int64_t plain_size = 0;      // plaintext size for display (0 = use received)
     std::string enc_name;        // E2E: display name encrypted under the DEK ("" = plaintext)
     std::string enc_mime;        // E2E: mime type encrypted under the DEK ("" = plaintext)
+};
+
+// A backup tombstone for a removed (soft-deleted) account: the "backup + temp
+// remove" admin action. The live user/folders/files/notes rows are gone by
+// the time this exists — everything needed to account for or restore the
+// account lives in the backup bundle at backup_path (still-encrypted blobs +
+// a JSON dump of their former DB rows), not in this row.
+struct RemovedUser {
+    int64_t id = 0;
+    int64_t original_user_id = 0;
+    std::string email;
+    std::string display_name;
+    std::string backup_path;
+    std::string removed_at;
+    int64_t removed_by = 0;      // admin user id who performed the removal
+
+    json toJson() const;
 };

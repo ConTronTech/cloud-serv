@@ -84,6 +84,10 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         int64_t size = intField(body, "size", 0);
         if (size < 0) size = 0;
         if (size > maxFileBytes) return http::jsonError(413, "file too large");
+        // size == 0 means "unknown length" (streamed); the per-chunk check in the
+        // PUT handler below is the real quota gate for that case.
+        if (size > 0 && !db.hasQuotaRoom(*userId, size))
+            return http::jsonError(413, "storage quota exceeded");
 
         int64_t folderId = intField(body, "folderId", 0);
         if (!db.folderExists(*userId, folderId)) return http::jsonError(400, "folder not found");
@@ -139,6 +143,11 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         int64_t newReceived = s->received + static_cast<int64_t>(req.body.size());
         if (newReceived > maxFileBytes) return http::jsonError(413, "file too large");
         if (s->size > 0 && newReceived > s->size) return http::jsonError(400, "exceeds declared size");
+        // Per-chunk quota gate: this session's total isn't in usage() yet (it
+        // only counts completed files), so this checks this chunk's own bytes
+        // against current usage each time rather than the session's running total.
+        if (!db.hasQuotaRoom(*userId, static_cast<int64_t>(req.body.size())))
+            return http::jsonError(413, "storage quota exceeded");
 
         if (!store.append(*userId, s->storage_key, req.body.data(), req.body.size()))
             return http::jsonError(500, "storage write failed");

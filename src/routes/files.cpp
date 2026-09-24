@@ -171,6 +171,9 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         std::string plainSize = req.get_header_value("X-Plain-Size");
         if (!plainSize.empty()) { try { size = std::stoll(plainSize); } catch (...) {} }
 
+        if (!db.hasQuotaRoom(*userId, static_cast<int64_t>(req.body.size())))
+            return http::jsonError(413, "storage quota exceeded");
+
         // Opaque on-disk name — decouples storage from the user-facing filename.
         std::string storageKey = security::Crypto::randomHex(16);
         if (!store.write(*userId, storageKey, req.body.data(), req.body.size())) {

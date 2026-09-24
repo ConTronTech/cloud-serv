@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 #include <ctime>
 #include <regex>
+#include <optional>
 
 using json = nlohmann::json;
 
@@ -50,10 +51,15 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
     // Self-registration is gated by a shared invite code. Empty = disabled.
     const std::string inviteCode =
         core::Config::get_instance().get("env", "REGISTRATION_INVITE_CODE", "");
+    // Quota newly-registered users start with (0/unset = unlimited). An admin
+    // can raise/lower or clear it per-user afterwards via /api/admin/users.
+    int64_t defaultQuotaGb = core::Config::get_instance().get_int("env", "DEFAULT_STORAGE_QUOTA_GB", 0);
+    std::optional<int64_t> defaultQuotaBytes;
+    if (defaultQuotaGb > 0) defaultQuotaBytes = defaultQuotaGb * 1024 * 1024 * 1024;
 
     // ---- Register ----
     CROW_ROUTE(app, "/api/auth/register").methods(crow::HTTPMethod::POST)
-    ([&db, sessionSeconds, inviteCode](const crow::request& req) {
+    ([&db, sessionSeconds, inviteCode, defaultQuotaBytes](const crow::request& req) {
         json body; std::string err;
         if (!parseJsonObject(req, body, err)) return http::jsonError(400, err);
 
@@ -74,6 +80,7 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         std::string pwHash = security::Crypto::hashPassword(password);
         int64_t userId = db.createUser(email, displayName, pwHash);
         if (userId < 0) return http::jsonError(403, "registration is not open");
+        if (defaultQuotaBytes.has_value()) db.setUserQuota(userId, defaultQuotaBytes);
 
         // E2E key material — client-generated, opaque to us. Stored so we can hand
         // it back at login; without the user's password/recovery key it's useless.
@@ -151,6 +158,11 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         }
         loginThrottle.recordSuccess(email);
         slot.done = true;
+
+        // Correct password, but the account is suspended: no session is minted.
+        // Checked only after a real password match, so this can't be used to
+        // probe account status without already knowing the password.
+        if (user->status != "active") return http::jsonError(403, "account suspended");
 
         std::string token = security::Crypto::randomHex(32);
         int64_t expiresAt = static_cast<int64_t>(::time(nullptr)) + sessionSeconds;

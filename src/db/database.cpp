@@ -48,11 +48,21 @@ struct Stmt {
         sqlite3_bind_text(s, i, v.c_str(), static_cast<int>(v.size()), SQLITE_TRANSIENT);
     }
     void bind(int i, int64_t v) { sqlite3_bind_int64(s, i, v); }
+    void bindNull(int i) { sqlite3_bind_null(s, i); }
+    // nullopt binds NULL (e.g. an "unlimited" quota).
+    void bind(int i, const std::optional<int64_t>& v) {
+        if (v.has_value()) sqlite3_bind_int64(s, i, *v);
+        else sqlite3_bind_null(s, i);
+    }
 
     bool step() { return sqlite3_step(s) == SQLITE_ROW; }
     void exec() { sqlite3_step(s); }
 
     int64_t colInt64(int i) { return sqlite3_column_int64(s, i); }
+    bool colIsNull(int i) { return sqlite3_column_type(s, i) == SQLITE_NULL; }
+    std::optional<int64_t> colOptInt64(int i) {
+        return colIsNull(i) ? std::nullopt : std::optional<int64_t>(sqlite3_column_int64(s, i));
+    }
     std::string colText(int i) {
         const unsigned char* p = sqlite3_column_text(s, i);
         return p ? reinterpret_cast<const char*>(p) : std::string();
@@ -161,6 +171,15 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS removed_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_user_id INTEGER NOT NULL,
+                email TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                backup_path TEXT NOT NULL,
+                removed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                removed_by INTEGER NOT NULL
+            );
         )";
         char* err = nullptr;
         if (sqlite3_exec(c.h, schema, nullptr, nullptr, &err) != SQLITE_OK) {
@@ -189,6 +208,20 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
         sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN enc_name TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE files ADD COLUMN enc_mime TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN enc_mime TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active';", nullptr, nullptr, nullptr);
+        // NULL = unlimited; no NOT NULL/default so "no quota set" is distinguishable from "0 bytes".
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN storage_quota_bytes INTEGER;", nullptr, nullptr, nullptr);
+
+        // Admin bootstrap: if this DB has no admin yet, promote the earliest
+        // (lowest-id) account. Runs every startup but is a no-op once an admin
+        // exists; covers both a brand-new DB and one upgraded from before roles
+        // existed, with no manual step. Never demotes an existing admin.
+        sqlite3_exec(c.h,
+            "UPDATE users SET role='admin' "
+            "WHERE id = (SELECT MIN(id) FROM users) "
+            "AND NOT EXISTS (SELECT 1 FROM users WHERE role='admin');",
+            nullptr, nullptr, nullptr);
 
         utils::Logger::get_instance().info("Database initialized: " + dbPath_);
     } catch (const std::exception& e) {
@@ -210,7 +243,18 @@ int64_t CloudDB::createUser(const std::string& email,
         q.bind(2, displayName);
         q.bind(3, passwordHash);
         if (sqlite3_step(q.s) != SQLITE_DONE) return -1;  // UNIQUE(email) etc.
-        return sqlite3_last_insert_rowid(c.h);
+        int64_t id = sqlite3_last_insert_rowid(c.h);
+        // Admin bootstrap: the constructor's copy of this only ever runs once,
+        // at startup, before the very first account exists — so it alone can
+        // never promote anyone on a fresh DB. Re-check here, after every
+        // registration, so the first account created (not just the first DB
+        // opened) becomes admin. No-op once any admin exists.
+        sqlite3_exec(c.h,
+            "UPDATE users SET role='admin' "
+            "WHERE id = (SELECT MIN(id) FROM users) "
+            "AND NOT EXISTS (SELECT 1 FROM users WHERE role='admin');",
+            nullptr, nullptr, nullptr);
+        return id;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().warn("createUser: " + std::string(e.what()));
         return -1;
@@ -222,7 +266,7 @@ std::optional<User> CloudDB::findUserByEmail(const std::string& email) {
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
         Stmt q(c.h, "SELECT id, email, display_name, password_hash, created_at, "
-                    "kdf_salt, wrapped_dek, wrapped_dek_recovery "
+                    "kdf_salt, wrapped_dek, wrapped_dek_recovery, role, status, storage_quota_bytes "
                     "FROM users WHERE email = ?");
         q.bind(1, email);
         if (!q.step()) return std::nullopt;
@@ -235,6 +279,9 @@ std::optional<User> CloudDB::findUserByEmail(const std::string& email) {
         u.kdf_salt = q.colText(5);
         u.wrapped_dek = q.colText(6);
         u.wrapped_dek_recovery = q.colText(7);
+        u.role = q.colText(8);
+        u.status = q.colText(9);
+        u.storage_quota_bytes = q.colOptInt64(10);
         return u;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("findUserByEmail: " + std::string(e.what()));
@@ -247,7 +294,7 @@ std::optional<User> CloudDB::findUserById(int64_t id) {
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
         Stmt q(c.h, "SELECT id, email, display_name, password_hash, created_at, "
-                    "kdf_salt, wrapped_dek, wrapped_dek_recovery "
+                    "kdf_salt, wrapped_dek, wrapped_dek_recovery, role, status, storage_quota_bytes "
                     "FROM users WHERE id = ?");
         q.bind(1, id);
         if (!q.step()) return std::nullopt;
@@ -260,6 +307,9 @@ std::optional<User> CloudDB::findUserById(int64_t id) {
         u.kdf_salt = q.colText(5);
         u.wrapped_dek = q.colText(6);
         u.wrapped_dek_recovery = q.colText(7);
+        u.role = q.colText(8);
+        u.status = q.colText(9);
+        u.storage_quota_bytes = q.colOptInt64(10);
         return u;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("findUserById: " + std::string(e.what()));
@@ -346,12 +396,18 @@ std::optional<int64_t> CloudDB::userForSession(const std::string& tokenHash) {
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT user_id, expires_at FROM sessions WHERE token_hash = ?");
+        // Join users to check status on every use: a suspended account's
+        // sessions stop working on the very next request, not just future
+        // logins — no separate session-revocation step needed to shut it off.
+        Stmt q(c.h, "SELECT s.user_id, s.expires_at, u.status FROM sessions s "
+                    "JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?");
         q.bind(1, tokenHash);
         if (!q.step()) return std::nullopt;
         int64_t userId = q.colInt64(0);
         int64_t expiresAt = q.colInt64(1);
+        std::string status = q.colText(2);
         if (expiresAt < nowEpoch()) return std::nullopt;  // expired
+        if (status != "active") return std::nullopt;      // suspended
         return userId;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("userForSession: " + std::string(e.what()));
@@ -411,11 +467,15 @@ std::optional<int64_t> CloudDB::userForApiKey(const std::string& keyHash) {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
         int64_t keyId = 0, userId = 0;
         {
-            Stmt q(c.h, "SELECT id, user_id FROM api_keys WHERE key_hash = ?");
+            // Same suspension check as userForSession: a suspended account's API
+            // keys stop authenticating immediately, not just its login sessions.
+            Stmt q(c.h, "SELECT ak.id, ak.user_id, u.status FROM api_keys ak "
+                        "JOIN users u ON u.id = ak.user_id WHERE ak.key_hash = ?");
             q.bind(1, keyHash);
             if (!q.step()) return std::nullopt;
             keyId = q.colInt64(0);
             userId = q.colInt64(1);
+            if (q.colText(2) != "active") return std::nullopt;
         }
         Stmt upd(c.h, "UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?");
         upd.bind(1, keyId);
@@ -1196,5 +1256,129 @@ bool CloudDB::deleteNote(int64_t userId, int64_t noteId) {
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("deleteNote: " + std::string(e.what()));
         return false;
+    }
+}
+
+// ==== Administration ====
+
+std::vector<User> CloudDB::listAllUsers() {
+    std::shared_lock lock(db_mutex_);
+    std::vector<User> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        // password_hash is selected (struct parity with findUser*) but never
+        // leaves this layer — User::toJson()/toAdminJson() both omit it.
+        Stmt q(c.h, "SELECT id, email, display_name, password_hash, created_at, "
+                    "kdf_salt, wrapped_dek, wrapped_dek_recovery, role, status, storage_quota_bytes "
+                    "FROM users ORDER BY id DESC");
+        while (q.step()) {
+            User u;
+            u.id = q.colInt64(0);
+            u.email = q.colText(1);
+            u.display_name = q.colText(2);
+            u.password_hash = q.colText(3);
+            u.created_at = q.colText(4);
+            u.kdf_salt = q.colText(5);
+            u.wrapped_dek = q.colText(6);
+            u.wrapped_dek_recovery = q.colText(7);
+            u.role = q.colText(8);
+            u.status = q.colText(9);
+            u.storage_quota_bytes = q.colOptInt64(10);
+            out.push_back(std::move(u));
+        }
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("listAllUsers: " + std::string(e.what()));
+    }
+    return out;
+}
+
+bool CloudDB::setUserRole(int64_t userId, const std::string& role) {
+    if (role != "user" && role != "admin") return false;
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET role = ? WHERE id = ?");
+        q.bind(1, role);
+        q.bind(2, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setUserRole: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::setUserSuspended(int64_t userId, bool suspended) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET status = ? WHERE id = ?");
+        q.bind(1, std::string(suspended ? "suspended" : "active"));
+        q.bind(2, userId);
+        q.exec();
+        if (sqlite3_changes(c.h) == 0) return false;
+        // Belt-and-braces: also drop existing sessions so a client that's
+        // already holding a cookie/token doesn't linger until it happens to
+        // make a request that reaches the userForSession status check (it
+        // always would, but there is no reason to leave live rows around).
+        if (suspended) {
+            Stmt del(c.h, "DELETE FROM sessions WHERE user_id = ?");
+            del.bind(1, userId);
+            del.exec();
+        }
+        return true;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setUserSuspended: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::setUserQuota(int64_t userId, std::optional<int64_t> quotaBytes) {
+    if (quotaBytes.has_value() && *quotaBytes < 0) return false;
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET storage_quota_bytes = ? WHERE id = ?");
+        q.bind(1, quotaBytes);
+        q.bind(2, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setUserQuota: " + std::string(e.what()));
+        return false;
+    }
+}
+
+int CloudDB::countAdmins() {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT COUNT(*) FROM users WHERE role = 'admin'");
+        if (!q.step()) return 0;
+        return static_cast<int>(q.colInt64(0));
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("countAdmins: " + std::string(e.what()));
+        return 0;
+    }
+}
+
+bool CloudDB::hasQuotaRoom(int64_t userId, int64_t additionalBytes) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT storage_quota_bytes, "
+                    "(SELECT COALESCE(SUM(size), 0) FROM files WHERE user_id = ?) "
+                    "FROM users WHERE id = ?");
+        q.bind(1, userId);
+        q.bind(2, userId);
+        if (!q.step()) return true;  // unknown user: let the route's own auth check reject it
+        auto quota = q.colOptInt64(0);
+        if (!quota.has_value()) return true;  // unlimited
+        int64_t used = q.colInt64(1);
+        if (additionalBytes < 0) additionalBytes = 0;
+        return used + additionalBytes <= *quota;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("hasQuotaRoom: " + std::string(e.what()));
+        return true;  // fail open on a DB error here, same as the rest of this layer
     }
 }

@@ -118,6 +118,19 @@ public:
                     const std::string& title, const std::string& body);
     bool deleteNote(int64_t userId, int64_t noteId);
 
+    // ---- Administration ----
+    // Every user, newest-first. Admin-only at the route layer; never returns
+    // anything E2E (names/contents) — only the same account/aggregate fields
+    // toAdminJson() exposes.
+    std::vector<User> listAllUsers();
+    bool setUserRole(int64_t userId, const std::string& role);       // "user" | "admin"
+    bool setUserSuspended(int64_t userId, bool suspended);
+    bool setUserQuota(int64_t userId, std::optional<int64_t> quotaBytes); // nullopt = unlimited
+    int  countAdmins();
+    // True if adding `additionalBytes` keeps the user within their quota
+    // (always true when they have no quota set, i.e. unlimited).
+    bool hasQuotaRoom(int64_t userId, int64_t additionalBytes);
+
 private:
     std::string dbPath_;
     mutable std::shared_mutex db_mutex_;  // reads: shared_lock, writes: unique_lock
