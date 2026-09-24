@@ -53,9 +53,18 @@ Dependencies (Ubuntu/Debian): `libasio-dev` (Crow), `libssl-dev` (crypto),
 ```bash
 make
 cp -n config.env.example config.env   # config.env is git-ignored: it holds secrets
-# edit config.env: set REGISTRATION_INVITE_CODE (empty = nobody can register). Never commit it.
+./cloud_serv admin create-admin --email you@example.com --name "You" \
+    --recovery-key-file ~/cloud-serv-recovery.txt     # once: creates YOUR admin account (prompts for a password)
 ./cloud_serv config.env      # listens on https://0.0.0.0:<PORT from config.env> (default 8080)
 ```
+
+**Your admin account is created from the command line, not by registering.** `create-admin`
+works straight on the database (the password never crosses HTTP, and is only ever typed at the
+prompt or piped with `--password-stdin`, never passed as an argument), generates the account's
+end-to-end encryption keys exactly as the browser does, and writes a **recovery key** to the file
+you name (mode `0600`) or prints it once. Then sign in from the web UI with that email and
+password. Registration stays **closed** (`REGISTRATION_INVITE_CODE` empty) until you choose to
+invite other people by setting a code. Run `./cloud_serv admin help` for the options.
 
 HTTPS is on by default (`TLS_ENABLED=true`). With `TLS_PREFER_TAILSCALE_CERT=true` (default) the
 server first tries to get a real, browser-trusted cert via the Tailscale CLI (`tailscale cert`
@@ -140,8 +149,9 @@ The web client previews images and plays video/audio inline.
 ```bash
 API=https://localhost:8080   # add -k to curl for the self-signed cert; use http:// if TLS_ENABLED=false
 
-# register (returns a session token). Requires REGISTRATION_INVITE_CODE to be set in config.env
-# (empty = registration disabled, the default, even for the first account); send it as inviteCode.
+# register another user (returns a session token). Requires REGISTRATION_INVITE_CODE to be set in
+# config.env (empty = registration closed, the default); send it as inviteCode. Your own admin
+# account comes from `./cloud_serv admin create-admin`, not from here.
 TOKEN=$(curl -s $API/api/auth/register -H 'content-type: application/json' \
   -d '{"email":"me@example.com","password":"supersecret","inviteCode":"<your code>"}' \
   | grep -o '"token":"[^"]*"' | cut -d'"' -f4)

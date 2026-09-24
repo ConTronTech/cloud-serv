@@ -4,6 +4,7 @@
 #include "db/database.h"
 #include "storage/file_store.h"
 #include "http/middleware.h"
+#include "cli/admin_cli.h"
 #include "routes/admin.h"
 #include "routes/auth.h"
 #include "routes/files.h"
@@ -50,6 +51,9 @@ public:
 static CrowLogRouter crow_log_router;
 
 int main(int argc, char* argv[]) {
+    // `cloud_serv admin ...`: local administration straight on the database.
+    if (argc > 1 && std::string(argv[1]) == "admin") return cli::runAdminCli(argc - 1, argv + 1);
+
     std::string config_file = "config.env";
     if (argc > 1) config_file = argv[1];
 

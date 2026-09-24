@@ -15,6 +15,7 @@ LDFLAGS = -lpthread -lssl -lcrypto -lsqlite3
 PROJECT_SOURCES = src/main.cpp \
                   src/core/config.cpp \
                   src/db/database.cpp \
+                  src/cli/admin_cli.cpp \
                   src/db/models.cpp \
                   src/http/middleware.cpp \
                   src/routes/admin.cpp \
@@ -25,6 +26,7 @@ PROJECT_SOURCES = src/main.cpp \
                   src/routes/uploads.cpp \
                   src/routes/static_files.cpp \
                   src/security/crypto.cpp \
+                  src/security/e2e_keys.cpp \
                   src/security/request_auth.cpp \
                   src/security/rate_limiter.cpp \
                   src/security/sanitizer.cpp \

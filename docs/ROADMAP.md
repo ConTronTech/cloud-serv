@@ -77,8 +77,9 @@ under a new password" flow isn't wired into the UI yet.
   `scripts/setup-tailscale.sh` (only tested with a fake `tailscale` so far); it runs on every
   start and uses `popen` (validated + quoted).
 - **Done:** M7 fixed — registration requires `REGISTRATION_INVITE_CODE` / `inviteCode`
-  (empty = disabled, the default; set it in `config.env` to create the first account and any
-  later ones); uniform `403` on every failure path. See the sweep's Remediation status.
+  (empty = disabled, the default; set it only to invite other people). The first admin is
+  created with `./cloud_serv admin create-admin`, not by registering. Uniform `403` on every
+  failure path. See the sweep's Remediation status.
 
 ---
 

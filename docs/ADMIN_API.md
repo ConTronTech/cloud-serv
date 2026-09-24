@@ -22,8 +22,26 @@ Two honest limits:
 
 ## Bootstrap
 
-The lowest-id account is promoted to `admin` automatically if no admin exists
-(fresh database or upgrade). New registrations are plain `user`s. New accounts get
+**Create your admin from the command line**, before anyone can register:
+
+```
+./cloud_serv admin create-admin --email you@example.com --name "You" \
+    --recovery-key-file ~/cloud-serv-recovery.txt
+```
+
+It works directly on the database (the password never crosses HTTP), prompts for the password
+with echo off (or reads one line from stdin with `--password-stdin`; a password is never accepted
+as an argument, where `ps` would show it), and generates the account's end-to-end keys exactly as
+the browser does (`CRYPTO_SPEC.md` section 1), so you then sign in from the web UI like anyone
+else. The recovery key is written to a **new** file (mode `0600`; an existing file is never
+overwritten, and it is written *before* the account is created so a failure can't leave you with
+an account and no key) or, without `--recovery-key-file`, printed once. It is the only way back in
+if the password is forgotten. It refuses a duplicate email, a password under 8 characters and an
+invalid email, and works whether or not the server is running. No invite code is involved, so
+registration can stay closed.
+
+As a fallback, the lowest-id account is promoted to `admin` automatically if none exists (a
+database from before roles existed). New registrations are plain `user`s. New accounts get
 `DEFAULT_STORAGE_QUOTA_GB` (0 = unlimited).
 
 ## Read

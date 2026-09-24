@@ -114,8 +114,9 @@ Current suite: **112 assertions, 0 failures**, also run in CI on every push/PR.
   missing code, and registration-disabled all return the identical
   `403 {"error":"registration is not open"}` (constant-time code compare; the password hash is
   computed on every path), so responses can't enumerate emails. Residual, accepted: someone who
-  holds the invite code can still learn whether an email is taken. Operators must set the code to
-  create any account, including the first.
+  holds the invite code can still learn whether an email is taken. The first (admin) account does
+  not need the code: create it with `./cloud_serv admin create-admin` (see `ADMIN_API.md`), so
+  registration can stay closed from the start.
 - **Certificate (Tailscale-issued, self-signed fallback):** `TLS_PREFER_TAILSCALE_CERT` (default
   `true`). At startup the daemon first tries a real, browser-trusted cert via the Tailscale CLI
   (`tailscale status --json` for the MagicDNS name, then `tailscale cert --cert-file/--key-file`;
