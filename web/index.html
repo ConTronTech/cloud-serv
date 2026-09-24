@@ -54,13 +54,13 @@
         <img src="/favicon.svg" alt="" width="30" height="30" />
         <strong>cloud-serv</strong>
       </div>
-      <button id="new-btn" class="new-btn" type="button"><span class="new-plus">＋</span> New</button>
+      <button id="new-btn" class="new-btn" type="button"><span class="new-plus">+</span> New</button>
       <nav class="side-nav">
-        <button id="nav-files" class="side-item active" type="button"><span class="si-ic">📁</span> Files</button>
-        <button id="nav-recent" class="side-item" type="button"><span class="si-ic">🕓</span> Recent</button>
-        <button id="nav-starred" class="side-item" type="button"><span class="si-ic">⭐</span> Starred</button>
+        <button id="nav-files" class="side-item active" type="button">Files</button>
+        <button id="nav-recent" class="side-item" type="button">Recent</button>
+        <button id="nav-starred" class="side-item" type="button">Starred</button>
         <div class="side-divider"></div>
-        <button id="nav-notes" class="side-item" type="button"><span class="si-ic">📝</span> Notes</button>
+        <button id="nav-notes" class="side-item" type="button">Notes</button>
       </nav>
       <div class="side-foot">
         <div id="storage-chip" class="storage-chip"></div>
@@ -76,7 +76,7 @@
       <header class="topbar">
         <button id="menu-btn" class="menu-btn" type="button" aria-label="Open menu">☰</button>
         <div class="topbar-search">
-          <input id="search-input" type="search" placeholder="🔍  Search files &amp; folders" autocomplete="off" />
+          <input id="search-input" type="search" placeholder="Search files &amp; folders" autocomplete="off" />
         </div>
         <div id="avatar" class="avatar" title=""></div>
       </header>
@@ -92,22 +92,22 @@
 
         <div id="home-extras">
           <div class="categories">
-            <button class="cat" type="button" data-cat="image"><span class="cat-ic">🖼️</span> Images</button>
-            <button class="cat" type="button" data-cat="video"><span class="cat-ic">🎬</span> Videos</button>
-            <button class="cat" type="button" data-cat="audio"><span class="cat-ic">🎵</span> Audio</button>
-            <button class="cat" type="button" data-cat="document"><span class="cat-ic">📄</span> Docs</button>
+            <button class="cat" type="button" data-cat="image">Images</button>
+            <button class="cat" type="button" data-cat="video">Videos</button>
+            <button class="cat" type="button" data-cat="audio">Audio</button>
+            <button class="cat" type="button" data-cat="document">Docs</button>
           </div>
         </div>
 
         <div class="fs-controls">
-          <button id="view-toggle" class="btn ghost small" type="button" title="Toggle grid/list">▦ Grid</button>
+          <button id="view-toggle" class="btn ghost small" type="button" title="Toggle grid/list">Grid view</button>
           <button id="sort-btn" class="btn ghost small" type="button" title="Sort">↕ Name ↑</button>
-          <button id="select-btn" class="btn ghost small" type="button" title="Select">☑ Select</button>
+          <button id="select-btn" class="btn ghost small" type="button" title="Select">Select</button>
         </div>
 
         <section id="dropzone" class="dropzone" aria-label="Upload files">
           <div class="dz-inner">
-            <div class="dz-icon">⬆</div>
+            <div class="dz-icon">↑</div>
             <p class="muted">Drop files here to upload into this folder</p>
           </div>
         </section>
@@ -123,7 +123,7 @@
         <section id="notes-list-view">
           <div class="files-head">
             <h2>Your notes</h2>
-            <button id="new-note" class="btn primary small" type="button">＋ New note</button>
+            <button id="new-note" class="btn primary small" type="button">+ New note</button>
           </div>
           <ul id="note-list" class="note-list"></ul>
           <p id="notes-empty" class="muted empty hidden">No notes yet. Create one above.</p>
@@ -171,7 +171,7 @@
           this key is the <strong>only</strong> way to recover them — we can't reset it.</p>
         <div id="recovery-key" class="recovery-key"></div>
         <div class="recovery-actions">
-          <button id="recovery-download" class="btn ghost" type="button">⬇ Download key file</button>
+          <button id="recovery-download" class="btn ghost" type="button">Download key file</button>
           <button id="recovery-continue" class="btn primary" type="button">I've saved it — continue</button>
         </div>
       </div>
@@ -185,9 +185,9 @@
           <button id="new-close" class="btn ghost small" type="button" aria-label="Close">✕</button>
         </div>
         <div class="action-list">
-          <button id="new-folder-item" class="action-item" type="button">📁  New folder</button>
-          <button id="new-upload-item" class="action-item" type="button">⬆️  Upload files</button>
-          <button id="new-uploadfolder-item" class="action-item" type="button">📂  Upload folder (with subfolders)</button>
+          <button id="new-folder-item" class="action-item" type="button">New folder</button>
+          <button id="new-upload-item" class="action-item" type="button">Upload files</button>
+          <button id="new-uploadfolder-item" class="action-item" type="button">Upload folder (with subfolders)</button>
         </div>
       </div>
     </div>

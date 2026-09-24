@@ -50,22 +50,25 @@ const TEXT_EXT = new Set(["txt", "md", "markdown", "log", "json", "csv", "xml", 
 const ARCHIVE_EXT = new Set(["zip", "tar", "gz", "tgz", "rar", "7z", "xz", "bz2"]);
 
 // A type icon from mime + filename (mime is often generic, so fall back to ext).
+// A short uppercase file-type badge (rendered by .is-type / .file-ic in
+// style.css) — no emoji, just text, so it's a plain fixed label like any
+// other UI string rather than a pictograph that varies by platform/font.
 function iconFor(mime, name) {
   const m = mime || "";
-  if (m.startsWith("image/")) return "🖼️";
-  if (m.startsWith("video/")) return "🎬";
-  if (m.startsWith("audio/")) return "🎵";
+  if (m.startsWith("image/")) return "IMG";
+  if (m.startsWith("video/")) return "VID";
+  if (m.startsWith("audio/")) return "AUD";
   const e = extOf(name);
-  if (m.includes("pdf") || e === "pdf") return "📕";
-  if (m.includes("zip") || m.includes("compressed") || m.includes("tar") || ARCHIVE_EXT.has(e)) return "🗜️";
-  if (["doc", "docx", "odt", "rtf"].includes(e)) return "📘";
-  if (["xls", "xlsx", "ods", "csv"].includes(e) || m.includes("spreadsheet")) return "📊";
-  if (["ppt", "pptx", "odp"].includes(e) || m.includes("presentation")) return "📙";
+  if (m.includes("pdf") || e === "pdf") return "PDF";
+  if (m.includes("zip") || m.includes("compressed") || m.includes("tar") || ARCHIVE_EXT.has(e)) return "ZIP";
+  if (["doc", "docx", "odt", "rtf"].includes(e)) return "DOC";
+  if (["xls", "xlsx", "ods", "csv"].includes(e) || m.includes("spreadsheet")) return "XLS";
+  if (["ppt", "pptx", "odp"].includes(e) || m.includes("presentation")) return "PPT";
   if (["js", "ts", "jsx", "tsx", "py", "c", "cpp", "cc", "h", "hpp", "java", "rs", "go", "rb",
        "php", "sh", "html", "css", "xml", "yml", "yaml", "ino", "kt", "swift", "sql"].includes(e) ||
-      m.includes("json") || e === "json") return "💻";
-  if (m.startsWith("text/") || TEXT_EXT.has(e)) return "📝";
-  return "📄";
+      m.includes("json") || e === "json") return "DEV";
+  if (m.startsWith("text/") || TEXT_EXT.has(e)) return "TXT";
+  return "FILE";
 }
 
 let toastTimer;
@@ -301,7 +304,7 @@ async function hydrateNames(...lists) {
       if (!it) continue;
       if (it.encName) {
         try { it._name = await decryptName(it.encName); }
-        catch { it._name = "🔒 locked"; }
+        catch { it._name = "Locked"; }
       }
       if (it.encMime) {
         try { it.mime = await decryptName(it.encMime); }
@@ -313,7 +316,7 @@ async function hydrateNames(...lists) {
 // The name to show: decrypted plaintext for E2E items, else the legacy name.
 function dispName(item) {
   if (!item) return "";
-  if (item.encName) return item._name != null ? item._name : "🔒 locked";
+  if (item.encName) return item._name != null ? item._name : "Locked";
   return decodeName(item.name);
 }
 
@@ -472,7 +475,7 @@ async function loadUsage() {
   const { ok, body } = await api("/api/usage", { headers: authHeaders() });
   const el = $("storage-chip");
   if (ok && body) {
-    el.textContent = `🗄 ${fmtSize(body.used || 0)} used · ${body.files || 0} file${body.files === 1 ? "" : "s"}`;
+    el.textContent = `${fmtSize(body.used || 0)} used · ${body.files || 0} file${body.files === 1 ? "" : "s"}`;
   }
 }
 
@@ -512,7 +515,7 @@ function renderResultsHeader(title) {
   const el = $("breadcrumbs");
   el.textContent = "";
   const home = document.createElement("button");
-  home.className = "crumb"; home.type = "button"; home.textContent = "🏠";
+  home.className = "crumb"; home.type = "button"; home.textContent = "Home";
   home.addEventListener("click", () => loadFs(currentFolder));
   const sep = document.createElement("span"); sep.className = "crumb-sep"; sep.textContent = "›";
   const t = document.createElement("span"); t.className = "crumb-current"; t.textContent = title;
@@ -573,7 +576,7 @@ function toggleView() {
 
 const SORT_LABEL = { name: "Name", date: "Date", size: "Size" };
 function refreshControls() {
-  const v = $("view-toggle"); if (v) v.textContent = viewMode === "grid" ? "☰ List" : "▦ Grid";
+  const v = $("view-toggle"); if (v) v.textContent = viewMode === "grid" ? "List view" : "Grid view";
   const s = $("sort-btn"); if (s) s.textContent = "↕ " + SORT_LABEL[sortBy] + (sortDir === "asc" ? " ↑" : " ↓");
 }
 
@@ -609,7 +612,7 @@ function gridCell(kind, item) {
   const thumb = document.createElement("div");
   thumb.className = "thumb";
   if (kind === "folder") {
-    thumb.classList.add("is-folder"); thumb.textContent = "📁";
+    thumb.classList.add("is-folder"); thumb.textContent = "DIR";
   } else if ((item.mime || "").startsWith("image/")) {
     const img = document.createElement("img");
     img.loading = "lazy"; img.alt = "";
@@ -649,7 +652,7 @@ function gridCell(kind, item) {
 function renderBreadcrumbs(el, crumbs, onNav) {
   el.textContent = "";
   const home = document.createElement("button");
-  home.className = "crumb"; home.type = "button"; home.textContent = "🏠";
+  home.className = "crumb"; home.type = "button"; home.textContent = "Home";
   home.addEventListener("click", () => onNav(0));
   el.appendChild(home);
   for (const c of crumbs) {
@@ -711,7 +714,7 @@ function listRow(kind, item, icText, displayName, modified, size) {
   return li;
 }
 
-function folderRow(f) { return listRow("folder", f, "📁", dispName(f), fmtDate(f.createdAt), "—"); }
+function folderRow(f) { return listRow("folder", f, "DIR", dispName(f), fmtDate(f.createdAt), "—"); }
 function fileRow(f) {
   return listRow("file", f, iconFor(f.mime, dispName(f)), dispName(f), fmtDate(f.createdAt), fmtSize(f.size));
 }
@@ -900,7 +903,7 @@ async function loadMoveFs(folderId) {
   for (const f of subs) {
     const li = document.createElement("li");
     li.className = "fs-item clickable";
-    const ic = document.createElement("div"); ic.className = "file-ic"; ic.textContent = "📁";
+    const ic = document.createElement("div"); ic.className = "file-ic"; ic.textContent = "DIR";
     const meta = document.createElement("div"); meta.className = "file-meta";
     const name = document.createElement("div"); name.className = "file-name"; name.textContent = dispName(f);
     meta.append(name);
@@ -1004,7 +1007,7 @@ function previewCard(file, name) {
   const meta = document.createElement("div"); meta.className = "preview-card-meta";
   meta.textContent = "No preview available · " + fmtSize(file.size || 0);
   const btn = document.createElement("button"); btn.className = "btn primary preview-card-btn";
-  btn.textContent = "⬇ Download";
+  btn.textContent = "Download";
   btn.onclick = () => downloadFile(file);
   card.append(ic, nm, meta, btn);
   return card;
@@ -1201,7 +1204,7 @@ function makeUploadProgress(total) {
       bar.classList.toggle("err", failed > 0);
       label.textContent = failed
         ? `Uploaded ${done - failed}/${done} · ${failed} failed`
-        : `Uploaded ${done} file${done === 1 ? "" : "s"} ✔`;
+        : `Uploaded ${done} file${done === 1 ? "" : "s"}`;
       setTimeout(() => bar.remove(), failed ? 6000 : 2500);
     },
   };
@@ -1236,7 +1239,7 @@ async function runUploads(jobs) {
       const j = rows[next++];
       if (j.row) j.state.textContent = "Uploading…";
       const ok = await uploadOne(j.file, j.state, j.folderId);
-      if (ok) { if (j.row) { j.state.textContent = "Done ✔"; setTimeout(() => j.row.remove(), 1500); } }
+      if (ok) { if (j.row) { j.state.textContent = "Done"; setTimeout(() => j.row.remove(), 1500); } }
       else {
         failed++;
         if (j.row) j.row.classList.add("err");
@@ -1392,7 +1395,7 @@ async function loadView(kind) {
   curFolders = body.folders || [];
   curFiles = body.files || [];
   await hydrateNames(curFolders, curFiles);
-  renderResultsHeader(kind === "recent" ? "🕓 Recent" : "⭐ Starred");
+  renderResultsHeader(kind === "recent" ? "Recent" : "Starred");
   renderFs();
   updateHome();
 }
@@ -1472,7 +1475,7 @@ async function saveNote() {
   }
   editingNoteId = body.note.id;
   $("note-delete").classList.remove("hidden");
-  $("note-status").textContent = "Saved ✔";
+  $("note-status").textContent = "Saved";
 }
 
 async function deleteCurrentNote() {
