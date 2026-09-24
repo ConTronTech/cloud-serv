@@ -477,16 +477,32 @@ async function loadUsage() {
 }
 
 const CATEGORY_TITLE = { image: "Images", video: "Videos", audio: "Audio", document: "Documents" };
+// Same buckets the server uses (database.cpp searchFiles), but computed client-side
+// against the DECRYPTED mime. The server's own category filter only ever sees the
+// placeholder mime for E2E files (real mime is encrypted in enc_mime, database.cpp's
+// column stores 'application/octet-stream'), so every E2E image/video/audio matched
+// its "document" clause instead — nothing was ever actually filtered by real type.
+function categoryOf(mime) {
+  const m = mime || "";
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("video/")) return "video";
+  if (m.startsWith("audio/")) return "audio";
+  if (m.startsWith("text/") || m.startsWith("application/")) return "document";
+  return "other";
+}
 async function openCategory(cat) {
-  const { ok, status, body } = await api("/api/search?category=" + encodeURIComponent(cat), { headers: authHeaders() });
+  // No category/q param: the server applies no mime filter (E2E's placeholder mime
+  // would defeat it anyway) and just returns every file, up to its existing 500 cap.
+  const { ok, status, body } = await api("/api/search", { headers: authHeaders() });
   if (status === 401) { sessionExpired(); return; }
   if (!ok || !body) { toast("Could not load."); return; }
   resultsMode = true;
   setActiveNav("files");
   showFilesTab();
   curFolders = [];
-  curFiles = body.files || [];
-  await hydrateNames(curFiles);
+  const all = body.files || [];
+  await hydrateNames(all);
+  curFiles = all.filter((f) => categoryOf(f.mime) === cat);
   renderResultsHeader(CATEGORY_TITLE[cat] || "Results");
   renderFs();
   updateHome();
