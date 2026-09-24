@@ -112,11 +112,16 @@ public:
     bool deleteUploadSession(int64_t userId, const std::string& id);
 
     // ---- Notes ----
-    int64_t createNote(int64_t userId, const std::string& title, const std::string& body);
+    int64_t createNote(int64_t userId, const std::string& title, const std::string& body,
+                       const std::string& encTitle = "", const std::string& encBody = "");
     std::vector<Note> listNotes(int64_t userId);              // summaries (no body)
     std::optional<Note> getNote(int64_t userId, int64_t noteId);
+    // preserveUpdatedAt: keep the note's timestamp (used when a client silently
+    // re-encrypts a legacy plaintext note, so migration doesn't reorder the list).
     bool updateNote(int64_t userId, int64_t noteId,
-                    const std::string& title, const std::string& body);
+                    const std::string& title, const std::string& body,
+                    const std::string& encTitle = "", const std::string& encBody = "",
+                    bool preserveUpdatedAt = false);
     bool deleteNote(int64_t userId, int64_t noteId);
 
     // ---- Administration ----

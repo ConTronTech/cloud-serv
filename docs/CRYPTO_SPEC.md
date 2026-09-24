@@ -98,6 +98,7 @@ The whole ciphertext blob is what gets uploaded and what the server stores/serve
 | file/folder name | `encName` blob; plaintext column blanked | length ≈ leaks name length |
 | mime type | `encMime` blob; plaintext stored as `application/octet-stream` | |
 | contents | ciphertext blob on disk | |
+| note title / body | `encTitle` / `encBody` blobs; plaintext columns blanked | title length ≈ leaks; body length ≈ leaks |
 | per-file key | `wrappedKey` blob | |
 | **plaintext size** | integer, cleartext (for display / progress) | |
 | folder tree, timestamps, counts | cleartext | structural metadata |
@@ -168,6 +169,25 @@ attachment variant. Build the local file/blob with the **decrypted** mime.
 `PATCH /api/files/<id>` / `PATCH /api/folders/<id>` accept `{ "encName": "..." }` (rename),
 `{ "folderId" | "parentId": N }` (move), `{ "starred": bool }`.
 `POST /api/folders` `{ "parentId", "encName" }`. `DELETE` on either.
+
+### 4.9 Notes
+Notes are encrypted like names: `encTitle = wrap(utf8(title), DEK)` and
+`encBody = wrap(utf8(body), DEK)`, each the `iv.ct` form from §0 (AES-256-GCM, random 96-bit
+IV, empty AAD, standard base64).
+- `POST /api/notes` / `PUT /api/notes/<id>`: send **`{ "encTitle", "encBody" }`** (both
+  required, non-empty — an empty string still wraps to a non-empty `iv.ct`). The server rejects a
+  body that mixes `title`/`body` with `encTitle`/`encBody`, or any value outside the base64/`.`
+  alphabet, with `400`.
+- `GET /api/notes` returns `{id, title:"", encTitle, createdAt, updatedAt}` (no body);
+  `GET /api/notes/<id>` adds `encBody`.
+- **Legacy plaintext notes** (`title`/`body` set, `encTitle` empty) may still exist from before
+  notes were encrypted. A client should upgrade each one in place: fetch it, wrap both fields,
+  `PUT` with `"preserveUpdatedAt": true` so the edit time (and therefore the list order) does not
+  change. The browser client does this automatically the next time the Notes tab loads.
+- **Never save a note you failed to decrypt.** If `unwrap` fails (wrong/missing key), do not open
+  it for editing — saving would replace the real ciphertext with an empty note.
+- Like names, `encTitle`/`encBody` are not bound to the note id (AAD is empty), so a hostile
+  server could swap two of one user's notes. See `SECURITY.md` residual risk #1.
 
 ---
 

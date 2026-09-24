@@ -15,9 +15,8 @@ namespace routes {
 // storage they're allowed, and whether the account exists. None of them can
 // read, list, or restore a user's files or folders: contents, names and mime
 // types are end-to-end encrypted and the server never has a key, so there is no
-// route to build. (Notes are the exception to E2E: they are plaintext in the
-// database. The admin API never exposes them, but a `remove` backup contains
-// them and anyone with disk access can read them. See docs/ADMIN_API.md.)
+// route to build. Notes are end-to-end encrypted as well; only a legacy note not
+// yet upgraded by its owner is still plaintext on disk (see docs/ADMIN_API.md).
 //
 //   GET    /api/admin/users          -> {users:[{id,email,displayName,role,
 //                                        status,createdAt,storageUsedBytes,

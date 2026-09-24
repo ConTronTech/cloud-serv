@@ -158,6 +158,65 @@ async function main() {
   const recovered = await decryptContent(await importAes(await unwrapBytes(listed.wrappedKey, dekKey)), dl);
   Buffer.from(recovered).equals(Buffer.from(plaintext)) ? ok("download decrypts to original") : bad("decrypt mismatch");
 
+  // ---- Notes are end-to-end encrypted too (title + body) ----
+  const noteTitleMarker = "MY-SECRET-NOTE-TITLE-2026";
+  const noteBodyMarker = "SECRET-NOTE-BODY-CONTENT-xyz";
+  const encTitle = await wrapBytes(te.encode(noteTitleMarker), dekKey);
+  const encBody = await wrapBytes(te.encode(noteBodyMarker + " lorem ipsum"), dekKey);
+  const jsonH = { ...auth, "content-type": "application/json" };
+  r = await fetch(API + "/api/notes", { method: "POST", headers: jsonH, body: JSON.stringify({ encTitle, encBody }) });
+  const nj = (await r.json()).note;
+  nj && nj.id ? ok("create encrypted note") : bad("note create " + r.status);
+  nj && nj.title === "" && nj.body === "" ? ok("server stores blank plaintext title/body") : bad("plaintext note stored: " + JSON.stringify(nj));
+  nj && nj.encTitle === encTitle && nj.encBody === encBody ? ok("server stores the ciphertext verbatim") : bad("ciphertext altered");
+
+  const dbBlobs2 = fs.readdirSync(dbDir).filter((f) => f.startsWith("cloud.db")).map((f) => fs.readFileSync(path.join(dbDir, f)));
+  const noteLeaked = dbBlobs2.some((b) => b.includes(Buffer.from(noteTitleMarker)) || b.includes(Buffer.from(noteBodyMarker)));
+  noteLeaked ? bad("PLAINTEXT NOTE LEAKED TO DATABASE") : ok("no plaintext note title/body in the database");
+
+  r = await fetch(API + "/api/notes", { headers: auth });
+  const nl = (await r.json()).notes.find((n) => n.id === nj.id);
+  nl && nl.encTitle === encTitle && nl.title === "" ? ok("list returns encTitle (blank plaintext title)") : bad("list shape " + JSON.stringify(nl));
+  nl && !("body" in nl) && !("encBody" in nl) ? ok("list omits the body (plain and encrypted)") : bad("list leaks body");
+  r = await fetch(API + "/api/notes/" + nj.id, { headers: auth });
+  const nf = (await r.json()).note;
+  const backTitle = new TextDecoder().decode(await unwrapBytes(nf.encTitle, dekKey));
+  const backBody = new TextDecoder().decode(await unwrapBytes(nf.encBody, dekKey));
+  backTitle === noteTitleMarker ? ok("encTitle decrypts to the original title") : bad("title mismatch: " + backTitle);
+  backBody === noteBodyMarker + " lorem ipsum" ? ok("encBody decrypts to the original body") : bad("body mismatch");
+
+  // Editing keeps it encrypted, and a wrong key can't read it.
+  const encBody2 = await wrapBytes(te.encode("EDITED-BODY-MARKER"), dekKey);
+  r = await fetch(API + "/api/notes/" + nj.id, { method: "PUT", headers: jsonH, body: JSON.stringify({ encTitle, encBody: encBody2 }) });
+  (await r.json()).note.encBody === encBody2 ? ok("update an encrypted note") : bad("note update " + r.status);
+  let wrongKeyFailed = false;
+  try { await unwrapBytes(encBody2, await importAes(rand(32))); } catch { wrongKeyFailed = true; }
+  wrongKeyFailed ? ok("a different key cannot decrypt the note") : bad("note decrypted with the wrong key");
+
+  // The server refuses to mix plaintext with ciphertext, and rejects junk.
+  r = await fetch(API + "/api/notes", { method: "POST", headers: jsonH, body: JSON.stringify({ title: "leak", encTitle, encBody }) });
+  r.status === 400 ? ok("mixing plaintext title with ciphertext is rejected") : bad("mixed note accepted " + r.status);
+  r = await fetch(API + "/api/notes", { method: "POST", headers: jsonH, body: JSON.stringify({ encTitle: "not base64 !!", encBody }) });
+  r.status === 400 ? ok("non-base64 ciphertext is rejected") : bad("junk ciphertext accepted " + r.status);
+  r = await fetch(API + "/api/notes", { method: "POST", headers: jsonH, body: JSON.stringify({ encTitle }) });
+  r.status === 400 ? ok("ciphertext title without a ciphertext body is rejected") : bad("half-encrypted note accepted " + r.status);
+
+  // Legacy plaintext still works (old clients / the migration path) and can be
+  // upgraded in place without touching its timestamp.
+  r = await fetch(API + "/api/notes", { method: "POST", headers: jsonH, body: JSON.stringify({ title: "old plain", body: "old body" }) });
+  const legacy = (await r.json()).note;
+  legacy && legacy.title === "old plain" && legacy.encTitle === "" ? ok("legacy plaintext note still accepted") : bad("legacy note " + r.status);
+  const before = legacy.updatedAt;
+  await new Promise((res) => setTimeout(res, 1200));
+  r = await fetch(API + "/api/notes/" + legacy.id, { method: "PUT", headers: jsonH, body: JSON.stringify({
+    encTitle: await wrapBytes(te.encode("old plain"), dekKey), encBody: await wrapBytes(te.encode("old body"), dekKey), preserveUpdatedAt: true }) });
+  const upgraded = (await r.json()).note;
+  upgraded.title === "" && upgraded.body === "" && upgraded.encTitle ? ok("legacy note upgraded to ciphertext, plaintext cleared") : bad("upgrade " + JSON.stringify(upgraded));
+  upgraded.updatedAt === before ? ok("preserveUpdatedAt keeps the edit time") : bad("timestamp changed: " + before + " -> " + upgraded.updatedAt);
+  r = await fetch(API + "/api/notes/" + legacy.id, { method: "PUT", headers: jsonH, body: JSON.stringify({
+    encTitle, encBody }) });
+  (await r.json()).note.updatedAt !== before ? ok("a normal update still bumps the edit time") : bad("normal update did not bump updatedAt");
+
   console.log("\nRESULTS: " + PASS + " passed, " + FAIL + " failed");
   process.exit(FAIL === 0 ? 0 : 1);
 }

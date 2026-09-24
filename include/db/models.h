@@ -69,6 +69,10 @@ struct Note {
     std::string body;
     std::string created_at;
     std::string updated_at;
+    // E2E: title/body encrypted under the user's DEK ("iv.ct" base64). When set,
+    // the plaintext `title`/`body` are blank. Empty = a legacy plaintext note.
+    std::string enc_title;
+    std::string enc_body;
 
     // Full view (with body).
     json toJson() const;

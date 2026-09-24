@@ -13,9 +13,10 @@ user's files or folders**, and there is nothing to add one to: contents, names a
 mime types are end-to-end encrypted and the server never holds a key.
 
 Two honest limits:
-- **Notes are not end-to-end encrypted.** Titles and bodies are plaintext in the
-  database, so whoever controls the server's disk can read them, and a `remove`
-  backup contains them. The admin *API* never exposes them; the disk does.
+- **Legacy plaintext notes.** Notes are now end-to-end encrypted (title and body), but a note
+  written before that change stays plaintext in the database until its owner next opens the Notes
+  tab, when the browser upgrades it in place. Until then the server (and so a `remove` backup) can
+  read it. The admin *API* never exposes note content either way.
 - Sizes, counts, timestamps and folder structure are visible to the server (see
   `SECURITY.md`). The user listing shows sizes and counts, never names.
 

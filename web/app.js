@@ -1417,6 +1417,49 @@ function showNoteEditor() {
   $("note-status").textContent = "";
 }
 
+// Notes are end-to-end encrypted like file names: encTitle/encBody hold "iv.ct"
+// ciphertext under the DEK and the server keeps the plaintext columns blank. A
+// note with no encTitle is a legacy plaintext note (migrated below).
+async function hydrateNote(n) {
+  if (n.encTitle) {
+    try { n._title = await decryptName(n.encTitle); } catch { n._title = "Locked"; n._locked = true; }
+  } else {
+    n._title = n.title || "";
+  }
+  if (n.encBody) {
+    try { n._body = await decryptName(n.encBody); } catch { n._body = ""; n._locked = true; }
+  } else if (n.body !== undefined) {
+    n._body = n.body || "";
+  }
+}
+
+let notesMigrating = false;
+// One-time, silent: re-encrypt any plaintext notes left over from before notes
+// were encrypted. Oldest first and with preserveUpdatedAt so the list order and
+// "Edited" times don't change. A failure leaves that note as-is for next time.
+async function migrateLegacyNotes(notes) {
+  if (notesMigrating) return;
+  const legacy = notes.filter((n) => !n.encTitle).reverse();
+  if (!legacy.length) return;
+  notesMigrating = true;
+  try {
+    for (const n of legacy) {
+      const full = await api("/api/notes/" + n.id, { headers: authHeaders() });
+      if (!full.ok || !full.body || !full.body.note || full.body.note.encTitle) continue;
+      const note = full.body.note;
+      const payload = JSON.stringify({
+        encTitle: await encryptName(note.title || ""),
+        encBody: await encryptName(note.body || ""),
+        preserveUpdatedAt: true,
+      });
+      await api("/api/notes/" + n.id, {
+        method: "PUT", headers: authHeaders({ "Content-Type": "application/json" }), body: payload,
+      });
+    }
+  } catch { /* leave the rest for the next load */ }
+  finally { notesMigrating = false; }
+}
+
 async function loadNotes() {
   const { ok, status, body } = await api("/api/notes", { headers: authHeaders() });
   if (status === 401) { showAuth(); return; }
@@ -1424,8 +1467,10 @@ async function loadNotes() {
   const list = $("note-list");
   list.textContent = "";
   const notes = body.notes || [];
+  for (const n of notes) await hydrateNote(n);
   $("notes-empty").classList.toggle("hidden", notes.length > 0);
   for (const n of notes) list.appendChild(noteCard(n));
+  migrateLegacyNotes(notes);   // background; doesn't block rendering
 }
 
 function noteCard(n) {
@@ -1433,7 +1478,7 @@ function noteCard(n) {
   li.className = "note-card";
   const t = document.createElement("div");
   t.className = "note-t";
-  t.textContent = n.title && n.title.trim() ? n.title : "Untitled"; // textContent — safe
+  t.textContent = n._title && n._title.trim() ? n._title : "Untitled"; // textContent — safe
   const d = document.createElement("div");
   d.className = "note-d";
   d.textContent = "Edited " + fmtDate(n.updatedAt);
@@ -1445,9 +1490,13 @@ function noteCard(n) {
 async function openNote(id) {
   const { ok, body } = await api("/api/notes/" + id, { headers: authHeaders() });
   if (!ok || !body || !body.note) { toast("Could not open note."); return; }
+  await hydrateNote(body.note);
+  // Never open a note we couldn't decrypt: saving it would overwrite the real
+  // ciphertext with an empty one.
+  if (body.note._locked) { toast("This note can't be decrypted with your current key."); return; }
   editingNoteId = body.note.id;
-  $("note-title").value = body.note.title || ""; // .value — safe, never parsed as HTML
-  $("note-body").value = body.note.body || "";
+  $("note-title").value = body.note._title || ""; // .value — safe, never parsed as HTML
+  $("note-body").value = body.note._body || "";
   $("note-delete").classList.remove("hidden");
   showNoteEditor();
 }
@@ -1462,7 +1511,13 @@ function newNote() {
 }
 
 async function saveNote() {
-  const payload = JSON.stringify({ title: $("note-title").value, body: $("note-body").value });
+  let payload;
+  try {
+    payload = JSON.stringify({
+      encTitle: await encryptName($("note-title").value),
+      encBody: await encryptName($("note-body").value),
+    });
+  } catch { $("note-status").textContent = "Save failed: encryption key unavailable"; return; }
   const path = editingNoteId ? "/api/notes/" + editingNoteId : "/api/notes";
   const { ok, body } = await api(path, {
     method: editingNoteId ? "PUT" : "POST",

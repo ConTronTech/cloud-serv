@@ -211,6 +211,8 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
         sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN enc_name TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE files ADD COLUMN enc_mime TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN enc_mime TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE notes ADD COLUMN enc_title TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE notes ADD COLUMN enc_body TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active';", nullptr, nullptr, nullptr);
         // NULL = unlimited; no NOT NULL/default so "no quota set" is distinguishable from "0 bytes".
@@ -1165,14 +1167,17 @@ bool CloudDB::deleteUploadSession(int64_t userId, const std::string& id) {
 
 // ==== Notes ====
 
-int64_t CloudDB::createNote(int64_t userId, const std::string& title, const std::string& body) {
+int64_t CloudDB::createNote(int64_t userId, const std::string& title, const std::string& body,
+                           const std::string& encTitle, const std::string& encBody) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
-        Stmt q(c.h, "INSERT INTO notes(user_id, title, body) VALUES(?, ?, ?)");
+        Stmt q(c.h, "INSERT INTO notes(user_id, title, body, enc_title, enc_body) VALUES(?, ?, ?, ?, ?)");
         q.bind(1, userId);
         q.bind(2, title);
         q.bind(3, body);
+        q.bind(4, encTitle);
+        q.bind(5, encBody);
         if (sqlite3_step(q.s) != SQLITE_DONE) return -1;
         return sqlite3_last_insert_rowid(c.h);
     } catch (const std::exception& e) {
@@ -1187,8 +1192,8 @@ std::vector<Note> CloudDB::listNotes(int64_t userId) {
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
         // Summaries only (no body) — ordered by most recently edited.
-        Stmt q(c.h, "SELECT id, user_id, title, created_at, updated_at "
-                    "FROM notes WHERE user_id = ? ORDER BY updated_at DESC");
+        Stmt q(c.h, "SELECT id, user_id, title, created_at, updated_at, enc_title "
+                    "FROM notes WHERE user_id = ? ORDER BY updated_at DESC, id DESC");
         q.bind(1, userId);
         while (q.step()) {
             Note n;
@@ -1197,6 +1202,7 @@ std::vector<Note> CloudDB::listNotes(int64_t userId) {
             n.title = q.colText(2);
             n.created_at = q.colText(3);
             n.updated_at = q.colText(4);
+            n.enc_title = q.colText(5);
             out.push_back(n);
         }
     } catch (const std::exception& e) {
@@ -1209,7 +1215,7 @@ std::optional<Note> CloudDB::getNote(int64_t userId, int64_t noteId) {
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT id, user_id, title, body, created_at, updated_at "
+        Stmt q(c.h, "SELECT id, user_id, title, body, created_at, updated_at, enc_title, enc_body "
                     "FROM notes WHERE id = ? AND user_id = ?");
         q.bind(1, noteId);
         q.bind(2, userId);
@@ -1221,6 +1227,8 @@ std::optional<Note> CloudDB::getNote(int64_t userId, int64_t noteId) {
         n.body = q.colText(3);
         n.created_at = q.colText(4);
         n.updated_at = q.colText(5);
+        n.enc_title = q.colText(6);
+        n.enc_body = q.colText(7);
         return n;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("getNote: " + std::string(e.what()));
@@ -1229,16 +1237,23 @@ std::optional<Note> CloudDB::getNote(int64_t userId, int64_t noteId) {
 }
 
 bool CloudDB::updateNote(int64_t userId, int64_t noteId,
-                         const std::string& title, const std::string& body) {
+                         const std::string& title, const std::string& body,
+                         const std::string& encTitle, const std::string& encBody,
+                         bool preserveUpdatedAt) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
-        Stmt q(c.h, "UPDATE notes SET title = ?, body = ?, updated_at = CURRENT_TIMESTAMP "
-                    "WHERE id = ? AND user_id = ?");
+        Stmt q(c.h, preserveUpdatedAt
+            ? "UPDATE notes SET title = ?, body = ?, enc_title = ?, enc_body = ? "
+              "WHERE id = ? AND user_id = ?"
+            : "UPDATE notes SET title = ?, body = ?, enc_title = ?, enc_body = ?, "
+              "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?");
         q.bind(1, title);
         q.bind(2, body);
-        q.bind(3, noteId);
-        q.bind(4, userId);
+        q.bind(3, encTitle);
+        q.bind(4, encBody);
+        q.bind(5, noteId);
+        q.bind(6, userId);
         q.exec();
         return sqlite3_changes(c.h) > 0;
     } catch (const std::exception& e) {

@@ -62,6 +62,8 @@ json Note::toJson() const {
         {"id", id},
         {"title", title},
         {"body", body},
+        {"encTitle", enc_title},
+        {"encBody", enc_body},
         {"createdAt", created_at},
         {"updatedAt", updated_at}
     };
@@ -71,6 +73,7 @@ json Note::toSummaryJson() const {
     return {
         {"id", id},
         {"title", title},
+        {"encTitle", enc_title},
         {"createdAt", created_at},
         {"updatedAt", updated_at}
     };
