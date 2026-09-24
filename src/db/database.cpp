@@ -7,6 +7,9 @@
 #include <stdexcept>
 #include <string>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <sys/stat.h>
 
 // This layer uses the sqlite3 C API directly (libsqlite3). A fresh connection is
 // opened per operation — WAL mode makes concurrent connections cheap and safe,
@@ -1380,5 +1383,237 @@ bool CloudDB::hasQuotaRoom(int64_t userId, int64_t additionalBytes) {
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("hasQuotaRoom: " + std::string(e.what()));
         return true;  // fail open on a DB error here, same as the rest of this layer
+    }
+}
+
+// ==== Account lifecycle (admin remove / wipe) ====
+
+namespace {
+
+// Every row of `sql` (one int64 bound to ?1) as a JSON array of objects keyed
+// by column name. Generic on purpose: a backup must not silently miss a column
+// that a later migration adds. Throws on any step error other than "done" so a
+// half-read table can never be mistaken for a complete backup.
+json dumpRows(sqlite3* h, const char* sql, int64_t id) {
+    json rows = json::array();
+    Stmt q(h, sql);
+    q.bind(1, id);
+    int rc;
+    while ((rc = sqlite3_step(q.s)) == SQLITE_ROW) {
+        json row = json::object();
+        const int n = sqlite3_column_count(q.s);
+        for (int i = 0; i < n; ++i) {
+            const char* name = sqlite3_column_name(q.s, i);
+            switch (sqlite3_column_type(q.s, i)) {
+                case SQLITE_INTEGER: row[name] = sqlite3_column_int64(q.s, i); break;
+                case SQLITE_FLOAT:   row[name] = sqlite3_column_double(q.s, i); break;
+                case SQLITE_NULL:    row[name] = nullptr; break;
+                default:             row[name] = q.colText(i); break;  // TEXT (no BLOB columns exist)
+            }
+        }
+        rows.push_back(std::move(row));
+    }
+    if (rc != SQLITE_DONE) throw std::runtime_error("dumpRows: " + std::string(sqlite3_errmsg(h)));
+    return rows;
+}
+
+bool execOk(sqlite3* h, const char* sql) {
+    return sqlite3_exec(h, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+}
+
+// Shared guards for remove + wipe. Fills `r` and returns false to refuse.
+bool lifecycleGuards(sqlite3* h, int64_t targetId, int64_t byAdminId,
+                     std::string& email, std::string& displayName, CloudDB::LifecycleResult& r) {
+    std::string role;
+    {
+        Stmt q(h, "SELECT email, display_name, role FROM users WHERE id = ?");
+        q.bind(1, targetId);
+        if (!q.step()) { r.status = 404; r.error = "user not found"; return false; }
+        email = q.colText(0); displayName = q.colText(1); role = q.colText(2);
+    }
+    if (targetId == byAdminId) {
+        r.status = 409; r.error = "cannot remove or wipe your own account"; return false;
+    }
+    if (role == "admin") {
+        Stmt q(h, "SELECT COUNT(*) FROM users WHERE role = 'admin'");
+        if (!q.step() || q.colInt64(0) <= 1) {
+            r.status = 409; r.error = "cannot remove the last admin"; return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+CloudDB::LifecycleResult CloudDB::removeUser(
+        int64_t targetId, int64_t byAdminId, const std::string& backupRoot,
+        const std::function<bool(const std::string&)>& stageBlobs) {
+    namespace fs = std::filesystem;
+    LifecycleResult r;
+    std::unique_lock lock(db_mutex_);
+    std::string backupDir;
+    bool backupCreated = false;
+    auto fail = [&](const std::string& msg) {
+        if (backupCreated) { std::error_code ec; fs::remove_all(backupDir, ec); backupCreated = false; }
+        r.ok = false; r.status = 500; r.error = msg; r.backupPath.clear();
+        return r;
+    };
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        std::string email, displayName;
+        if (!lifecycleGuards(c.h, targetId, byAdminId, email, displayName, r)) return r;
+
+        // 1. Snapshot the account's rows (everything E2E stays ciphertext; notes
+        //    are plaintext in this schema and so are plaintext in the backup).
+        std::time_t now = std::time(nullptr);
+        std::tm tm{}; gmtime_r(&now, &tm);
+        char stamp[32], iso[32];
+        std::strftime(stamp, sizeof stamp, "%Y%m%dT%H%M%SZ", &tm);
+        std::strftime(iso, sizeof iso, "%Y-%m-%dT%H:%M:%SZ", &tm);
+
+        json snap = {{"version", 1}, {"removedAt", iso}, {"removedBy", byAdminId}};
+        snap["user"]    = dumpRows(c.h, "SELECT * FROM users WHERE id = ?", targetId).at(0);
+        snap["folders"] = dumpRows(c.h, "SELECT * FROM folders WHERE user_id = ?", targetId);
+        snap["files"]   = dumpRows(c.h, "SELECT * FROM files WHERE user_id = ?", targetId);
+        snap["notes"]   = dumpRows(c.h, "SELECT * FROM notes WHERE user_id = ?", targetId);
+
+        // 2. Write the bundle (dir 0700, files 0600). create_directory returning
+        //    false means the target already existed: never write into it.
+        std::error_code ec;
+        fs::create_directories(backupRoot, ec);
+        if (ec) return fail("could not create backup root: " + ec.message());
+        ::chmod(backupRoot.c_str(), S_IRWXU);
+        backupDir = fs::absolute(fs::path(backupRoot) / (std::to_string(targetId) + "_" + stamp)).string();
+        if (!fs::create_directory(backupDir, ec) || ec) return fail("could not create backup directory");
+        backupCreated = true;
+        ::chmod(backupDir.c_str(), S_IRWXU);
+
+        const std::string dataPath = backupDir + "/data.json";
+        {
+            std::ofstream f(dataPath, std::ios::binary | std::ios::trunc);
+            // 'replace': a legacy plaintext filename with invalid UTF-8 must not
+            // make an account impossible to remove (blobs are copied byte-exact).
+            f << snap.dump(2, ' ', false, json::error_handler_t::replace);
+            f.flush();
+            if (!f) return fail("could not write backup data");
+        }
+        ::chmod(dataPath.c_str(), 0600);
+        if (fs::file_size(dataPath, ec) == 0 || ec) return fail("backup data is empty");
+
+        if (!stageBlobs(backupDir + "/storage")) return fail("could not back up stored files");
+
+        // 3. Only now touch the live data: tombstone + delete in ONE transaction.
+        if (!execOk(c.h, "BEGIN IMMEDIATE")) return fail("could not start transaction");
+        bool ok = false;
+        int64_t tombstone = 0;
+        do {
+            {
+                Stmt ins(c.h, "INSERT INTO removed_users(original_user_id, email, display_name, backup_path, removed_by) "
+                              "VALUES(?, ?, ?, ?, ?)");
+                ins.bind(1, targetId); ins.bind(2, email); ins.bind(3, displayName);
+                ins.bind(4, backupDir); ins.bind(5, byAdminId);
+                if (sqlite3_step(ins.s) != SQLITE_DONE) break;
+                tombstone = sqlite3_last_insert_rowid(c.h);
+            }
+            {
+                Stmt del(c.h, "DELETE FROM users WHERE id = ?");
+                del.bind(1, targetId);
+                if (sqlite3_step(del.s) != SQLITE_DONE || sqlite3_changes(c.h) != 1) break;
+            }
+            ok = true;
+        } while (false);
+        if (!ok || !execOk(c.h, "COMMIT")) {
+            execOk(c.h, "ROLLBACK");
+            return fail("could not remove account; nothing was changed");
+        }
+        r.ok = true; r.status = 200; r.tombstoneId = tombstone; r.backupPath = backupDir;
+        return r;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("removeUser: " + std::string(e.what()));
+        return fail("could not remove account; nothing was changed");
+    }
+}
+
+CloudDB::LifecycleResult CloudDB::wipeUser(int64_t targetId, int64_t byAdminId) {
+    LifecycleResult r;
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        std::string email, displayName;
+        if (!lifecycleGuards(c.h, targetId, byAdminId, email, displayName, r)) return r;
+        if (!execOk(c.h, "BEGIN IMMEDIATE")) { r.error = "could not start transaction"; return r; }
+        bool ok = false;
+        {
+            Stmt del(c.h, "DELETE FROM users WHERE id = ?");
+            del.bind(1, targetId);
+            ok = sqlite3_step(del.s) == SQLITE_DONE && sqlite3_changes(c.h) == 1;
+        }
+        if (!ok || !execOk(c.h, "COMMIT")) {
+            execOk(c.h, "ROLLBACK");
+            r.error = "could not wipe account; nothing was changed";
+            return r;
+        }
+        r.ok = true; r.status = 200;
+        return r;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("wipeUser: " + std::string(e.what()));
+        r.error = "could not wipe account; nothing was changed";
+        return r;
+    }
+}
+
+namespace {
+RemovedUser readRemoved(Stmt& q) {
+    RemovedUser u;
+    u.id = q.colInt64(0);
+    u.original_user_id = q.colInt64(1);
+    u.email = q.colText(2);
+    u.display_name = q.colText(3);
+    u.backup_path = q.colText(4);
+    u.removed_at = q.colText(5);
+    u.removed_by = q.colInt64(6);
+    return u;
+}
+} // namespace
+
+std::vector<RemovedUser> CloudDB::listRemovedUsers() {
+    std::shared_lock lock(db_mutex_);
+    std::vector<RemovedUser> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id, original_user_id, email, display_name, backup_path, removed_at, removed_by "
+                    "FROM removed_users ORDER BY id DESC");
+        while (q.step()) out.push_back(readRemoved(q));
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("listRemovedUsers: " + std::string(e.what()));
+    }
+    return out;
+}
+
+std::optional<RemovedUser> CloudDB::getRemovedUser(int64_t tombstoneId) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id, original_user_id, email, display_name, backup_path, removed_at, removed_by "
+                    "FROM removed_users WHERE id = ?");
+        q.bind(1, tombstoneId);
+        if (!q.step()) return std::nullopt;
+        return readRemoved(q);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("getRemovedUser: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::deleteRemovedUserRow(int64_t tombstoneId) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "DELETE FROM removed_users WHERE id = ?");
+        q.bind(1, tombstoneId);
+        return sqlite3_step(q.s) == SQLITE_DONE && sqlite3_changes(c.h) == 1;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("deleteRemovedUserRow: " + std::string(e.what()));
+        return false;
     }
 }

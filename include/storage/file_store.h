@@ -28,6 +28,16 @@ public:
     // Delete a blob. Missing file is treated as success.
     bool remove(int64_t userId, const std::string& storageKey) const;
 
+    // Account lifecycle (admin remove/wipe):
+    // Populate destDir (created 0700) with every regular file in the user's
+    // directory. Hard-links when possible (instant, no extra disk) and falls
+    // back to a real copy when linking isn't possible (e.g. different
+    // filesystems). A user with no directory yields an empty destDir and
+    // success. The blobs are still ciphertext; this never reads them.
+    bool stageUserDir(int64_t userId, const std::string& destDir) const;
+    // Delete the user's whole directory. Missing directory is success.
+    bool removeUserDir(int64_t userId) const;
+
 private:
     std::string baseDir_;
     std::string userDir(int64_t userId) const;

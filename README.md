@@ -23,6 +23,7 @@ Roadmap:
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — what's done, what's next.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — E2E threat model, key hierarchy, what's verified.
 - [`docs/CRYPTO_SPEC.md`](docs/CRYPTO_SPEC.md) — implementation-grade crypto spec for a second client.
+- [`docs/ADMIN_API.md`](docs/ADMIN_API.md) — roles, quotas, suspend / backup+remove / wipe.
 - [`docs/SECURITY_SWEEP_2026-09-23.md`](docs/SECURITY_SWEEP_2026-09-23.md) — full security-sweep findings (H1/M6/M8/M9/M10/L20 fixed; M7 fixed).
 
 ## Architecture

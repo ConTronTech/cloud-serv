@@ -7,6 +7,7 @@
 #include <optional>
 #include <utility>
 #include <shared_mutex>
+#include <functional>
 
 // CloudDB — the multi-user data layer for the cloud suite.
 //
@@ -130,6 +131,34 @@ public:
     // True if adding `additionalBytes` keeps the user within their quota
     // (always true when they have no quota set, i.e. unlimited).
     bool hasQuotaRoom(int64_t userId, int64_t additionalBytes);
+
+    // ---- Account lifecycle (admin remove / wipe) ----
+    // `status` is the HTTP status the route should answer with on failure.
+    struct LifecycleResult {
+        bool ok = false;
+        int status = 500;
+        std::string error;
+        int64_t tombstoneId = 0;      // removeUser only
+        std::string backupPath;       // removeUser only
+    };
+    // "Backup + temp remove": under ONE exclusive lock (so nothing can slip in
+    // between the snapshot and the delete) — snapshot the account's rows to
+    // <backupRoot>/<id>_<utc>/data.json, let `stageBlobs` populate
+    // <that>/storage (the route passes FileStore::stageUserDir), verify, then in
+    // a single transaction record a removed_users tombstone and delete the user
+    // (cascading sessions, keys, folders, files, notes, upload sessions). On any
+    // failure the transaction is rolled back and the partial backup deleted, so
+    // the live account is untouched. The caller deletes the live blob dir
+    // afterwards. Refuses: unknown user, removing yourself, the last admin.
+    LifecycleResult removeUser(int64_t targetId, int64_t byAdminId, const std::string& backupRoot,
+                               const std::function<bool(const std::string& destStorageDir)>& stageBlobs);
+    // Permanent: delete the live account's rows in one transaction, no backup.
+    // The caller deletes the live blob dir afterwards. Same refusals as above.
+    LifecycleResult wipeUser(int64_t targetId, int64_t byAdminId);
+
+    std::vector<RemovedUser> listRemovedUsers();
+    std::optional<RemovedUser> getRemovedUser(int64_t tombstoneId);
+    bool deleteRemovedUserRow(int64_t tombstoneId);
 
 private:
     std::string dbPath_;
