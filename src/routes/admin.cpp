@@ -82,7 +82,10 @@ void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
             if (role != "user" && role != "admin") return http::jsonError(400, "role must be 'user' or 'admin'");
             // Refuse a change that would leave zero admins (e.g. demoting the
             // only admin, including an admin demoting themselves).
-            if (target->role == "admin" && role != "admin" && db.countAdmins() <= 1)
+            // Only an ACTIVE admin counts toward "the last admin": demoting one who
+            // is already suspended/removed can't lock the system out.
+            if (target->role == "admin" && target->status == "active" && role != "admin" &&
+                db.countAdmins() <= 1)
                 return http::jsonError(409, "cannot remove the last admin");
             if (!db.setUserRole(targetId, role)) return http::jsonError(500, "could not update role");
         }
@@ -90,9 +93,14 @@ void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
         if (body.contains("suspended")) {
             if (!body["suspended"].is_boolean()) return http::jsonError(400, "suspended must be a boolean");
             bool suspended = body["suspended"].get<bool>();
+            // A removed account leaves that state only via restore or wipe; the
+            // suspend toggle must never quietly reactivate it.
+            if (target->status == "removed")
+                return http::jsonError(409, "account is removed; restore or wipe it instead");
             // Re-read role in case it was just changed above in this same request.
             auto fresh = db.findUserById(targetId);
-            if (suspended && fresh && fresh->role == "admin" && db.countAdmins() <= 1)
+            if (suspended && fresh && fresh->role == "admin" && fresh->status == "active" &&
+                db.countAdmins() <= 1)
                 return http::jsonError(409, "cannot suspend the last admin");
             if (!db.setUserSuspended(targetId, suspended)) return http::jsonError(500, "could not update status");
         }
@@ -116,41 +124,90 @@ void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
         return http::jsonSuccess(updated->toAdminJson(bytes, count).dump());
     });
 
-    // ---- Backup + temp remove ----
+    // ---- Backup + temp remove (the account STAYS; its data goes) ----
     CROW_ROUTE(app, "/api/admin/users/<int>/remove").methods(crow::HTTPMethod::POST)
     ([&db, &store, backupRoot](const crow::request& req, int targetId) {
         crow::response err;
         auto adminId = requireAdmin(req, db, err);
         if (!adminId) return err;
 
-        auto r = db.removeUser(targetId, *adminId, backupRoot,
+        // Optional {"reason": "..."} — shown to the account's owner at sign-in.
+        std::string reason;
+        if (!req.body.empty()) {
+            json body; std::string perr;
+            if (!parseJsonObject(req, body, perr)) return http::jsonError(400, perr);
+            if (body.contains("reason")) {
+                if (!body["reason"].is_string()) return http::jsonError(400, "reason must be a string");
+                reason = body["reason"].get<std::string>();
+                if (reason.size() > 500) return http::jsonError(400, "reason is too long (max 500)");
+                for (unsigned char c : reason)
+                    if (c < 0x20 || c == 0x7f) return http::jsonError(400, "reason contains control characters");
+            }
+        }
+
+        auto r = db.removeUser(targetId, *adminId, backupRoot, reason,
             [&store, targetId](const std::string& dest) { return store.stageUserDir(targetId, dest); });
         if (!r.ok) return http::jsonError(r.status, r.error);
 
         // The live blob dir goes only after the DB commit; the backup holds hard
         // links (or copies) so the bytes survive. A failure here just leaves an
-        // unreferenced directory (user ids are never reused), so report, don't fail.
+        // unreferenced directory, so report it rather than fail the removal.
         bool storageRemoved = store.removeUserDir(targetId);
         if (!storageRemoved)
             utils::Logger::get_instance().warn("admin remove: live storage dir for user " +
                                                std::to_string(targetId) + " could not be deleted");
-        return http::jsonSuccess(json{{"removedUserId", targetId}, {"tombstoneId", r.tombstoneId},
+        return http::jsonSuccess(json{{"removedUserId", targetId}, {"status", "removed"},
                                       {"storageRemoved", storageRemoved}}.dump());
     });
 
-    // ---- What has been removed ----
-    CROW_ROUTE(app, "/api/admin/removed-users").methods(crow::HTTPMethod::GET)
-    ([&db](const crow::request& req) {
+    // ---- Restore a removed account's data from its backup ----
+    CROW_ROUTE(app, "/api/admin/users/<int>/restore").methods(crow::HTTPMethod::POST)
+    ([&db, &store, backupRoot](const crow::request& req, int targetId) {
         crow::response err;
         if (!requireAdmin(req, db, err)) return err;
+
+        auto r = db.restoreUser(targetId, backupRoot,
+            [&store, targetId](const std::string& src, const std::vector<std::string>& keys) {
+                return store.restoreBlobs(targetId, src, keys); },
+            [&store, targetId](const std::vector<std::string>& keys) { store.removeBlobs(targetId, keys); });
+        if (!r.ok) return http::jsonError(r.status, r.error);
+        return http::jsonSuccess(json{{"restoredUserId", targetId}, {"status", "active"},
+                                      {"folders", r.nFolders}, {"files", r.nFiles},
+                                      {"notes", r.nNotes}}.dump());
+    });
+
+    // ---- Which accounts are removed (and what their backups hold) ----
+    CROW_ROUTE(app, "/api/admin/removed-users").methods(crow::HTTPMethod::GET)
+    ([&db, backupRoot](const crow::request& req) {
+        namespace fs = std::filesystem;
+        crow::response err;
+        if (!requireAdmin(req, db, err)) return err;
+        std::error_code ec;
+        const fs::path root = fs::weakly_canonical(backupRoot, ec);
         json out = json::array();
-        for (const auto& t : db.listRemovedUsers()) out.push_back(t.toJson());
+        for (const auto& t : db.listRemovedUsers()) {
+            json j = t.toJson();
+            // Backup size, for capacity planning. Only walked when the recorded
+            // path really is a direct child of the backup root.
+            int64_t bytes = -1;
+            std::error_code e2;
+            fs::path dir = fs::weakly_canonical(t.backup_path, e2);
+            if (!ec && !e2 && !dir.empty() && dir != root && dir.parent_path() == root && fs::is_directory(dir, e2)) {
+                bytes = 0;
+                for (const auto& f : fs::recursive_directory_iterator(dir, e2)) {
+                    std::error_code e3;
+                    if (f.is_regular_file(e3)) bytes += static_cast<int64_t>(f.file_size(e3));
+                }
+            }
+            j["backupBytes"] = bytes >= 0 ? json(bytes) : json(nullptr);
+            out.push_back(std::move(j));
+        }
         return http::jsonSuccess(json{{"removedUsers", out}}.dump());
     });
 
-    // ---- Permanent wipe of a LIVE account (no backup) ----
+    // ---- Permanent wipe (any account; a removed one also loses its backup) ----
     CROW_ROUTE(app, "/api/admin/users/<int>/wipe").methods(crow::HTTPMethod::POST)
-    ([&db, &store](const crow::request& req, int targetId) {
+    ([&db, &store, backupRoot](const crow::request& req, int targetId) {
         crow::response err;
         auto adminId = requireAdmin(req, db, err);
         if (!adminId) return err;
@@ -162,43 +219,14 @@ void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
         if (!confirmMatches(body, target->email))
             return http::jsonError(400, "confirmEmail must exactly match the account's email");
 
-        auto r = db.wipeUser(targetId, *adminId);
+        auto r = db.wipeUser(targetId, *adminId, backupRoot);
         if (!r.ok) return http::jsonError(r.status, r.error);
         bool storageRemoved = store.removeUserDir(targetId);
         if (!storageRemoved)
             utils::Logger::get_instance().warn("admin wipe: storage dir for user " +
                                                std::to_string(targetId) + " could not be deleted");
-        return http::jsonSuccess(json{{"wiped", true}, {"storageRemoved", storageRemoved}}.dump());
-    });
-
-    // ---- Permanent wipe of a REMOVED account's backup ----
-    CROW_ROUTE(app, "/api/admin/removed-users/<int>/wipe").methods(crow::HTTPMethod::POST)
-    ([&db, backupRoot](const crow::request& req, int tombstoneId) {
-        namespace fs = std::filesystem;
-        crow::response err;
-        if (!requireAdmin(req, db, err)) return err;
-
-        json body; std::string perr;
-        if (!parseJsonObject(req, body, perr)) return http::jsonError(400, perr);
-        auto t = db.getRemovedUser(tombstoneId);
-        if (!t) return http::jsonError(404, "removed account not found");
-        if (!confirmMatches(body, t->email))
-            return http::jsonError(400, "confirmEmail must exactly match the account's email");
-
-        // Defense in depth: this is a recursive delete of a path read from the
-        // DB. Only ever delete a DIRECT child of the backup root.
-        std::error_code ec;
-        fs::path root = fs::weakly_canonical(backupRoot, ec);
-        fs::path dir = ec ? fs::path() : fs::weakly_canonical(t->backup_path, ec);
-        if (ec || root.empty() || dir.empty() || dir == root || dir.parent_path() != root) {
-            utils::Logger::get_instance().error("admin wipe: refusing backup path outside backup root: " + t->backup_path);
-            return http::jsonError(500, "backup path is outside the backup directory; refusing to delete");
-        }
-        fs::remove_all(dir, ec);
-        if (ec) return http::jsonError(500, "could not delete the backup; nothing was changed");
-        if (!db.deleteRemovedUserRow(tombstoneId))
-            return http::jsonError(500, "backup deleted but its record could not be removed");
-        return http::jsonSuccess(json{{"wiped", true}}.dump());
+        return http::jsonSuccess(json{{"wiped", true}, {"storageRemoved", storageRemoved},
+                                      {"backupRemoved", r.backupRemoved}}.dump());
     });
 }
 

@@ -137,3 +137,48 @@ bool FileStore::removeUserDir(int64_t userId) const {
     }
     return true;
 }
+
+bool FileStore::restoreBlobs(int64_t userId, const std::string& srcDir,
+                             const std::vector<std::string>& keys) const {
+    std::error_code ec;
+    fs::create_directories(userDir(userId), ec);
+    if (ec) {
+        utils::Logger::get_instance().error("FileStore::restoreBlobs mkdir: " + ec.message());
+        return false;
+    }
+    ::chmod(userDir(userId).c_str(), S_IRWXU);
+
+    std::vector<fs::path> placed;   // only what THIS call created, for rollback
+    auto rollback = [&]() { for (const auto& p : placed) { std::error_code e; fs::remove(p, e); } };
+    for (const auto& key : keys) {
+        if (!isSafeKey(key)) { rollback(); return false; }
+        const fs::path src = fs::path(srcDir) / key;
+        const fs::path dst = fs::path(userDir(userId)) / key;
+        std::error_code e;
+        if (fs::exists(dst, e)) {
+            if (fs::equivalent(src, dst, e)) continue;   // already the same file
+            utils::Logger::get_instance().error("FileStore::restoreBlobs: a different file already exists for " + key);
+            rollback(); return false;
+        }
+        fs::create_hard_link(src, dst, e);
+        if (e) {
+            e.clear();
+            fs::copy_file(src, dst, fs::copy_options::none, e);
+            if (e) {
+                utils::Logger::get_instance().error("FileStore::restoreBlobs copy " + key + ": " + e.message());
+                rollback(); return false;
+            }
+            ::chmod(dst.c_str(), 0600);
+        }
+        placed.push_back(dst);
+    }
+    return true;
+}
+
+void FileStore::removeBlobs(int64_t userId, const std::vector<std::string>& keys) const {
+    for (const auto& key : keys) {
+        if (!isSafeKey(key)) continue;
+        std::error_code e;
+        fs::remove(fs::path(userDir(userId)) / key, e);
+    }
+}

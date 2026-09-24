@@ -132,38 +132,59 @@ public:
     bool setUserRole(int64_t userId, const std::string& role);       // "user" | "admin"
     bool setUserSuspended(int64_t userId, bool suspended);
     bool setUserQuota(int64_t userId, std::optional<int64_t> quotaBytes); // nullopt = unlimited
+    // Admins who can actually act: role admin AND status active. A suspended or
+    // removed admin does not count, so "last admin" guards can't be satisfied by
+    // an account that is locked out.
     int  countAdmins();
     // True if adding `additionalBytes` keeps the user within their quota
     // (always true when they have no quota set, i.e. unlimited).
     bool hasQuotaRoom(int64_t userId, int64_t additionalBytes);
 
-    // ---- Account lifecycle (admin remove / wipe) ----
+    // ---- Account lifecycle (admin remove / restore / wipe) ----
     // `status` is the HTTP status the route should answer with on failure.
     struct LifecycleResult {
         bool ok = false;
         int status = 500;
         std::string error;
-        int64_t tombstoneId = 0;      // removeUser only
-        std::string backupPath;       // removeUser only
+        int64_t nFolders = 0, nFiles = 0, nNotes = 0;  // restoreUser only
+        bool backupRemoved = false;                    // wipeUser (removed account) only
     };
-    // "Backup + temp remove": under ONE exclusive lock (so nothing can slip in
-    // between the snapshot and the delete) — snapshot the account's rows to
-    // <backupRoot>/<id>_<utc>/data.json, let `stageBlobs` populate
+    // "Backup + temp remove". The ACCOUNT STAYS (status -> 'removed'; password,
+    // recovery key and E2E key material untouched) so its owner can sign in and
+    // see a notice; only its data goes. Under ONE exclusive lock (nothing can
+    // slip in between the snapshot and the delete): snapshot folders/files/notes
+    // to <backupRoot>/<id>_<utc>/data.json, let `stageBlobs` populate
     // <that>/storage (the route passes FileStore::stageUserDir), verify, then in
-    // a single transaction record a removed_users tombstone and delete the user
-    // (cascading sessions, keys, folders, files, notes, upload sessions). On any
-    // failure the transaction is rolled back and the partial backup deleted, so
-    // the live account is untouched. The caller deletes the live blob dir
-    // afterwards. Refuses: unknown user, removing yourself, the last admin.
+    // a single transaction record the removal, mark the user removed, delete
+    // their folders/files/notes/upload-sessions and drop their sessions. Any
+    // failure rolls the transaction back and deletes the partial backup, leaving
+    // the live account untouched. The caller deletes the live blob dir after.
+    // Refuses: unknown user, yourself, an already-removed account, the last
+    // active admin.
     LifecycleResult removeUser(int64_t targetId, int64_t byAdminId, const std::string& backupRoot,
+                               const std::string& reason,
                                const std::function<bool(const std::string& destStorageDir)>& stageBlobs);
-    // Permanent: delete the live account's rows in one transaction, no backup.
-    // The caller deletes the live blob dir afterwards. Same refusals as above.
-    LifecycleResult wipeUser(int64_t targetId, int64_t byAdminId);
+    // Bring a removed account's data back exactly as it was (same ids, so the
+    // folder tree and every reference is identical), then delete the backup.
+    // `restoreBlobs(srcStorageDir, keys)` must put every listed blob into the
+    // live store or clean up after itself and return false; `undoBlobs(keys)`
+    // removes them again if the DB step fails afterwards. Blobs are placed
+    // BEFORE the rows so a row never points at a missing blob. Refuses an
+    // account that isn't removed, a backup that is incomplete, belongs to
+    // another account, or lies outside backupRoot.
+    LifecycleResult restoreUser(int64_t targetId, const std::string& backupRoot,
+                                const std::function<bool(const std::string&, const std::vector<std::string>&)>& restoreBlobs,
+                                const std::function<void(const std::vector<std::string>&)>& undoBlobs);
+    // Permanent: delete the account and all its rows in one transaction, no
+    // backup. For an already-removed account this also deletes its backup
+    // bundle (only ever a direct child of backupRoot). The caller deletes the
+    // live blob dir afterwards. Refuses: unknown user, yourself, the last
+    // active admin.
+    LifecycleResult wipeUser(int64_t targetId, int64_t byAdminId, const std::string& backupRoot);
 
     std::vector<RemovedUser> listRemovedUsers();
-    std::optional<RemovedUser> getRemovedUser(int64_t tombstoneId);
-    bool deleteRemovedUserRow(int64_t tombstoneId);
+    // The removal record for a user, if that account is currently removed.
+    std::optional<RemovedUser> getRemovalFor(int64_t userId);
 
 private:
     std::string dbPath_;

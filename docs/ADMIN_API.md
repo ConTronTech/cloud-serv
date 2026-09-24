@@ -34,12 +34,12 @@ The lowest-id account is promoted to `admin` automatically if no admin exists
            "status":"active","storageUsedBytes":1048576,"storageQuotaBytes":null,"fileCount":3}]}
 ```
 
-`GET /api/admin/removed-users`
+`GET /api/admin/removed-users` — accounts whose data was removed (newest first)
 ```json
-{"removedUsers":[{"id":3,"originalUserId":7,"email":"x@e.cc","displayName":"x",
-                  "removedAt":"…","removedBy":1}]}
+{"removedUsers":[{"id":1,"originalUserId":7,"email":"x@e.cc","displayName":"x",
+                  "removedAt":"…","removedBy":1,"reason":"Reported for abuse","backupBytes":1979}]}
 ```
-(No filesystem path is ever returned.)
+`backupBytes` is the backup's size on disk (data.json + blobs). No filesystem path is ever returned.
 
 ## Change an account
 
@@ -53,45 +53,92 @@ account's sessions and API keys stop authenticating and login answers
 `403 account suspended` (only after a correct password, so it can't probe status).
 Nothing is deleted; un-suspend restores access.
 
-## Remove and wipe
+## Suspend, remove, restore, wipe
 
-| Action | Route | Reversible? |
-|---|---|---|
-| **Suspend** | `PATCH …/users/<id>` `{"suspended":true}` | Yes, instantly |
-| **Backup + remove** | `POST /api/admin/users/<id>/remove` | The backup exists on disk; **there is no restore endpoint** |
-| **Wipe a live account** | `POST /api/admin/users/<id>/wipe` `{"confirmEmail":"…"}` | **No.** No backup is made |
-| **Wipe a removed account** | `POST /api/admin/removed-users/<id>/wipe` `{"confirmEmail":"…"}` | **No.** Deletes the backup |
+Four things an admin can do to an account, from mild to permanent:
 
-All four refuse: an unknown id (`404`), **your own account** (`409`), and the last
-admin (`409`). Both wipes additionally require `confirmEmail` to equal the
-account's email (case-insensitive) or they answer `400` and change nothing.
+| Action | Route | Effect | Reversible? |
+|---|---|---|---|
+| **Suspend** | `PATCH …/users/<id>` `{"suspended":true}` | Blocks sign-in and kills sessions/API keys. Nothing is deleted | Yes, instantly |
+| **Remove data** | `POST …/users/<id>/remove` `{"reason"?}` | Backs up the account's data and takes it away. **The account stays** | **Yes: restore** |
+| **Restore** | `POST …/users/<id>/restore` | Puts the data back exactly as it was | — |
+| **Wipe** | `POST …/users/<id>/wipe` `{"confirmEmail"}` | Permanently deletes the account, its data and any backup | **No** |
+
+`remove`, `restore` and `wipe` all refuse an unknown id (`404`), **your own account** (`409`)
+and the **last active admin** (`409`). `wipe` additionally requires `confirmEmail` to equal the
+account's email (case-insensitive), otherwise `400` and nothing changes.
+
+"Last admin" counts only admins who can act (role `admin` **and** status `active`). A suspended
+or removed admin does not count, so you cannot demote or remove the only admin who is still able
+to sign in.
+
+### What a removed account looks like
+
+The account is **not** deleted. Its status becomes `removed`; its password, recovery key and
+encryption key material are kept, and so are its API keys (inert until restore). Only its
+folders, files, notes and sessions are taken away. So:
+
+- **Signing in** with the correct password returns `403` with no session, and a body the client
+  can show:
+  ```json
+  {"error":"account data removed","code":"data_removed",
+   "notice":"Your data has been temporarily removed. To get it back, please appeal.",
+   "reason":"Reported for abuse","appealContact":"appeals@example.com"}
+  ```
+  A wrong password still answers `401 invalid credentials`, so this can't be used to probe
+  account status. (A suspended account answers `403 {"code":"suspended"}`.)
+- The web client shows that text on the login screen.
+- The suspend toggle cannot touch a removed account (`409`): it leaves that state only through
+  **restore** or **wipe**.
+- Removing an already-removed account is a `409`.
+
+`reason` (optional, max 500 chars, no control characters) is shown to the account's owner.
+`REMOVED_ACCOUNT_NOTICE` and `APPEAL_CONTACT` (see Configuration) control the rest of the text.
 
 ### What `remove` does
 
-Everything happens under one exclusive database lock, so nothing can slip in
-between the snapshot and the delete:
+Everything happens under one exclusive database lock, so nothing can slip in between the
+snapshot and the delete:
 
-1. Snapshot the account's rows (user, folders, files, notes) to
-   `BACKUP_DIR/<id>_<utc>/data.json` (dir `0700`, file `0600`).
-2. Put the account's still-encrypted blobs in `BACKUP_DIR/<id>_<utc>/storage/`
-   (hard links when the filesystem allows, so no extra disk; a real copy otherwise).
-3. In **one transaction**: record a `removed_users` tombstone and delete the user
-   (cascading sessions, API keys, folders, files, notes, upload sessions).
+1. Snapshot the account's folders, files and notes to `BACKUP_DIR/<id>_<utc>/data.json`
+   (dir `0700`, file `0600`).
+2. Put its still-encrypted blobs in `BACKUP_DIR/<id>_<utc>/storage/` (hard links when the
+   filesystem allows, so no extra disk; a real copy otherwise).
+3. In **one transaction**: record the removal, mark the account `removed`, and delete its
+   folders/files/notes/upload sessions/sessions.
 4. Only after the commit, delete the live blob directory.
 
-If any step fails, the transaction is rolled back and the partial backup is
-deleted: the live account is left exactly as it was. Response:
-`{"removedUserId":7,"tombstoneId":3,"storageRemoved":true}`.
+If any step fails the transaction is rolled back and the partial backup is deleted: the account
+is left exactly as it was. Response: `{"removedUserId":7,"status":"removed","storageRemoved":true}`.
 
-User ids are never reused, so a removed account's id can never inherit its old
-storage; the same email can re-register and gets a new id.
+### What `restore` does
+
+1. Validates the backup **before touching anything**: it must be a direct child of `BACKUP_DIR`,
+   `data.json` must parse and belong to *this* account, every storage key must be plain hex, and
+   every file row's blob must exist in the bundle (an incomplete backup is refused).
+2. Puts the blobs back **first** (so a row can never point at a missing blob).
+3. In **one transaction**: re-inserts the folders, files and notes with their **original ids**
+   (so the folder tree and every reference is identical), sets the account `active` and deletes
+   the removal record. Only columns that exist in the live table are written, so a tampered
+   `data.json` cannot smuggle SQL through a key name.
+4. Deletes the backup (it has been consumed).
+
+If anything fails, the transaction is rolled back, the blobs it placed are removed again, and the
+backup is left intact for another try. Response:
+`{"restoredUserId":7,"status":"active","folders":1,"files":2,"notes":2}`.
+
+The owner can then sign in and their own key unlocks everything, because their key material was
+never removed. A restored account is `active` (even if it was suspended before it was removed).
 
 ### What `wipe` does
 
-Deletes the account's rows in one transaction, then its blob directory (or, for a
-removed account, its whole backup folder and tombstone). The recursive delete of a
-backup only ever targets a **direct child of `BACKUP_DIR`**; a tampered tombstone
-pointing anywhere else is refused.
+Deletes the account's rows in one transaction, then its blob directory. For an already-removed
+account it also deletes its whole backup bundle. That recursive delete only ever targets a
+**direct child of `BACKUP_DIR`**, and the path is vetted *before* the transaction, so a tampered
+record pointing anywhere else makes the whole wipe refuse (`500`) with nothing changed. Response:
+`{"wiped":true,"storageRemoved":true,"backupRemoved":true}`.
+
+User ids are never reused, so a wiped or removed account's id can never inherit its old storage.
 
 ## Configuration
 
@@ -99,10 +146,14 @@ pointing anywhere else is refused.
 |---|---|---|
 | `DEFAULT_STORAGE_QUOTA_GB` | `0` | Quota for new registrations (0 = unlimited) |
 | `BACKUP_DIR` | `data/backups` | Where `remove` writes backups |
+| `REMOVED_ACCOUNT_NOTICE` | "Your data has been temporarily removed. To get it back, please appeal." | Shown at sign-in to a removed account |
+| `APPEAL_CONTACT` | *(empty)* | Address/URL shown with the notice so people know where to appeal |
 
 ## Not built (yet)
 
-- **Restore** of a removed account from its backup.
-- Secure shredding: wipe deletes files normally. The data is ciphertext, but the
-  bytes are not overwritten.
-- Backups of `sessions`/`api_keys`/in-progress uploads (intentionally excluded).
+- **In-app appeals.** The notice tells people to appeal and shows `APPEAL_CONTACT`, but there is
+  no form: appeals happen outside the app (email etc.).
+- Secure shredding: wipe deletes files normally. The data is ciphertext, but the bytes are not
+  overwritten.
+- Backups of `sessions` and in-progress uploads (intentionally excluded); a restored account's
+  users simply sign in again.

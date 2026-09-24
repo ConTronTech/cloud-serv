@@ -29,20 +29,20 @@ namespace routes {
 //       the last remaining admin.
 //     - storageQuotaBytes: an integer, or null for unlimited.
 //
-// Account lifecycle (all admin + session only; none can target yourself, and
-// none can remove the last admin):
-//   POST   /api/admin/users/<id>/remove   -> {removedUserId,tombstoneId,storageRemoved}
-//     "Backup + temp remove": snapshots the account (rows as JSON + its
-//     still-encrypted blobs) into BACKUP_DIR/<id>_<utc>/, then deletes the live
-//     account. Reversible only in the sense that the backup exists on disk —
-//     there is no restore endpoint.
-//   GET    /api/admin/removed-users       -> {removedUsers:[{id,originalUserId,
-//                                            email,displayName,removedAt,removedBy}]}
-//   POST   /api/admin/users/<id>/wipe     {confirmEmail}  -> {wiped,storageRemoved}
-//     PERMANENT, no backup: deletes a live account and its stored files.
-//   POST   /api/admin/removed-users/<id>/wipe  {confirmEmail}  -> {wiped}
-//     PERMANENT: deletes a removed account's backup bundle and its tombstone.
-// The two wipe routes require confirmEmail to equal the account's email exactly.
+// Account lifecycle (admin + session only; none can target yourself or the last
+// active admin):
+//   POST   /api/admin/users/<id>/remove   {reason?} -> {removedUserId,status,storageRemoved}
+//     "Backup + temp remove": snapshots the account's data (rows as JSON + its
+//     still-encrypted blobs) into BACKUP_DIR/<id>_<utc>/, then deletes that data.
+//     THE ACCOUNT STAYS (status "removed", credentials + E2E key material kept), so
+//     its owner can sign in, see a notice, and later get everything back.
+//   POST   /api/admin/users/<id>/restore  -> {restoredUserId,status,folders,files,notes}
+//     Puts a removed account's data back exactly as it was (same ids).
+//   GET    /api/admin/removed-users       -> {removedUsers:[{id,originalUserId,email,
+//                                            displayName,removedAt,removedBy,reason,backupBytes}]}
+//   POST   /api/admin/users/<id>/wipe     {confirmEmail}  -> {wiped,storageRemoved,backupRemoved}
+//     PERMANENT: deletes the account, its data and (if removed) its backup.
+// wipe requires confirmEmail to equal the account's email exactly.
 void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
                          FileStore& store, const std::string& backupRoot);
 

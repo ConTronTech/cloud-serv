@@ -378,6 +378,15 @@ async function onAuthSubmit(e) {
 }
 
 function prettyError(body) {
+  // A removed/suspended account gets a full explanation, not a one-liner.
+  if (body && body.code === "data_removed") {
+    return [body.notice || "Your data has been temporarily removed. To get it back, please appeal.",
+            body.reason ? "Reason: " + body.reason : "",
+            body.appealContact ? "Appeal: " + body.appealContact : ""].filter(Boolean).join(" ");
+  }
+  if (body && body.code === "suspended") {
+    return "This account has been suspended." + (body.appealContact ? " To appeal: " + body.appealContact : "");
+  }
   const e = body && body.error;
   const map = {
     "invalid credentials": "Wrong email or password.",

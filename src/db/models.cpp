@@ -86,7 +86,8 @@ json RemovedUser::toJson() const {
         {"email", email},
         {"displayName", display_name},
         {"removedAt", removed_at},
-        {"removedBy", removed_by}
+        {"removedBy", removed_by},
+        {"reason", reason}
         // backup_path intentionally omitted — a filesystem path is an internal
         // detail, not something a client needs.
     };

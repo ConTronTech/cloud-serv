@@ -186,10 +186,10 @@ int main(int argc, char* argv[]) {
         utils::Logger::get_instance().info("  DELETE /api/notes/<id>");
         utils::Logger::get_instance().info("  GET    /api/admin/users        (admin only)");
         utils::Logger::get_instance().info("  PATCH  /api/admin/users/<id>   (admin only: role/suspend/quota)");
-        utils::Logger::get_instance().info("  POST   /api/admin/users/<id>/remove   (admin only: backup + remove)");
+        utils::Logger::get_instance().info("  POST   /api/admin/users/<id>/remove   (admin only: backup + remove data)");
         utils::Logger::get_instance().info("  POST   /api/admin/users/<id>/wipe     (admin only: permanent)");
         utils::Logger::get_instance().info("  GET    /api/admin/removed-users       (admin only)");
-        utils::Logger::get_instance().info("  POST   /api/admin/removed-users/<id>/wipe (admin only: permanent)");
+        utils::Logger::get_instance().info("  POST   /api/admin/users/<id>/restore  (admin only: restore a removed account's data)");
         utils::Logger::get_instance().info("Press Ctrl+C to stop");
 
         // 10. Periodic maintenance (purge expired sessions + idle rate buckets)

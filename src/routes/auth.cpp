@@ -57,6 +57,12 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
     std::optional<int64_t> defaultQuotaBytes;
     if (defaultQuotaGb > 0) defaultQuotaBytes = defaultQuotaGb * 1024 * 1024 * 1024;
 
+    // What a signed-in-but-not-allowed user is told. The notice + contact are
+    // operator-configured so the appeal instructions can name a real address.
+    const std::string removedNotice = core::Config::get_instance().get("env", "REMOVED_ACCOUNT_NOTICE",
+        "Your data has been temporarily removed. To get it back, please appeal.");
+    const std::string appealContact = core::Config::get_instance().get("env", "APPEAL_CONTACT", "");
+
     // ---- Register ----
     CROW_ROUTE(app, "/api/auth/register").methods(crow::HTTPMethod::POST)
     ([&db, sessionSeconds, inviteCode, defaultQuotaBytes](const crow::request& req) {
@@ -117,7 +123,7 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
 
     // ---- Login ----
     CROW_ROUTE(app, "/api/auth/login").methods(crow::HTTPMethod::POST)
-    ([&db, sessionSeconds](const crow::request& req) {
+    ([&db, sessionSeconds, removedNotice, appealContact](const crow::request& req) {
         json body; std::string err;
         if (!parseJsonObject(req, body, err)) return http::jsonError(400, err);
 
@@ -159,10 +165,24 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         loginThrottle.recordSuccess(email);
         slot.done = true;
 
-        // Correct password, but the account is suspended: no session is minted.
+        // Correct password, but the account isn't active: no session is minted.
         // Checked only after a real password match, so this can't be used to
-        // probe account status without already knowing the password.
-        if (user->status != "active") return http::jsonError(403, "account suspended");
+        // probe account status without already knowing the password. The body
+        // carries a machine-readable `code` plus the text to show the person.
+        if (user->status == "removed") {
+            json out = {{"error", "account data removed"}, {"code", "data_removed"},
+                        {"notice", removedNotice}, {"appealContact", appealContact}};
+            if (auto rec = db.getRemovalFor(user->id); rec && !rec->reason.empty()) out["reason"] = rec->reason;
+            crow::response res(403, out.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        }
+        if (user->status != "active") {
+            json out = {{"error", "account suspended"}, {"code", "suspended"}, {"appealContact", appealContact}};
+            crow::response res(403, out.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        }
 
         std::string token = security::Crypto::randomHex(32);
         int64_t expiresAt = static_cast<int64_t>(::time(nullptr)) + sessionSeconds;

@@ -111,11 +111,12 @@ struct UploadSession {
     std::string enc_mime;        // E2E: mime type encrypted under the DEK ("" = plaintext)
 };
 
-// A backup tombstone for a removed (soft-deleted) account: the "backup + temp
-// remove" admin action. The live user/folders/files/notes rows are gone by
-// the time this exists — everything needed to account for or restore the
-// account lives in the backup bundle at backup_path (still-encrypted blobs +
-// a JSON dump of their former DB rows), not in this row.
+// The record of a removed account ("backup + temp remove"). The ACCOUNT ITSELF
+// stays (status = 'removed', credentials and E2E key material intact) so its
+// owner can sign in, see a notice, and later get their data back; only its
+// data (folders/files/notes) is gone from the live tables. Everything needed to
+// restore it lives in the backup bundle at backup_path (still-encrypted blobs
+// + a JSON dump of the former rows), not in this row.
 struct RemovedUser {
     int64_t id = 0;
     int64_t original_user_id = 0;
@@ -124,6 +125,7 @@ struct RemovedUser {
     std::string backup_path;
     std::string removed_at;
     int64_t removed_by = 0;      // admin user id who performed the removal
+    std::string reason;          // optional admin note, shown to the user at login
 
     json toJson() const;
 };
