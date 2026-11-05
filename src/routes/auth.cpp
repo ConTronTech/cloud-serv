@@ -4,6 +4,7 @@
 #include "security/rate_limiter.h"
 #include "security/request_auth.h"
 #include "utils/logger.h"
+#include "routes/events.h"
 #include "core/config.h"
 
 #include <nlohmann/json.hpp>
@@ -136,8 +137,12 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
             if (note.size() > 300) note.resize(300);
             db.setSignupInfo(userId, req.remote_ip_address, note);
             utils::Logger::get_instance().info("signup: request from " + email + " waiting for approval");
+            notifyAdmins("requests");
             auto r = http::jsonSuccess(R"({"pending":true})"); r.code = 202; return r;
         }
+
+        notifyAdmins("users");
+        if (inviteId) notifyAdmins("invites");
 
         // Issue a session token immediately so registration logs the user in.
         std::string token = security::Crypto::randomHex(32);

@@ -3,6 +3,7 @@
 #include "routes/devices.h"
 #include "security/request_auth.h"
 #include "utils/logger.h"
+#include "routes/events.h"
 
 #include <nlohmann/json.hpp>
 #include <cctype>
@@ -64,6 +65,7 @@ void registerDeviceRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db)
         int64_t id = db.createDevice(*uid, cleanName(str(b, "name")), pub, wrapped, req.remote_ip_address);
         if (id < 0) return http::jsonError(500, "could not save device");
         auto d = db.getDevice(*uid, id);
+        notifyUser(*uid, "devices");
         utils::Logger::get_instance().info("devices: user " + std::to_string(*uid) + " added device " + std::to_string(id) +
                                            (wrapped.empty() ? " (pending approval)" : " (self-enrolled)"));
         return http::jsonSuccess(json{{"device", devJson(*d)}}.dump());
@@ -88,6 +90,7 @@ void registerDeviceRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db)
         if (!isB64ish(wrapped, 1024, true)) return http::jsonError(400, "invalid key material");
         if (!db.approveDevice(*uid, id, wrapped)) return http::jsonError(404, "no pending device with that id");
         utils::Logger::get_instance().info("devices: user " + std::to_string(*uid) + " approved device " + std::to_string(id));
+        notifyUser(*uid, "devices");
         return http::jsonSuccess(R"({"ok":true})");
     });
 
@@ -96,6 +99,7 @@ void registerDeviceRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db)
         auto uid = security::authenticateSession(req, db);
         if (!uid) return http::jsonError(401, "unauthorized");
         if (!db.deleteDevice(*uid, id)) return http::jsonError(404, "not found");
+        notifyUser(*uid, "devices");
         return http::jsonSuccess(R"({"ok":true})");
     });
 

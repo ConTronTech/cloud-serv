@@ -130,7 +130,7 @@ function showApp(user) {
     if (DEK_RAW && trustThisBrowser()) { try { await enrollThisDevice(uidNow()); } catch {} }
     checkPendingDevices();
   });
-  if (!pendingPoll) pendingPoll = setInterval(() => { checkPendingDevices(); refreshAdminBadge(); }, 30000);
+  setTimeout(connectEvents, 0);
   loadFs(0); // land on Files
 }
 
@@ -464,7 +464,7 @@ function showRecoveryKey(key, user, onContinue) {
 }
 
 async function logout() {
-  closeUserMenu(); stopAdminLive(); ME = null;
+  closeUserMenu(); stopAdminLive(); ME = null; disconnectEvents();
   stopApprovalPoll(); if (pendingPoll) { clearInterval(pendingPoll); pendingPoll = null; }
   await api("/api/auth/logout", { method: "POST", headers: authHeaders() });
   clearDEK();
@@ -1760,12 +1760,7 @@ async function requestApproval() {
     rec.deviceId = body.device.id; await devPut(uid, rec);
   }
   LOCK_STATE = "pending"; updateLockBanner();
-  stopApprovalPoll();
-  approvalPoll = setInterval(async () => {
-    const s = await tryDeviceUnlock(uid);
-    if (s === "ok") afterUnlock("Approved · unlocked on this device");
-    else if (s === "none") { stopApprovalPoll(); LOCK_STATE = "locked"; updateLockBanner(); toast("The request was declined"); }
-  }, 4000);
+  connectEvents();   // the approval arrives as a live "devices" event
 }
 function stopApprovalPoll() { if (approvalPoll) { clearInterval(approvalPoll); approvalPoll = null; } }
 
@@ -1797,7 +1792,7 @@ async function checkPendingDevices() {
 
 // Settings > Devices
 async function loadDevices() {
-  const list = $("dev-list"); list.textContent = "";
+  const list = $("dev-list"); const __g = beginList("dev-list"); const __frag = document.createDocumentFragment();
   const { ok, body } = await api("/api/devices", { headers: authHeaders() });
   if (!ok || !body) return;
   const mine = await devGet(uidNow());
@@ -1840,8 +1835,10 @@ async function loadDevices() {
       loadDevices(); checkPendingDevices();
     });
     li.append(rm);
-    list.appendChild(li);
+    __frag.appendChild(li);
   }
+  if (isStale("dev-list", __g)) return;
+  list.replaceChildren(__frag);
 }
 
 async function refreshMe() {
@@ -1853,7 +1850,7 @@ async function refreshMe() {
 
 // Settings > Sign-in methods
 async function loadIdentities() {
-  const box = $("ids-list"); box.textContent = "";
+  const box = $("ids-list"); const __g = beginList("ids-list"); const __frag = document.createDocumentFragment();
   const { ok, body } = await api("/api/auth/identities", { headers: authHeaders() });
   if (!ok || !body) return;
   $("ids-card").classList.toggle("hidden", !body.ssoEnabled && !(body.identities || []).length);
@@ -1872,8 +1869,64 @@ async function loadIdentities() {
       if (!r.ok) { toast(prettyError(r.body) || "Couldn't unlink"); return; }
       loadIdentities();
     });
-    li.append(info, rm); box.appendChild(li);
+    li.append(info, rm); __frag.appendChild(li);
   }
+  if (isStale("ids-list", __g)) return;
+  box.replaceChildren(__frag);
+}
+
+// Lists are rebuilt off-screen and swapped in at once; a refresh that finishes after a
+// newer one started is thrown away. (Two overlapping refreshes used to both append.)
+const listGen = {};
+function beginList(id) { listGen[id] = (listGen[id] || 0) + 1; return listGen[id]; }
+function isStale(id, g) { return listGen[id] !== g; }
+
+// ======================= Live updates (WebSocket) =======================
+// One connection per tab to /api/events. The server sends tiny hints when something
+// changes; we refetch only what's on screen. No timers polling the server.
+let evSock = null, evRetry = 1000, evTimer = null;
+const evDebounce = {};
+function soon(key, fn) { clearTimeout(evDebounce[key]); evDebounce[key] = setTimeout(fn, 200); }
+function adminOpen() { return !$("admin-tab").classList.contains("hidden"); }
+function settingsOpen() { return !$("settings-tab").classList.contains("hidden"); }
+function connectEvents() {
+  if (evSock || !ME || !ME.user) return;
+  let ws;
+  try { ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/api/events"); }
+  catch { return; }
+  evSock = ws;
+  ws.onopen = () => { evRetry = 1000; catchUp(); };
+  ws.onmessage = (m) => { let t; try { t = JSON.parse(m.data).type; } catch { return; } handleEvent(t); };
+  ws.onclose = () => {
+    evSock = null;
+    if (!ME || !ME.user) return;                       // logged out: stay closed
+    evTimer = setTimeout(connectEvents, evRetry);      // reconnect with backoff (1 s .. 30 s)
+    evRetry = Math.min(evRetry * 2, 30000);
+  };
+}
+function disconnectEvents() {
+  clearTimeout(evTimer); evTimer = null;
+  if (evSock) { const s = evSock; evSock = null; s.onclose = null; try { s.close(); } catch {} }
+}
+// After (re)connecting, anything may have changed while we weren't listening.
+function catchUp() {
+  refreshAdminBadge(); checkPendingDevices();
+  if (adminOpen()) { loadRequests(); loadInvites(); loadUsers(); }
+  if (LOCK_STATE === "pending") handleEvent("devices");
+}
+function handleEvent(t) {
+  if (t === "requests") soon("req", () => { refreshAdminBadge(); if (adminOpen()) loadRequests(); });
+  else if (t === "invites") soon("inv", () => { if (adminOpen()) loadInvites(); });
+  else if (t === "users") soon("usr", () => { if (adminOpen()) loadUsers(); });
+  else if (t === "devices") soon("dev", async () => {
+    if (LOCK_STATE === "pending") {
+      const s = await tryDeviceUnlock(uidNow());
+      if (s === "ok") afterUnlock("Approved · unlocked on this device");
+      else if (s === "none") { LOCK_STATE = "locked"; updateLockBanner(); toast("The request was declined"); }
+    }
+    checkPendingDevices();
+    if (settingsOpen()) loadDevices();
+  });
 }
 
 // ======================= Avatar / user menu =======================
@@ -1926,16 +1979,9 @@ async function removeAvatar() {
   renderAvatar(); toast("Picture removed");
 }
 
-// Admin page keeps itself current while it's open.
-let adminLive = null;
-function startAdminLive() {
-  stopAdminLive();
-  adminLive = setInterval(() => {
-    if ($("admin-tab").classList.contains("hidden") || document.hidden) return;
-    loadRequests(); loadInvites(); loadUsers(); refreshAdminBadge();
-  }, 6000);
-}
-function stopAdminLive() { if (adminLive) { clearInterval(adminLive); adminLive = null; } }
+// The Admin page is kept current by live events (see connectEvents), not by polling.
+function startAdminLive() {}
+function stopAdminLive() {}
 
 // ======================= Admin page =======================
 let SIGNUP_REQUESTS = false;
@@ -1977,7 +2023,7 @@ function infoBlock(title, sub, extra) {
   return info;
 }
 async function loadRequests() {
-  const list = $("req-list"); list.textContent = "";
+  const list = $("req-list"); const __g = beginList("req-list"); const __frag = document.createDocumentFragment();
   const { ok, body } = await api("/api/admin/requests", { headers: authHeaders() });
   const reqs = (ok && body && body.requests) || [];
   $("req-empty").classList.toggle("hidden", reqs.length > 0);
@@ -1996,11 +2042,13 @@ async function loadRequests() {
       if (!x.ok) { toast(prettyError(x.body) || "Couldn't deny"); return; }
       loadRequests(); refreshAdminBadge();
     }));
-    list.appendChild(li);
+    __frag.appendChild(li);
   }
+  if (isStale("req-list", __g)) return;
+  list.replaceChildren(__frag);
 }
 async function loadInvites() {
-  const list = $("inv-list"); list.textContent = "";
+  const list = $("inv-list"); const __g = beginList("inv-list"); const __frag = document.createDocumentFragment();
   const { ok, body } = await api("/api/admin/invites", { headers: authHeaders() });
   const invs = (ok && body && body.invites) || [];
   $("inv-empty").classList.toggle("hidden", invs.length > 0);
@@ -2015,8 +2063,10 @@ async function loadInvites() {
       if (!x.ok) { toast("Couldn't revoke"); return; }
       loadInvites();
     }));
-    list.appendChild(li);
+    __frag.appendChild(li);
   }
+  if (isStale("inv-list", __g)) return;
+  list.replaceChildren(__frag);
 }
 async function createInvite(e) {
   e.preventDefault();
@@ -2030,7 +2080,7 @@ async function createInvite(e) {
 }
 function fmtQuota(b) { return b == null ? "unlimited" : fmtSize(b); }
 async function loadUsers() {
-  const list = $("usr-list"); list.textContent = "";
+  const list = $("usr-list"); const __g = beginList("usr-list"); const __frag = document.createDocumentFragment();
   const { ok, body } = await api("/api/admin/users", { headers: authHeaders() });
   const users = (ok && body && body.users) || [];
   for (const u of users) {
@@ -2054,8 +2104,10 @@ async function loadUsers() {
       if (gb !== null && (!isFinite(gb) || gb < 0)) { toast("Enter a number of GB, or leave it blank"); return; }
       patchUser(u, { storageQuotaBytes: gb === null ? null : Math.round(gb * 1073741824) });
     }));
-    list.appendChild(li);
+    __frag.appendChild(li);
   }
+  if (isStale("usr-list", __g)) return;
+  list.replaceChildren(__frag);
 }
 async function patchUser(u, patch, question) {
   if (question && !confirm(question)) return;
@@ -2137,7 +2189,7 @@ async function changePassword(e) {
 }
 
 async function loadApiKeys() {
-  const list = $("key-list"); list.textContent = "";
+  const list = $("key-list"); const __g = beginList("key-list"); const __frag = document.createDocumentFragment();
   const { ok, body } = await api("/api/auth/api-keys", { headers: authHeaders() });
   const keys = (ok && body && body.keys) || [];
   $("key-empty").classList.toggle("hidden", keys.length > 0);
@@ -2156,8 +2208,10 @@ async function loadApiKeys() {
       if (!r.ok) { toast("Couldn't revoke"); return; }
       loadApiKeys();
     });
-    li.append(info, rm); list.appendChild(li);
+    li.append(info, rm); __frag.appendChild(li);
   }
+  if (isStale("key-list", __g)) return;
+  list.replaceChildren(__frag);
 }
 
 async function createApiKey(e) {
@@ -2253,15 +2307,17 @@ async function migrateLegacyNotes(notes) {
 }
 
 async function loadNotes() {
+  const g = beginList("note-list");
   const { ok, status, body } = await api("/api/notes", { headers: authHeaders() });
   if (status === 401) { showAuth(); return; }
   if (!ok || !body) { toast("Could not load notes."); return; }
-  const list = $("note-list");
-  list.textContent = "";
   const notes = body.notes || [];
   for (const n of notes) await hydrateNote(n);
+  if (isStale("note-list", g)) return;
+  const frag = document.createDocumentFragment();
+  for (const n of notes) frag.appendChild(noteCard(n));
   $("notes-empty").classList.toggle("hidden", notes.length > 0);
-  for (const n of notes) list.appendChild(noteCard(n));
+  $("note-list").replaceChildren(frag);
   migrateLegacyNotes(notes);   // background; doesn't block rendering
 }
 

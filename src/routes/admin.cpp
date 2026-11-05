@@ -1,6 +1,7 @@
 #include "routes/admin.h"
 #include "security/request_auth.h"
 #include "utils/logger.h"
+#include "routes/events.h"
 #include "security/crypto.h"
 #include <cctype>
 #include <ctime>
@@ -124,6 +125,7 @@ void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
         auto updated = db.findUserById(targetId);
         if (!updated) return http::jsonError(404, "user not found");
         auto [bytes, count] = db.usage(updated->id);
+        notifyAdmins("users");
         return http::jsonSuccess(updated->toAdminJson(bytes, count).dump());
     });
 
@@ -254,6 +256,7 @@ void registerSignupAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB
         if (!u || u->status != "pending") return http::jsonError(404, "no pending request with that id");
         if (!db.setUserStatus(id, "active")) return http::jsonError(500, "could not approve");
         utils::Logger::get_instance().info("signup: admin " + std::to_string(*adminId) + " approved " + u->email);
+        notifyAdmins("requests"); notifyAdmins("users");
         return http::jsonSuccess(R"({"ok":true})");
     });
 
@@ -266,6 +269,7 @@ void registerSignupAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB
         if (!u || u->status != "pending") return http::jsonError(404, "no pending request with that id");
         if (!db.deletePendingUser(id)) return http::jsonError(500, "could not deny");
         utils::Logger::get_instance().info("signup: admin " + std::to_string(*adminId) + " denied " + u->email);
+        notifyAdmins("requests");
         return http::jsonSuccess(R"({"ok":true})");
     });
 
@@ -310,6 +314,7 @@ void registerSignupAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB
         int64_t exp = days ? static_cast<int64_t>(::time(nullptr)) + days * 86400 : 0;
         int64_t id = db.createInvite(security::Crypto::sha256Hex(norm), label, *adminId, exp);
         if (id < 0) return http::jsonError(500, "could not create invite");
+        notifyAdmins("invites");
         return http::jsonSuccess(json{{"code", code}, {"invite", {{"id", id}, {"label", label}, {"expiresAt", exp}, {"state", "open"}}}}.dump());
     });
 
@@ -318,6 +323,7 @@ void registerSignupAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB
         crow::response err;
         if (!requireAdmin(req, db, err)) return err;
         if (!db.revokeInvite(id)) return http::jsonError(404, "no unused invite with that id");
+        notifyAdmins("invites");
         return http::jsonSuccess(R"({"ok":true})");
     });
 }

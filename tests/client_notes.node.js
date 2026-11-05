@@ -55,7 +55,7 @@ async function main() {
   const noopStore = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; };
   const toasts = [];
   const ctx = vm.createContext({
-    document: { getElementById: (id) => (els[id] ||= makeEl()), createElement: () => makeEl(),
+    document: { getElementById: (id) => (els[id] ||= makeEl()), createElement: () => makeEl(), createDocumentFragment: () => makeEl(),
       querySelectorAll: () => [], addEventListener() {}, body: makeEl() },
     window: { addEventListener() {} }, navigator: {}, localStorage: noopStore(), sessionStorage: noopStore(),
     fetch: (u, o = {}) => fetch(BASE + u, { ...o, headers: { ...(o.headers || {}), authorization: "Bearer " + token } }),

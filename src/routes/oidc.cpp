@@ -6,6 +6,7 @@
 #include "security/request_auth.h"
 #include "core/config.h"
 #include "utils/logger.h"
+#include "routes/events.h"
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -146,6 +147,7 @@ void registerOidcRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, i
             if (defaultQuotaGb > 0) db.setUserQuota(id, defaultQuotaGb * 1024 * 1024 * 1024);
             if (!db.linkIdentity(id, issuer, c->sub, email)) return fail("create-failed");
             utils::Logger::get_instance().info("OIDC: created account " + std::to_string(id) + " via SSO");
+            notifyAdmins("users");
             userId = id;
         }
 
