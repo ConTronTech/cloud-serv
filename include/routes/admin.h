@@ -43,6 +43,15 @@ namespace routes {
 //   POST   /api/admin/users/<id>/wipe     {confirmEmail}  -> {wiped,storageRemoved,backupRemoved}
 //     PERMANENT: deletes the account, its data and (if removed) its backup.
 // wipe requires confirmEmail to equal the account's email exactly.
+// Sign-up approval queue + one-time invite codes (admin + session only):
+//   GET    /api/admin/requests                 -> {requests:[{id,email,displayName,createdAt,ip,note}]}
+//   POST   /api/admin/requests/<id>/approve    -> {ok}
+//   POST   /api/admin/requests/<id>/deny       -> {ok}     (deletes the pending account)
+//   GET    /api/admin/invites                  -> {invites:[...]}   (codes are never shown again)
+//   POST   /api/admin/invites  {label?, expiresDays?}  -> {code, invite}   (code shown ONCE)
+//   DELETE /api/admin/invites/<id>             -> {ok}     (only while unused)
+void registerSignupAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db);
+
 void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
                          FileStore& store, const std::string& backupRoot);
 

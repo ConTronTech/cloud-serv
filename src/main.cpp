@@ -150,6 +150,7 @@ int main(int argc, char* argv[]) {
         routes::registerUploadRoutes(app, db, store, maxFileBytes);
         std::string backupDir = config.get("env", "BACKUP_DIR", "data/backups");
         routes::registerAdminRoutes(app, db, store, backupDir);
+        routes::registerSignupAdminRoutes(app, db);
 
         // Serve the PWA (same-origin with the API).
         std::string web_dir = config.get("env", "WEB_DIR", "web");

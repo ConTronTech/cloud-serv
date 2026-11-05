@@ -30,8 +30,13 @@
           <input id="display-name" type="text" autocomplete="name" placeholder="optional" />
         </label>
         <label id="invite-row" class="field hidden">
-          <span>Invite code</span>
-          <input id="invite-code" type="text" autocomplete="off" required placeholder="from the server owner" />
+          <span id="invite-label">Invite code</span>
+          <input id="invite-code" type="text" autocomplete="off" required placeholder="CTT-XXXX-XXXX-XXXX" />
+          <small id="invite-hint" class="field-hint hidden">No code? Leave it blank to request access. An admin approves it before you can log in.</small>
+        </label>
+        <label id="note-row" class="field hidden">
+          <span>Message for the admin (optional)</span>
+          <input id="signup-note" type="text" maxlength="300" autocomplete="off" placeholder="Who you are, so they know it's you" />
         </label>
         <label class="field">
           <span>Email</span>
@@ -70,6 +75,7 @@
         <div class="side-divider"></div>
         <button id="nav-notes" class="side-item" type="button">Notes</button>
         <button id="nav-settings" class="side-item" type="button">Settings</button>
+        <button id="nav-admin" class="side-item hidden" type="button">Admin <span id="admin-badge" class="nav-badge hidden">0</span></button>
       </nav>
       <div class="side-foot">
         <div id="storage-chip" class="storage-chip"></div>
@@ -141,6 +147,43 @@
 
         <ul id="fs-list" class="fs-list"></ul>
         <p id="fs-empty" class="muted empty hidden">This folder is empty.</p>
+      </div>
+
+      <!-- ===== Admin tab ===== -->
+      <div id="admin-tab" class="hidden settings">
+        <h2 class="settings-h">Admin</h2>
+
+        <section class="set-card">
+          <h3>Sign-up requests</h3>
+          <p class="muted small-print">People who registered without an invite code. They can't log in until you approve them. Deny deletes the request.</p>
+          <ul id="req-list" class="key-list"></ul>
+          <p id="req-empty" class="muted small-print hidden">Nobody waiting.</p>
+        </section>
+
+        <section class="set-card">
+          <h3>Invite codes</h3>
+          <p class="muted small-print">Each code works once and skips the approval queue. It's shown only when you create it.</p>
+          <form id="inv-form" class="set-row">
+            <label class="field grow"><span>Who it's for (optional)</span><input id="inv-label" type="text" maxlength="80" placeholder="e.g. Bently" /></label>
+            <label class="field"><span>Expires</span>
+              <select id="inv-days" class="set-select"><option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option><option value="0">Never</option></select></label>
+            <button class="btn primary small" type="submit">Create code</button>
+          </form>
+          <div id="inv-new" class="key-new hidden">
+            <div class="muted small-print">Send this to them now. It won't be shown again, and it works once.</div>
+            <code id="inv-new-value" class="key-value inv-code"></code>
+            <div class="set-actions"><button id="inv-copy" class="btn ghost small" type="button">Copy</button>
+              <button id="inv-done" class="btn primary small" type="button">Done</button></div>
+          </div>
+          <ul id="inv-list" class="key-list"></ul>
+          <p id="inv-empty" class="muted small-print hidden">No invite codes yet.</p>
+        </section>
+
+        <section class="set-card">
+          <h3>Users</h3>
+          <p class="muted small-print">Admins manage accounts only: nobody here can read anyone's encrypted files or notes.</p>
+          <ul id="usr-list" class="key-list"></ul>
+        </section>
       </div>
 
       <!-- ===== Settings tab ===== -->

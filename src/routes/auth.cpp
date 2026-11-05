@@ -64,9 +64,18 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         "Your data has been temporarily removed. To get it back, please appeal.");
     const std::string appealContact = core::Config::get_instance().get("env", "APPEAL_CONTACT", "");
 
+    // Anyone may ask for an account; it stays "pending" until an admin approves it.
+    const bool requestsOn = core::Config::get_instance().get_bool("env", "REGISTRATION_REQUESTS", false);
+
+    // What the register screen should offer.
+    CROW_ROUTE(app, "/api/auth/signup-mode").methods(crow::HTTPMethod::GET)
+    ([&db, requestsOn]() {
+        return http::jsonSuccess(json{{"requests", requestsOn && db.countAdmins() > 0}}.dump());
+    });
+
     // ---- Register ----
     CROW_ROUTE(app, "/api/auth/register").methods(crow::HTTPMethod::POST)
-    ([&db, sessionSeconds, inviteCode, defaultQuotaBytes](const crow::request& req) {
+    ([&db, sessionSeconds, inviteCode, defaultQuotaBytes, requestsOn](const crow::request& req) {
         json body; std::string err;
         if (!parseJsonObject(req, body, err)) return http::jsonError(400, err);
 
@@ -78,21 +87,56 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         if (!isValidEmail(email)) return http::jsonError(400, "invalid email");
         if (password.size() < 8) return http::jsonError(400, "password must be at least 8 characters");
 
-        // Wrong invite code, registration disabled (empty config) and an already-taken
-        // email all yield the identical generic 403, so none can be told apart (no
-        // email enumeration). The (expensive) hash is only paid once the invite code checks out.
-        bool inviteOk = !inviteCode.empty() &&
-            security::Crypto::constantTimeEquals(strField(body, "inviteCode"), inviteCode);
-        if (!inviteOk) return http::jsonError(403, "registration is not open");
+        // Three ways in: the legacy shared code from config, a one-time invite code from
+        // the Admin page, or (no code at all) a sign-up request an admin must approve.
+        // Wrong codes, closed registration and a taken email all give the same generic
+        // answer, so none can be told apart (no email enumeration).
+        const std::string code = strField(body, "inviteCode");
+        bool legacyOk = !inviteCode.empty() && !code.empty() &&
+            security::Crypto::constantTimeEquals(code, inviteCode);
+        std::optional<int64_t> inviteId;
+        if (!legacyOk && !code.empty()) {
+            std::string norm;
+            for (unsigned char ch : code) if (std::isalnum(ch)) norm += static_cast<char>(std::toupper(ch));
+            if (!norm.empty() && norm.size() <= 64) inviteId = db.findUsableInvite(security::Crypto::sha256Hex(norm));
+        }
+        const bool viaInvite = legacyOk || inviteId.has_value();
+        const bool asRequest = !viaInvite && code.empty() && requestsOn;
+        if (!viaInvite && !asRequest) return http::jsonError(403, "registration is not open");
+        if (asRequest) {
+            // Requests need someone to approve them (and the very first account would
+            // otherwise be auto-promoted to admin), and the queue is capped.
+            if (db.countAdmins() == 0) return http::jsonError(403, "registration is not open");
+            if (db.countUsersWithStatus("pending") >= 25)
+                return http::jsonError(429, "too many sign-up requests waiting; try again later");
+        }
         std::string pwHash = security::Crypto::hashPassword(password);
         int64_t userId = db.createUser(email, displayName, pwHash);
-        if (userId < 0) return http::jsonError(403, "registration is not open");
+        if (userId < 0) {
+            if (asRequest) { auto r = http::jsonSuccess(R"({"pending":true})"); r.code = 202; return r; }   // same answer as a real request
+            return http::jsonError(403, "registration is not open");
+        }
+        if (asRequest) db.setUserStatus(userId, "pending");
+        if (inviteId && !db.consumeInvite(*inviteId, userId)) {   // lost a race for the same code
+            db.setUserStatus(userId, "pending");
+            db.deletePendingUser(userId);
+            return http::jsonError(403, "registration is not open");
+        }
         if (defaultQuotaBytes.has_value()) db.setUserQuota(userId, defaultQuotaBytes);
 
         // E2E key material — client-generated, opaque to us. Stored so we can hand
         // it back at login; without the user's password/recovery key it's useless.
         db.setUserKeys(userId, strField(body, "salt"),
                        strField(body, "wrappedDek"), strField(body, "wrappedDekRecovery"));
+
+        if (asRequest) {
+            std::string note;
+            for (unsigned char ch : strField(body, "note")) if (ch >= 0x20 && ch != 0x7f) note += static_cast<char>(ch);
+            if (note.size() > 300) note.resize(300);
+            db.setSignupInfo(userId, req.remote_ip_address, note);
+            utils::Logger::get_instance().info("signup: request from " + email + " waiting for approval");
+            auto r = http::jsonSuccess(R"({"pending":true})"); r.code = 202; return r;
+        }
 
         // Issue a session token immediately so registration logs the user in.
         std::string token = security::Crypto::randomHex(32);
@@ -174,6 +218,12 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
             json out = {{"error", "account data removed"}, {"code", "data_removed"},
                         {"notice", removedNotice}, {"appealContact", appealContact}};
             if (auto rec = db.getRemovalFor(user->id); rec && !rec->reason.empty()) out["reason"] = rec->reason;
+            crow::response res(403, out.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        }
+        if (user->status == "pending") {
+            json out = {{"error", "your sign-up is waiting for an admin to approve it"}, {"code", "pending"}};
             crow::response res(403, out.dump());
             res.set_header("Content-Type", "application/json");
             return res;

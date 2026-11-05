@@ -129,7 +129,7 @@ function showApp(user) {
     if (DEK_RAW && trustThisBrowser()) { try { await enrollThisDevice(uidNow()); } catch {} }
     checkPendingDevices();
   });
-  if (!pendingPoll) pendingPoll = setInterval(checkPendingDevices, 30000);
+  if (!pendingPoll) pendingPoll = setInterval(() => { checkPendingDevices(); refreshAdminBadge(); }, 30000);
   loadFs(0); // land on Files
 }
 
@@ -141,8 +141,11 @@ function setMode(m) {
   $("tab-register").classList.toggle("active", !login);
   $("name-row").classList.toggle("hidden", login);
   $("invite-row").classList.toggle("hidden", login);
-  $("invite-code").required = !login;
-  $("auth-submit").textContent = login ? "Log in" : "Create account";
+  $("invite-code").required = !login && !SIGNUP_REQUESTS;
+  $("invite-label").textContent = SIGNUP_REQUESTS ? "Invite code (optional)" : "Invite code";
+  $("invite-hint").classList.toggle("hidden", login || !SIGNUP_REQUESTS);
+  $("note-row").classList.toggle("hidden", login || !SIGNUP_REQUESTS);
+  $("auth-submit").textContent = login ? "Log in" : (SIGNUP_REQUESTS ? "Create account / request access" : "Create account");
   $("password").setAttribute("autocomplete", login ? "current-password" : "new-password");
   $("auth-error").textContent = "";
 }
@@ -370,8 +373,10 @@ async function e2eRegister(email, password, displayName, inviteCode) {
   const wrappedDekRecovery = await wrapBytes(dekRaw, await importAes(recRaw));
   const { ok, body } = await api("/api/auth/register", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password: authKeyB64, displayName, inviteCode, salt: saltHex, wrappedDek, wrappedDekRecovery }),
+    body: JSON.stringify({ email, password: authKeyB64, displayName, inviteCode, salt: saltHex, wrappedDek, wrappedDekRecovery,
+                           note: ($("signup-note") ? $("signup-note").value.trim() : "") }),
   });
+  if (ok && body && body.pending) return { ok: true, pending: true, recoveryKey: "csr_" + toB64(recRaw) };
   if (!ok || !body || !body.token) return { ok: false, body };
   setDEK(dekRaw);
   return { ok: true, token: body.token, user: body.user, recoveryKey: "csr_" + toB64(recRaw) };
@@ -408,6 +413,14 @@ async function onAuthSubmit(e) {
 
   if (!r.ok) { $("auth-error").textContent = prettyError(r.body) || "Something went wrong."; return; }
   $("password").value = "";
+  if (r.pending) {
+    clearDEK();
+    showRecoveryKey(r.recoveryKey, { email }, () => {
+      setMode("login");
+      $("auth-error").textContent = "Request sent. You can log in once an admin approves it.";
+    });
+    return;
+  }
   if (mode === "register" && r.recoveryKey) showRecoveryKey(r.recoveryKey, r.user);
   else showApp(r.user);
 }
@@ -434,7 +447,7 @@ function prettyError(body) {
 }
 
 // One-time recovery key screen shown after registration.
-function showRecoveryKey(key, user) {
+function showRecoveryKey(key, user, onContinue) {
   $("recovery-key").textContent = key;
   $("recovery-modal").classList.remove("hidden");
   $("recovery-download").onclick = () => {
@@ -446,7 +459,7 @@ function showRecoveryKey(key, user) {
     a.href = URL.createObjectURL(blob); a.download = "cloud-serv-recovery-key.txt";
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
   };
-  $("recovery-continue").onclick = () => { $("recovery-modal").classList.add("hidden"); showApp(user); };
+  $("recovery-continue").onclick = () => { $("recovery-modal").classList.add("hidden"); if (onContinue) onContinue(); else showApp(user); };
 }
 
 async function logout() {
@@ -1524,16 +1537,17 @@ let editingNoteId = null;
 
 // ---- sidebar navigation ----
 function setActiveNav(nav) {
-  ["files", "recent", "starred", "notes", "settings"].forEach((n) => {
+  ["files", "recent", "starred", "notes", "settings", "admin"].forEach((n) => {
     const el = $("nav-" + n); if (el) el.classList.toggle("active", n === nav);
   });
 }
-function showFilesTab() { $("files-tab").classList.remove("hidden"); $("notes-tab").classList.add("hidden"); $("settings-tab").classList.add("hidden"); }
+function showFilesTab() { $("files-tab").classList.remove("hidden"); ["notes-tab", "settings-tab", "admin-tab"].forEach((t) => $(t).classList.add("hidden")); }
 
 function goNotes() {
   setActiveNav("notes");
   $("files-tab").classList.add("hidden");
   $("settings-tab").classList.add("hidden");
+  $("admin-tab").classList.add("hidden");
   $("notes-tab").classList.remove("hidden");
   showNotesList(); loadNotes();
   closeSidebar();
@@ -1830,7 +1844,7 @@ async function loadDevices() {
 
 async function refreshMe() {
   const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
-  if (ok && body) ME = body;
+  if (ok && body) { ME = body; updateAdminNav(); }
   updateLockBanner();
   return ok ? body : null;
 }
@@ -1860,11 +1874,136 @@ async function loadIdentities() {
   }
 }
 
+// ======================= Admin page =======================
+let SIGNUP_REQUESTS = false;
+async function loadSignupMode() {
+  const { ok, body } = await api("/api/auth/signup-mode");
+  SIGNUP_REQUESTS = !!(ok && body && body.requests);
+  if (mode === "register") setMode("register");
+}
+function isAdmin() { return !!(ME && ME.user && ME.user.role === "admin"); }
+function updateAdminNav() {
+  $("nav-admin").classList.toggle("hidden", !isAdmin());
+  if (isAdmin()) refreshAdminBadge();
+}
+async function refreshAdminBadge() {
+  if (!isAdmin()) return;
+  const { ok, body } = await api("/api/admin/requests", { headers: authHeaders() });
+  const n = ok && body ? (body.requests || []).length : 0;
+  const bd = $("admin-badge"); bd.textContent = n; bd.classList.toggle("hidden", n === 0);
+}
+function goAdmin() {
+  setActiveNav("admin");
+  ["files-tab", "notes-tab", "settings-tab"].forEach((t) => $(t).classList.add("hidden"));
+  $("admin-tab").classList.remove("hidden");
+  closeSidebar();
+  loadRequests(); loadInvites(); loadUsers();
+}
+function rowBtn(label, cls, fn) {
+  const b = document.createElement("button"); b.type = "button"; b.className = "btn small " + cls; b.textContent = label;
+  b.addEventListener("click", fn); return b;
+}
+function infoBlock(title, sub, extra) {
+  const info = document.createElement("div"); info.className = "key-info";
+  const nm = document.createElement("div"); nm.className = "key-name"; nm.textContent = title;
+  const sb = document.createElement("div"); sb.className = "key-sub"; sb.textContent = sub;
+  info.append(nm, sb);
+  if (extra) { const ex = document.createElement("div"); ex.className = "req-note"; ex.textContent = extra; info.append(ex); }
+  return info;
+}
+async function loadRequests() {
+  const list = $("req-list"); list.textContent = "";
+  const { ok, body } = await api("/api/admin/requests", { headers: authHeaders() });
+  const reqs = (ok && body && body.requests) || [];
+  $("req-empty").classList.toggle("hidden", reqs.length > 0);
+  for (const r of reqs) {
+    const li = document.createElement("li"); li.className = "key-row";
+    li.append(infoBlock((r.displayName || r.email) + " · " + r.email,
+      "asked " + fmtDate(r.createdAt) + (r.ip ? " · from " + r.ip : ""), r.note ? "“" + r.note + "”" : ""));
+    li.append(rowBtn("Approve", "primary", async () => {
+      const x = await api("/api/admin/requests/" + r.id + "/approve", { method: "POST", headers: authHeaders() });
+      if (!x.ok) { toast(prettyError(x.body) || "Couldn't approve"); return; }
+      toast(r.email + " approved"); loadRequests(); loadUsers(); refreshAdminBadge();
+    }));
+    li.append(rowBtn("Deny", "ghost", async () => {
+      if (!confirm(`Deny ${r.email}? Their pending account is deleted (they can ask again).`)) return;
+      const x = await api("/api/admin/requests/" + r.id + "/deny", { method: "POST", headers: authHeaders() });
+      if (!x.ok) { toast(prettyError(x.body) || "Couldn't deny"); return; }
+      loadRequests(); refreshAdminBadge();
+    }));
+    list.appendChild(li);
+  }
+}
+async function loadInvites() {
+  const list = $("inv-list"); list.textContent = "";
+  const { ok, body } = await api("/api/admin/invites", { headers: authHeaders() });
+  const invs = (ok && body && body.invites) || [];
+  $("inv-empty").classList.toggle("hidden", invs.length > 0);
+  for (const v of invs) {
+    const li = document.createElement("li"); li.className = "key-row inv-" + v.state;
+    const when = v.state === "used" ? "used by " + v.usedBy + " · " + fmtDate(v.usedAt)
+      : v.state === "expired" ? "expired" : v.expiresAt ? "expires " + new Date(v.expiresAt * 1000).toLocaleDateString() : "never expires";
+    li.append(infoBlock(v.label || "Invite #" + v.id, (v.state === "open" ? "Unused · " : "") + when + " · made " + fmtDate(v.createdAt)));
+    if (v.state === "open") li.append(rowBtn("Revoke", "ghost", async () => {
+      if (!confirm("Revoke this invite? The code stops working.")) return;
+      const x = await api("/api/admin/invites/" + v.id, { method: "DELETE", headers: authHeaders() });
+      if (!x.ok) { toast("Couldn't revoke"); return; }
+      loadInvites();
+    }));
+    list.appendChild(li);
+  }
+}
+async function createInvite(e) {
+  e.preventDefault();
+  const { ok, body } = await api("/api/admin/invites", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ label: $("inv-label").value.trim(), expiresDays: parseInt($("inv-days").value, 10) }) });
+  if (!ok || !body || !body.code) { toast(prettyError(body) || "Couldn't create invite"); return; }
+  $("inv-label").value = "";
+  $("inv-new-value").textContent = body.code;
+  $("inv-new").classList.remove("hidden");
+  loadInvites();
+}
+function fmtQuota(b) { return b == null ? "unlimited" : fmtSize(b); }
+async function loadUsers() {
+  const list = $("usr-list"); list.textContent = "";
+  const { ok, body } = await api("/api/admin/users", { headers: authHeaders() });
+  const users = (ok && body && body.users) || [];
+  for (const u of users) {
+    if (u.status === "pending") continue;   // shown under Sign-up requests
+    const me = ME && ME.user && ME.user.id === u.id;
+    const li = document.createElement("li"); li.className = "key-row" + (u.status !== "active" ? " usr-off" : "");
+    li.append(infoBlock((u.displayName || u.email) + " · " + u.email + (me ? "  (you)" : ""),
+      (u.role === "admin" ? "Admin" : "User") + " · " + u.status + " · " + fmtSize(u.storageUsedBytes || 0) + " of " + fmtQuota(u.storageQuotaBytes) +
+      " · " + (u.fileCount || 0) + " files"));
+    if (!me && u.status !== "removed") {
+      li.append(rowBtn(u.status === "suspended" ? "Unsuspend" : "Suspend", "ghost", () => patchUser(u, { suspended: u.status !== "suspended" },
+        u.status === "suspended" ? null : `Suspend ${u.email}? They're signed out everywhere and can't log in.`)));
+      li.append(rowBtn(u.role === "admin" ? "Make user" : "Make admin", "ghost", () => patchUser(u, { role: u.role === "admin" ? "user" : "admin" },
+        u.role === "admin" ? null : `Make ${u.email} an admin? They'll be able to approve people and manage accounts.`)));
+    }
+    li.append(rowBtn("Quota", "ghost", () => {
+      const cur = u.storageQuotaBytes == null ? "" : String(Math.round(u.storageQuotaBytes / 1073741824 * 10) / 10);
+      const v = prompt(`Storage quota for ${u.email} in GB (blank = unlimited):`, cur);
+      if (v === null) return;
+      const gb = v.trim() === "" ? null : Number(v);
+      if (gb !== null && (!isFinite(gb) || gb < 0)) { toast("Enter a number of GB, or leave it blank"); return; }
+      patchUser(u, { storageQuotaBytes: gb === null ? null : Math.round(gb * 1073741824) });
+    }));
+    list.appendChild(li);
+  }
+}
+async function patchUser(u, patch, question) {
+  if (question && !confirm(question)) return;
+  const x = await api("/api/admin/users/" + u.id, { method: "PATCH", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify(patch) });
+  if (!x.ok) { toast(prettyError(x.body) || "Couldn't update"); return; }
+  loadUsers();
+}
+
 // ---- Settings ----
 let ME = null;
 function goSettings() {
   setActiveNav("settings");
-  $("files-tab").classList.add("hidden"); $("notes-tab").classList.add("hidden");
+  $("files-tab").classList.add("hidden"); $("notes-tab").classList.add("hidden"); $("admin-tab").classList.add("hidden");
   $("settings-tab").classList.remove("hidden");
   closeSidebar();
   loadSettings();
@@ -2170,6 +2309,12 @@ async function boot() {
   $("nav-starred").addEventListener("click", () => loadView("starred"));
   $("nav-notes").addEventListener("click", goNotes);
   $("nav-settings").addEventListener("click", goSettings);
+  $("nav-admin").addEventListener("click", goAdmin);
+  $("inv-form").addEventListener("submit", createInvite);
+  $("inv-copy").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText($("inv-new-value").textContent); toast("Copied"); } catch { toast("Copy failed: select it and copy manually"); }
+  });
+  $("inv-done").addEventListener("click", () => { $("inv-new").classList.add("hidden"); $("inv-new-value").textContent = ""; });
   $("set-name-form").addEventListener("submit", saveDisplayName);
   $("pw-form").addEventListener("submit", changePassword);
   $("key-form").addEventListener("submit", createApiKey);
@@ -2227,6 +2372,7 @@ async function boot() {
   $("sso-btn").addEventListener("click", () => { location.href = "/api/auth/oidc/start"; });
   $("ids-link").addEventListener("click", () => { location.href = "/api/auth/oidc/start?mode=link"; });
   await loadSsoConfig();
+  await loadSignupMode();
 
   // Coming back from the sign-in provider?
   const h = hashParam();

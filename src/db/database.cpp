@@ -105,6 +105,16 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_session_hash ON sessions(token_hash);
+            CREATE TABLE IF NOT EXISTS invites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code_hash TEXT UNIQUE NOT NULL,
+                label TEXT DEFAULT '',
+                created_by INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                expires_at INTEGER DEFAULT 0,
+                used_at DATETIME,
+                used_by INTEGER
+            );
             CREATE TABLE IF NOT EXISTS devices (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -249,6 +259,8 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN encrypt_files INTEGER;", nullptr, nullptr, nullptr);
         // 0 = account was created through SSO and has no usable local password.
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN local_login INTEGER NOT NULL DEFAULT 1;", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN signup_ip TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN signup_note TEXT DEFAULT '';", nullptr, nullptr, nullptr);
 
         // Admin bootstrap: if this DB has no admin yet, promote the earliest
         // (lowest-id) account. Runs every startup but is a no-op once an admin
@@ -559,6 +571,152 @@ CloudDB::Device readDevice(Stmt& q) {
 }
 const char* kDeviceCols = "id, user_id, name, public_key, wrapped_dek, status, created_at, COALESCE(last_used_at,''), created_ip";
 } // namespace
+
+int64_t CloudDB::createInvite(const std::string& codeHash, const std::string& label, int64_t createdBy, int64_t expiresAtEpoch) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "INSERT INTO invites(code_hash, label, created_by, expires_at) VALUES(?, ?, ?, ?)");
+        q.bind(1, codeHash); q.bind(2, label); q.bind(3, createdBy); q.bind(4, expiresAtEpoch);
+        if (sqlite3_step(q.s) != SQLITE_DONE) return -1;
+        return sqlite3_last_insert_rowid(c.h);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("createInvite: " + std::string(e.what()));
+        return -1;
+    }
+}
+
+std::vector<CloudDB::Invite> CloudDB::listInvites() {
+    std::shared_lock lock(db_mutex_);
+    std::vector<Invite> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT i.id, i.label, i.created_by, i.created_at, i.expires_at, COALESCE(i.used_at,''), COALESCE(u.email,'') "
+                    "FROM invites i LEFT JOIN users u ON u.id = i.used_by ORDER BY i.id DESC LIMIT 200");
+        while (q.step()) {
+            Invite v; v.id = q.colInt64(0); v.label = q.colText(1); v.created_by = q.colInt64(2); v.created_at = q.colText(3);
+            int64_t exp = q.colInt64(4); v.expires_at = exp ? std::to_string(exp) : "";
+            v.used_at = q.colText(5); v.used_by_email = q.colText(6);
+            out.push_back(v);
+        }
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("listInvites: " + std::string(e.what()));
+    }
+    return out;
+}
+
+bool CloudDB::revokeInvite(int64_t id) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "DELETE FROM invites WHERE id = ? AND used_at IS NULL");
+        q.bind(1, id); q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("revokeInvite: " + std::string(e.what()));
+        return false;
+    }
+}
+
+std::optional<int64_t> CloudDB::findUsableInvite(const std::string& codeHash) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id FROM invites WHERE code_hash = ? AND used_at IS NULL "
+                    "AND (expires_at = 0 OR expires_at > CAST(strftime('%s','now') AS INTEGER))");
+        q.bind(1, codeHash);
+        if (!q.step()) return std::nullopt;
+        return q.colInt64(0);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("findUsableInvite: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::consumeInvite(int64_t inviteId, int64_t userId) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE invites SET used_at = CURRENT_TIMESTAMP, used_by = ? WHERE id = ? AND used_at IS NULL "
+                    "AND (expires_at = 0 OR expires_at > CAST(strftime('%s','now') AS INTEGER))");
+        q.bind(1, userId); q.bind(2, inviteId); q.exec();
+        return sqlite3_changes(c.h) == 1;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("consumeInvite: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::setUserStatus(int64_t userId, const std::string& status) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET status = ? WHERE id = ?");
+        q.bind(1, status); q.bind(2, userId); q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setUserStatus: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::setSignupInfo(int64_t userId, const std::string& ip, const std::string& note) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET signup_ip = ?, signup_note = ? WHERE id = ?");
+        q.bind(1, ip); q.bind(2, note); q.bind(3, userId); q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setSignupInfo: " + std::string(e.what()));
+        return false;
+    }
+}
+
+std::vector<CloudDB::SignupRequest> CloudDB::listPendingSignups() {
+    std::shared_lock lock(db_mutex_);
+    std::vector<SignupRequest> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id, email, display_name, created_at, COALESCE(signup_ip,''), COALESCE(signup_note,'') "
+                    "FROM users WHERE status = 'pending' ORDER BY id");
+        while (q.step()) {
+            SignupRequest r; r.id = q.colInt64(0); r.email = q.colText(1); r.display_name = q.colText(2);
+            r.created_at = q.colText(3); r.ip = q.colText(4); r.note = q.colText(5);
+            out.push_back(r);
+        }
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("listPendingSignups: " + std::string(e.what()));
+    }
+    return out;
+}
+
+bool CloudDB::deletePendingUser(int64_t userId) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        sqlite3_exec(c.h, "PRAGMA foreign_keys = ON;", nullptr, nullptr, nullptr);
+        Stmt q(c.h, "DELETE FROM users WHERE id = ? AND status = 'pending'");
+        q.bind(1, userId); q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("deletePendingUser: " + std::string(e.what()));
+        return false;
+    }
+}
+
+int CloudDB::countUsersWithStatus(const std::string& status) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT COUNT(*) FROM users WHERE status = ?");
+        q.bind(1, status); q.step();
+        return static_cast<int>(q.colInt64(0));
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("countUsersWithStatus: " + std::string(e.what()));
+        return 0;
+    }
+}
 
 int64_t CloudDB::createDevice(int64_t userId, const std::string& name, const std::string& publicKey,
                               const std::string& wrappedDek, const std::string& ip) {

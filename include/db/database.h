@@ -48,6 +48,20 @@ public:
     bool setLocalLogin(int64_t userId, bool on);
     bool hasLocalLogin(int64_t userId);
 
+    // ---- Sign-up: one-time invite codes + approval queue ----
+    struct Invite { int64_t id = 0; std::string label, created_at, expires_at, used_at, used_by_email; int64_t created_by = 0; };
+    struct SignupRequest { int64_t id = 0; std::string email, display_name, created_at, ip, note; };
+    int64_t createInvite(const std::string& codeHash, const std::string& label, int64_t createdBy, int64_t expiresAtEpoch); // 0 = never
+    std::vector<Invite> listInvites();
+    bool revokeInvite(int64_t id);                                    // only while unused
+    std::optional<int64_t> findUsableInvite(const std::string& codeHash);
+    bool consumeInvite(int64_t inviteId, int64_t userId);            // atomic single use
+    bool setUserStatus(int64_t userId, const std::string& status);
+    bool setSignupInfo(int64_t userId, const std::string& ip, const std::string& note);
+    std::vector<SignupRequest> listPendingSignups();
+    bool deletePendingUser(int64_t userId);                           // deny: only status 'pending'
+    int  countUsersWithStatus(const std::string& status);
+
     // ---- Trusted devices (per-browser key pairs; server stores only sealed copies of the DEK) ----
     struct Device { int64_t id = 0; int64_t user_id = 0; std::string name, public_key, wrapped_dek, status, created_at, last_used_at, created_ip; };
     int64_t createDevice(int64_t userId, const std::string& name, const std::string& publicKey,

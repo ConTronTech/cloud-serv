@@ -1,6 +1,9 @@
 #include "routes/admin.h"
 #include "security/request_auth.h"
 #include "utils/logger.h"
+#include "security/crypto.h"
+#include <cctype>
+#include <ctime>
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -227,6 +230,95 @@ void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
                                                std::to_string(targetId) + " could not be deleted");
         return http::jsonSuccess(json{{"wiped", true}, {"storageRemoved", storageRemoved},
                                       {"backupRemoved", r.backupRemoved}}.dump());
+    });
+}
+
+void registerSignupAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db) {
+    CROW_ROUTE(app, "/api/admin/requests").methods(crow::HTTPMethod::GET)
+    ([&db](const crow::request& req) {
+        crow::response err;
+        if (!requireAdmin(req, db, err)) return err;
+        json list = json::array();
+        for (const auto& r : db.listPendingSignups())
+            list.push_back({{"id", r.id}, {"email", r.email}, {"displayName", r.display_name},
+                            {"createdAt", r.created_at}, {"ip", r.ip}, {"note", r.note}});
+        return http::jsonSuccess(json{{"requests", list}}.dump());
+    });
+
+    CROW_ROUTE(app, "/api/admin/requests/<int>/approve").methods(crow::HTTPMethod::POST)
+    ([&db](const crow::request& req, int id) {
+        crow::response err;
+        auto adminId = requireAdmin(req, db, err);
+        if (!adminId) return err;
+        auto u = db.findUserById(id);
+        if (!u || u->status != "pending") return http::jsonError(404, "no pending request with that id");
+        if (!db.setUserStatus(id, "active")) return http::jsonError(500, "could not approve");
+        utils::Logger::get_instance().info("signup: admin " + std::to_string(*adminId) + " approved " + u->email);
+        return http::jsonSuccess(R"({"ok":true})");
+    });
+
+    CROW_ROUTE(app, "/api/admin/requests/<int>/deny").methods(crow::HTTPMethod::POST)
+    ([&db](const crow::request& req, int id) {
+        crow::response err;
+        auto adminId = requireAdmin(req, db, err);
+        if (!adminId) return err;
+        auto u = db.findUserById(id);
+        if (!u || u->status != "pending") return http::jsonError(404, "no pending request with that id");
+        if (!db.deletePendingUser(id)) return http::jsonError(500, "could not deny");
+        utils::Logger::get_instance().info("signup: admin " + std::to_string(*adminId) + " denied " + u->email);
+        return http::jsonSuccess(R"({"ok":true})");
+    });
+
+    CROW_ROUTE(app, "/api/admin/invites").methods(crow::HTTPMethod::GET)
+    ([&db](const crow::request& req) {
+        crow::response err;
+        if (!requireAdmin(req, db, err)) return err;
+        const int64_t now = static_cast<int64_t>(::time(nullptr));
+        json list = json::array();
+        for (const auto& v : db.listInvites()) {
+            int64_t exp = v.expires_at.empty() ? 0 : std::stoll(v.expires_at);
+            std::string state = !v.used_at.empty() ? "used" : (exp && exp <= now) ? "expired" : "open";
+            list.push_back({{"id", v.id}, {"label", v.label}, {"createdAt", v.created_at}, {"expiresAt", exp},
+                            {"usedAt", v.used_at}, {"usedBy", v.used_by_email}, {"state", state}});
+        }
+        return http::jsonSuccess(json{{"invites", list}}.dump());
+    });
+
+    CROW_ROUTE(app, "/api/admin/invites").methods(crow::HTTPMethod::POST)
+    ([&db](const crow::request& req) {
+        crow::response err;
+        auto adminId = requireAdmin(req, db, err);
+        if (!adminId) return err;
+        json b = req.body.empty() ? json::object() : json::parse(req.body, nullptr, false);
+        if (!b.is_object()) return http::jsonError(400, "invalid json");
+        std::string label;
+        if (b.contains("label") && b["label"].is_string())
+            for (unsigned char ch : b["label"].get<std::string>()) if (ch >= 0x20 && ch != 0x7f) label += static_cast<char>(ch);
+        if (label.size() > 80) label.resize(80);
+        int64_t days = (b.contains("expiresDays") && b["expiresDays"].is_number_integer()) ? b["expiresDays"].get<int64_t>() : 7;
+        if (days < 0 || days > 365) return http::jsonError(400, "expiresDays must be 0-365 (0 = never)");
+        // CTT-XXXX-XXXX-XXXX from an unambiguous 31-char alphabet (no 0/O/1/I/L): ~59 random bits, single use.
+        static const char* A = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";   // 31 chars, no 0/O/1/I/L
+        std::string rnd = security::Crypto::randomHex(24), raw;
+        for (size_t i = 0; raw.size() < 12 && i + 1 < rnd.size(); i += 2) {
+            int v = std::stoi(rnd.substr(i, 2), nullptr, 16);
+            if (v < 31 * 8) raw += A[v % 31];   // rejection sampling: no modulo bias
+        }
+        while (raw.size() < 12) raw += A[std::stoi(security::Crypto::randomHex(1), nullptr, 16) % 31];
+        std::string code = "CTT-" + raw.substr(0, 4) + "-" + raw.substr(4, 4) + "-" + raw.substr(8, 4);
+        std::string norm; for (char ch : code) if (std::isalnum(static_cast<unsigned char>(ch))) norm += ch;
+        int64_t exp = days ? static_cast<int64_t>(::time(nullptr)) + days * 86400 : 0;
+        int64_t id = db.createInvite(security::Crypto::sha256Hex(norm), label, *adminId, exp);
+        if (id < 0) return http::jsonError(500, "could not create invite");
+        return http::jsonSuccess(json{{"code", code}, {"invite", {{"id", id}, {"label", label}, {"expiresAt", exp}, {"state", "open"}}}}.dump());
+    });
+
+    CROW_ROUTE(app, "/api/admin/invites/<int>").methods(crow::HTTPMethod::DELETE)
+    ([&db](const crow::request& req, int id) {
+        crow::response err;
+        if (!requireAdmin(req, db, err)) return err;
+        if (!db.revokeInvite(id)) return http::jsonError(404, "no unused invite with that id");
+        return http::jsonSuccess(R"({"ok":true})");
     });
 }
 

@@ -673,3 +673,13 @@ img.pv-media { background: transparent; object-fit: contain; }
 .trust-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.84rem; color: var(--muted); margin: -0.2rem 0 0.9rem; cursor: pointer; }
 .trust-row input { accent-color: var(--accent); width: 16px; height: 16px; }
 .files-head .btn, .editor-actions .btn { width: auto; }
+
+/* ===== Admin page ===== */
+.nav-badge { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 6px; margin-left: 6px; border-radius: 999px;
+  font-size: 0.72rem; font-weight: 700; color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+.req-note { margin-top: 4px; font-size: 0.85rem; font-style: italic; color: var(--text); overflow-wrap: anywhere; }
+.key-row .btn { width: auto; flex: none; }
+.inv-used, .inv-expired, .usr-off { opacity: 0.6; }
+.inv-code { font-size: 1.15rem; letter-spacing: 0.08em; text-align: center; }
+.set-select { font: inherit; color: var(--text); background: rgba(0, 0, 0, 0.35); border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem 0.6rem; }
+.field-hint { display: block; margin-top: 0.35rem; color: var(--muted); font-size: 0.78rem; line-height: 1.35; }
