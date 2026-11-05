@@ -8,6 +8,7 @@
 #include "routes/admin.h"
 #include "routes/auth.h"
 #include "routes/oidc.h"
+#include "routes/devices.h"
 #include "routes/files.h"
 #include "routes/fs.h"
 #include "routes/notes.h"
@@ -142,6 +143,7 @@ int main(int argc, char* argv[]) {
 
         routes::registerAuthRoutes(app, db, sessionSeconds);
         routes::registerOidcRoutes(app, db, sessionSeconds);
+        routes::registerDeviceRoutes(app, db);
         routes::registerFileRoutes(app, db, store);
         routes::registerFsRoutes(app, db, store);
         routes::registerNoteRoutes(app, db);

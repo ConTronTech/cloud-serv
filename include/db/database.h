@@ -48,6 +48,17 @@ public:
     bool setLocalLogin(int64_t userId, bool on);
     bool hasLocalLogin(int64_t userId);
 
+    // ---- Trusted devices (per-browser key pairs; server stores only sealed copies of the DEK) ----
+    struct Device { int64_t id = 0; int64_t user_id = 0; std::string name, public_key, wrapped_dek, status, created_at, last_used_at, created_ip; };
+    int64_t createDevice(int64_t userId, const std::string& name, const std::string& publicKey,
+                         const std::string& wrappedDek, const std::string& ip);   // -1 on failure
+    std::vector<Device> listDevices(int64_t userId);
+    std::optional<Device> getDevice(int64_t userId, int64_t deviceId);
+    bool approveDevice(int64_t userId, int64_t deviceId, const std::string& wrappedDek);
+    bool deleteDevice(int64_t userId, int64_t deviceId);
+    void touchDevice(int64_t userId, int64_t deviceId);
+    int  countDevices(int64_t userId, const std::string& status);   // status "" = all
+
     // ---- Sessions ----
     // Stores only the hash of the token; expiresAt is a unix epoch (seconds).
     bool createSession(int64_t userId, const std::string& tokenHash,

@@ -209,6 +209,7 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         return http::jsonSuccess(json{
             {"user", user->toJson()},
             {"salt", user->kdf_salt}, {"wrappedDek", user->wrapped_dek},
+            {"wrappedDekRecovery", user->wrapped_dek_recovery},
             {"encryptFiles", db.getEncryptFiles(*userId).value_or(encDefault)}
         }.dump());
     });

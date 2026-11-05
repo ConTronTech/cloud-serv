@@ -21,6 +21,7 @@ PROJECT_SOURCES = src/main.cpp \
                   src/routes/admin.cpp \
                   src/routes/auth.cpp \
                   src/routes/files.cpp \
+                  src/routes/devices.cpp \
                   src/routes/fs.cpp \
                   src/routes/notes.cpp \
                   src/routes/oidc.cpp \

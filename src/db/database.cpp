@@ -105,6 +105,19 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_session_hash ON sessions(token_hash);
+            CREATE TABLE IF NOT EXISTS devices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                public_key TEXT NOT NULL,
+                wrapped_dek TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_ip TEXT DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_used_at DATETIME,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
             CREATE TABLE IF NOT EXISTS user_identities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -533,6 +546,116 @@ bool CloudDB::hasLocalLogin(int64_t userId) {
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("hasLocalLogin: " + std::string(e.what()));
         return false;
+    }
+}
+
+namespace {
+CloudDB::Device readDevice(Stmt& q) {
+    CloudDB::Device d;
+    d.id = q.colInt64(0); d.user_id = q.colInt64(1); d.name = q.colText(2); d.public_key = q.colText(3);
+    d.wrapped_dek = q.colText(4); d.status = q.colText(5); d.created_at = q.colText(6);
+    d.last_used_at = q.colText(7); d.created_ip = q.colText(8);
+    return d;
+}
+const char* kDeviceCols = "id, user_id, name, public_key, wrapped_dek, status, created_at, COALESCE(last_used_at,''), created_ip";
+} // namespace
+
+int64_t CloudDB::createDevice(int64_t userId, const std::string& name, const std::string& publicKey,
+                              const std::string& wrappedDek, const std::string& ip) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "INSERT INTO devices(user_id, name, public_key, wrapped_dek, status, created_ip) VALUES(?, ?, ?, ?, ?, ?)");
+        q.bind(1, userId); q.bind(2, name); q.bind(3, publicKey); q.bind(4, wrappedDek);
+        q.bind(5, std::string(wrappedDek.empty() ? "pending" : "approved")); q.bind(6, ip);
+        if (sqlite3_step(q.s) != SQLITE_DONE) return -1;
+        return sqlite3_last_insert_rowid(c.h);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("createDevice: " + std::string(e.what()));
+        return -1;
+    }
+}
+
+std::vector<CloudDB::Device> CloudDB::listDevices(int64_t userId) {
+    std::shared_lock lock(db_mutex_);
+    std::vector<Device> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        const std::string sql = std::string("SELECT ") + kDeviceCols + " FROM devices WHERE user_id = ? ORDER BY id";
+        Stmt q(c.h, sql.c_str());
+        q.bind(1, userId);
+        while (q.step()) out.push_back(readDevice(q));
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("listDevices: " + std::string(e.what()));
+    }
+    return out;
+}
+
+std::optional<CloudDB::Device> CloudDB::getDevice(int64_t userId, int64_t deviceId) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        const std::string sql = std::string("SELECT ") + kDeviceCols + " FROM devices WHERE user_id = ? AND id = ?";
+        Stmt q(c.h, sql.c_str());
+        q.bind(1, userId); q.bind(2, deviceId);
+        if (!q.step()) return std::nullopt;
+        return readDevice(q);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("getDevice: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::approveDevice(int64_t userId, int64_t deviceId, const std::string& wrappedDek) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE devices SET wrapped_dek = ?, status = 'approved' WHERE user_id = ? AND id = ? AND status = 'pending'");
+        q.bind(1, wrappedDek); q.bind(2, userId); q.bind(3, deviceId); q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("approveDevice: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::deleteDevice(int64_t userId, int64_t deviceId) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "DELETE FROM devices WHERE user_id = ? AND id = ?");
+        q.bind(1, userId); q.bind(2, deviceId); q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("deleteDevice: " + std::string(e.what()));
+        return false;
+    }
+}
+
+void CloudDB::touchDevice(int64_t userId, int64_t deviceId) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE devices SET last_used_at = CURRENT_TIMESTAMP WHERE user_id = ? AND id = ?");
+        q.bind(1, userId); q.bind(2, deviceId); q.exec();
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("touchDevice: " + std::string(e.what()));
+    }
+}
+
+int CloudDB::countDevices(int64_t userId, const std::string& status) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, status.empty() ? "SELECT COUNT(*) FROM devices WHERE user_id = ?"
+                                   : "SELECT COUNT(*) FROM devices WHERE user_id = ? AND status = ?");
+        q.bind(1, userId);
+        if (!status.empty()) q.bind(2, status);
+        q.step();
+        return static_cast<int>(q.colInt64(0));
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("countDevices: " + std::string(e.what()));
+        return 0;
     }
 }
 

@@ -100,7 +100,7 @@ async function loadPrefs() {
 }
 async function setEncryptPref(on) {
   if (on && !DEK_RAW) { $("enc-toggle").checked = false; toast("Unlock encryption on this device first (banner at the top)"); return; }
-  if (on && !confirm("Encrypt new uploads?\n\nEncrypted files can only be opened with your password or recovery key. If you lose both, those files are gone for good, and server backups can't read them.")) {
+  if (on && !confirm("Encrypt new uploads?\n\nEncrypted files can only be opened on your trusted devices, or with your password or recovery key. Lose all of those and the files are gone for good, and server backups can't read them.")) {
     $("enc-toggle").checked = false; return;
   }
   const { ok } = await api("/api/auth/me/prefs", {
@@ -125,7 +125,11 @@ function showApp(user) {
   $("who").textContent = label;
   const av = $("avatar"); if (av) { av.textContent = initials(label); av.title = label; }
   loadPrefs();
-  refreshMe();
+  refreshMe().then(async () => {
+    if (DEK_RAW && trustThisBrowser()) { try { await enrollThisDevice(uidNow()); } catch {} }
+    checkPendingDevices();
+  });
+  if (!pendingPoll) pendingPoll = setInterval(checkPendingDevices, 30000);
   loadFs(0); // land on Files
 }
 
@@ -446,6 +450,7 @@ function showRecoveryKey(key, user) {
 }
 
 async function logout() {
+  stopApprovalPoll(); if (pendingPoll) { clearInterval(pendingPoll); pendingPoll = null; }
   await api("/api/auth/logout", { method: "POST", headers: authHeaders() });
   clearDEK();
   showAuth();
@@ -1558,30 +1563,271 @@ async function loadSsoConfig() {
 function hashParam() { return decodeURIComponent((location.hash || "").replace(/^#/, "")); }
 function clearHash() { history.replaceState(null, "", location.pathname + location.search); }
 
-// Unlock banner: shown while this device doesn't hold the key.
-function updateLockBanner() {
+// ======================= Trusted devices =======================
+// Each browser makes its own ECDH P-256 key pair. The private key is created
+// non-extractable and kept in this browser's IndexedDB, so it never leaves the device.
+// The server stores the DEK sealed to each approved device: ECDH(ephemeral, device) ->
+// HKDF-SHA256 -> AES-GCM. A trusted device unlocks with no password at all.
+const DEV_DB = "cloud-serv-device", DEV_STORE = "kv", SEAL_AAD = te.encode("cloud-serv-device-v1");
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(DEV_DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(DEV_STORE);
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+}
+async function idbDo(mode, fn) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const st = db.transaction(DEV_STORE, mode).objectStore(DEV_STORE);
+    const req = fn(st); req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error);
+  });
+}
+const devKey = (uid) => "dev:" + uid;
+async function devGet(uid) { try { return await idbDo("readonly", (s) => s.get(devKey(uid))); } catch { return null; } }
+async function devPut(uid, v) { return idbDo("readwrite", (s) => s.put(v, devKey(uid))); }
+async function devForget(uid) { try { await idbDo("readwrite", (s) => s.delete(devKey(uid))); } catch {} }
+
+async function deviceRecord(uid) {
+  let rec = await devGet(uid);
+  if (rec && rec.priv && rec.pubB64) return rec;
+  const kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+  rec = { priv: kp.privateKey, pubB64: toB64(await crypto.subtle.exportKey("spki", kp.publicKey)), deviceId: null };
+  await devPut(uid, rec);
+  return rec;
+}
+async function sealKey(bits, salt) {
+  const base = await crypto.subtle.importKey("raw", bits, "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt, info: te.encode("cloud-serv device wrap v1") },
+    base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+async function sealForDevice(pubB64, dek) {
+  const pub = await crypto.subtle.importKey("spki", fromB64(pubB64), { name: "ECDH", namedCurve: "P-256" }, false, []);
+  const eph = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "ECDH", public: pub }, eph.privateKey, 256);
+  const epk = new Uint8Array(await crypto.subtle.exportKey("spki", eph.publicKey));
+  const iv = randBytes(12);
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: SEAL_AAD }, await sealKey(bits, epk), dek);
+  return "v1." + toB64(epk) + "." + toB64(iv) + "." + toB64(ct);
+}
+async function openSealed(blob, priv) {
+  const [v, e, iv, ct] = String(blob).split(".");
+  if (v !== "v1" || !e || !iv || !ct) throw new Error("bad sealed key");
+  const epkRaw = fromB64(e);
+  const epk = await crypto.subtle.importKey("spki", epkRaw, { name: "ECDH", namedCurve: "P-256" }, false, []);
+  const bits = await crypto.subtle.deriveBits({ name: "ECDH", public: epk }, priv, 256);
+  return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromB64(iv), additionalData: SEAL_AAD },
+    await sealKey(bits, epkRaw), fromB64(ct)));
+}
+// 6-digit code both screens show, so an approval can't be swapped for someone else's device.
+async function deviceCode(pubB64) {
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-256", fromB64(pubB64)));
+  const n = ((h[0] << 24) >>> 0) + (h[1] << 16) + (h[2] << 8) + h[3];
+  const s = String(n % 1000000).padStart(6, "0");
+  return s.slice(0, 3) + " " + s.slice(3);
+}
+function deviceName() {
+  const ua = navigator.userAgent;
+  const br = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Browser";
+  const os = /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Windows/.test(ua) ? "Windows" : /Mac OS/.test(ua) ? "macOS" : /Linux/.test(ua) ? "Linux" : "device";
+  return br + " on " + os;
+}
+function trustThisBrowser() { try { return localStorage.getItem("cs_trust") !== "0"; } catch { return true; } }
+
+// Try to unlock with this device's own key. -> "ok" | "pending" | "none"
+async function tryDeviceUnlock(uid) {
+  const rec = await devGet(uid);
+  if (!rec || !rec.deviceId || !rec.priv) return "none";
+  const { ok, status, body } = await api("/api/devices/" + rec.deviceId + "/key", { headers: authHeaders() });
+  if (status === 404) { rec.deviceId = null; await devPut(uid, rec); return "none"; }   // revoked
+  if (!ok || !body) return "none";
+  if (body.status !== "approved") return "pending";
+  try { setDEK(await openSealed(body.wrappedDek, rec.priv)); return "ok"; }
+  catch { return "none"; }
+}
+// Register this browser as trusted (needs the key unlocked here).
+async function enrollThisDevice(uid) {
+  if (!DEK_RAW || !uid) return false;
+  const rec = await deviceRecord(uid);
+  if (rec.deviceId) {
+    const r = await api("/api/devices/" + rec.deviceId + "/key", { headers: authHeaders() });
+    if (r.ok && r.body && r.body.status === "approved") return true;
+    if (r.ok && r.body && r.body.status === "pending") {   // finish our own pending request
+      const a = await api("/api/devices/" + rec.deviceId + "/approve", { method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ wrappedDek: await sealForDevice(rec.pubB64, DEK_RAW) }) });
+      return a.ok;
+    }
+  }
+  const { ok, body } = await api("/api/devices", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ name: deviceName(), publicKey: rec.pubB64, wrappedDek: await sealForDevice(rec.pubB64, DEK_RAW) }) });
+  if (!ok || !body || !body.device) return false;
+  rec.deviceId = body.device.id; await devPut(uid, rec);
+  return true;
+}
+
+// ---- lock banner: every way to unlock this device ----
+let LOCK_STATE = "unlocked";   // unlocked | locked | pending | nokeys
+let approvalPoll = null;
+function uidNow() { return ME && ME.user ? ME.user.id : null; }
+function lockButton(label, fn, primary) {
+  const b = document.createElement("button"); b.type = "button";
+  b.className = "btn small " + (primary ? "primary" : "ghost"); b.textContent = label; b.addEventListener("click", fn);
+  return b;
+}
+async function updateLockBanner() {
   const b = $("lock-banner"); if (!b) return;
-  const locked = !DEK_RAW;
-  const hasKeys = !!(ME && ME.wrappedDek);
-  b.classList.toggle("hidden", !locked);
-  $("lock-form").classList.toggle("hidden", !hasKeys);
-  $("lock-text").textContent = hasKeys
-    ? "Encrypted items (notes and any encrypted files) are locked on this device."
-    : "Encryption isn't set up on this account yet. Plain files work normally.";
+  const hasPw = !!(ME && ME.wrappedDek), hasRec = !!(ME && ME.wrappedDekRecovery);
+  if (DEK_RAW) LOCK_STATE = "unlocked";
+  else if (!hasPw && !hasRec) LOCK_STATE = "nokeys";
+  else if (LOCK_STATE !== "pending") LOCK_STATE = "locked";
+  b.classList.toggle("hidden", LOCK_STATE === "unlocked");
+  const acts = $("lock-actions"); acts.textContent = "";
+  $("lock-form").classList.add("hidden");
+  if (LOCK_STATE === "nokeys") {
+    $("lock-text").textContent = "Encryption isn't set up on this account yet. Plain files work normally; notes and encrypted uploads need it.";
+    acts.append(lockButton("Set up encryption", setupEncryption, true));
+  } else if (LOCK_STATE === "pending") {
+    const rec = await devGet(uidNow());
+    const code = rec ? await deviceCode(rec.pubB64) : "";
+    $("lock-text").textContent = `Waiting for approval. On a device that's already signed in, open Settings → Devices and approve code ${code}.`;
+    acts.append(lockButton("Use something else", () => { LOCK_STATE = "locked"; stopApprovalPoll(); updateLockBanner(); }));
+  } else if (LOCK_STATE === "locked") {
+    $("lock-text").textContent = "Notes and encrypted files are locked on this device.";
+    acts.append(lockButton("Approve from another device", requestApproval, true));
+    if (hasPw) acts.append(lockButton("Use password", () => showLockForm("password")));
+    if (hasRec) acts.append(lockButton("Use recovery key", () => showLockForm("recovery")));
+  }
+}
+function showLockForm(mode) {
+  const f = $("lock-form"); f.dataset.mode = mode; f.classList.remove("hidden");
+  const i = $("lock-pw"); i.value = "";
+  i.type = mode === "password" ? "password" : "text";
+  i.placeholder = mode === "password" ? "Your password" : "csr_… recovery key";
+  i.autocomplete = mode === "password" ? "current-password" : "off";
+  i.focus();
+}
+async function afterUnlock(msg) {
+  clearThumbCache(); stopApprovalPoll();
+  if (trustThisBrowser()) { try { await enrollThisDevice(uidNow()); } catch {} }
+  LOCK_STATE = "unlocked"; updateLockBanner(); toast(msg);
+  refreshCurrentView(); checkPendingDevices();
 }
 async function unlockWithPassword(e) {
   e.preventDefault();
-  const pw = $("lock-pw").value;
+  const mode = $("lock-form").dataset.mode || "password";
+  const val = $("lock-pw").value.trim();
   const me = ME || (await api("/api/auth/me", { headers: authHeaders() })).body;
-  if (!me || !me.salt || !me.wrappedDek) { toast("Nothing to unlock on this account"); return; }
   try {
-    const { kek } = await deriveKeys(pw, me.salt);
-    setDEK(await unwrapBytes(me.wrappedDek, kek));
-  } catch { toast("That password didn't unlock it"); return; }
+    if (mode === "recovery") {
+      if (!val.startsWith("csr_") || !me.wrappedDekRecovery) throw new Error("bad");
+      setDEK(await unwrapBytes(me.wrappedDekRecovery, await importAes(fromB64(val.slice(4)))));
+    } else {
+      const { kek } = await deriveKeys($("lock-pw").value, me.salt);
+      setDEK(await unwrapBytes(me.wrappedDek, kek));
+    }
+  } catch { toast(mode === "recovery" ? "That recovery key didn't work" : "That password didn't unlock it"); return; }
   $("lock-pw").value = "";
-  clearThumbCache(); updateLockBanner(); toast("Unlocked on this device");
-  refreshCurrentView();
+  afterUnlock("Unlocked" + (trustThisBrowser() ? " · this device is now trusted" : ""));
 }
+async function requestApproval() {
+  const uid = uidNow(); if (!uid) return;
+  const rec = await deviceRecord(uid);
+  let fresh = !rec.deviceId;
+  if (rec.deviceId) {
+    const r = await api("/api/devices/" + rec.deviceId + "/key", { headers: authHeaders() });
+    if (!r.ok) fresh = true;
+  }
+  if (fresh) {
+    const { ok, body } = await api("/api/devices", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: deviceName(), publicKey: rec.pubB64 }) });
+    if (!ok || !body || !body.device) { toast(prettyError(body) || "Couldn't send the request"); return; }
+    rec.deviceId = body.device.id; await devPut(uid, rec);
+  }
+  LOCK_STATE = "pending"; updateLockBanner();
+  stopApprovalPoll();
+  approvalPoll = setInterval(async () => {
+    const s = await tryDeviceUnlock(uid);
+    if (s === "ok") afterUnlock("Approved · unlocked on this device");
+    else if (s === "none") { stopApprovalPoll(); LOCK_STATE = "locked"; updateLockBanner(); toast("The request was declined"); }
+  }, 4000);
+}
+function stopApprovalPoll() { if (approvalPoll) { clearInterval(approvalPoll); approvalPoll = null; } }
+
+// First-time setup for accounts with no keys (e.g. created through SSO): a new random
+// data key + a recovery key, this device trusted, recovery key shown once.
+async function setupEncryption() {
+  if (!confirm("Set up encryption?\n\nYou'll get a recovery key next. Save it somewhere safe: with no password on this account, it's your only way back in if you lose all your trusted devices.")) return;
+  const dek = randBytes(32), recRaw = randBytes(32);
+  const wrappedDekRecovery = await wrapBytes(dek, await importAes(recRaw));
+  const { ok, body } = await api("/api/keys/init", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ wrappedDekRecovery }) });
+  if (!ok) { toast(prettyError(body) || "Couldn't set up encryption"); return; }
+  setDEK(dek);
+  await refreshMe();
+  try { await enrollThisDevice(uidNow()); } catch {}
+  LOCK_STATE = "unlocked"; updateLockBanner();
+  showRecoveryKey("csr_" + toB64(recRaw), ME && ME.user);
+}
+
+// Unlocked devices get told when another device is waiting for approval.
+let pendingPoll = null;
+async function checkPendingDevices() {
+  if (!DEK_RAW) { $("review-banner").classList.add("hidden"); return; }
+  const { ok, body } = await api("/api/devices", { headers: authHeaders() });
+  const n = ok && body ? (body.devices || []).filter((d) => d.status === "pending").length : 0;
+  $("review-banner").classList.toggle("hidden", n === 0);
+  $("review-text").textContent = n === 1 ? "A new device is asking for access to your encrypted files." : `${n} new devices are asking for access.`;
+}
+
+// Settings > Devices
+async function loadDevices() {
+  const list = $("dev-list"); list.textContent = "";
+  const { ok, body } = await api("/api/devices", { headers: authHeaders() });
+  if (!ok || !body) return;
+  const mine = await devGet(uidNow());
+  const devs = body.devices || [];
+  $("dev-empty").classList.toggle("hidden", devs.length > 0);
+  for (const d of devs) {
+    const code = await deviceCode(d.publicKey);
+    const li = document.createElement("li"); li.className = "key-row" + (d.status === "pending" ? " dev-pending" : "");
+    const info = document.createElement("div"); info.className = "key-info";
+    const nm = document.createElement("div"); nm.className = "key-name";
+    nm.textContent = d.name + (mine && mine.deviceId === d.id ? "  (this device)" : "");
+    const sub = document.createElement("div"); sub.className = "key-sub";
+    sub.textContent = (d.status === "pending" ? "Waiting · code " + code : "Trusted") +
+      (d.createdAt ? " · added " + fmtDate(d.createdAt) : "") + (d.lastUsedAt ? " · used " + fmtDate(d.lastUsedAt) : "") +
+      (d.createdIp ? " · from " + d.createdIp : "");
+    info.append(nm, sub);
+    li.append(info);
+    if (d.status === "pending") {
+      const ap = document.createElement("button"); ap.type = "button"; ap.className = "btn primary small"; ap.textContent = "Approve";
+      ap.addEventListener("click", async () => {
+        if (!DEK_RAW) { toast("Unlock this device first"); return; }
+        if (!confirm(`Approve "${d.name}"?\n\nOnly continue if the other device shows this code:\n\n        ${code}\n\nIt will be able to open your notes and encrypted files.`)) return;
+        const r = await api("/api/devices/" + d.id + "/approve", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ wrappedDek: await sealForDevice(d.publicKey, DEK_RAW) }) });
+        if (!r.ok) { toast(prettyError(r.body) || "Couldn't approve"); return; }
+        toast("Approved"); loadDevices(); checkPendingDevices();
+      });
+      li.append(ap);
+    }
+    const rm = document.createElement("button"); rm.type = "button"; rm.className = "btn ghost small";
+    const isMe = mine && mine.deviceId === d.id;
+    rm.textContent = d.status === "pending" ? "Deny" : isMe ? "Forget" : "Revoke";
+    rm.addEventListener("click", async () => {
+      const q = isMe ? "Forget this device? You'll need to unlock it again next time." :
+        d.status === "pending" ? `Deny "${d.name}"?` : `Revoke "${d.name}"? It loses access to encrypted items (anything it already opened stays on it).`;
+      if (!confirm(q)) return;
+      const r = await api("/api/devices/" + d.id, { method: "DELETE", headers: authHeaders() });
+      if (!r.ok) { toast("Couldn't remove it"); return; }
+      if (isMe) { await devForget(uidNow()); clearDEK(); LOCK_STATE = "locked"; updateLockBanner(); }
+      loadDevices(); checkPendingDevices();
+    });
+    li.append(rm);
+    list.appendChild(li);
+  }
+}
+
 async function refreshMe() {
   const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
   if (ok && body) ME = body;
@@ -1638,6 +1884,7 @@ async function loadSettings() {
   updateLockBanner();
   loadApiKeys();
   loadIdentities();
+  loadDevices();
 }
 
 async function saveDisplayName(e) {
@@ -1974,6 +2221,9 @@ async function boot() {
   setMode("login");
 
   $("lock-form").addEventListener("submit", unlockWithPassword);
+  $("review-btn").addEventListener("click", () => goSettings());
+  $("trust-device").checked = trustThisBrowser();
+  $("trust-device").addEventListener("change", (e) => { try { localStorage.setItem("cs_trust", e.target.checked ? "1" : "0"); } catch {} });
   $("sso-btn").addEventListener("click", () => { location.href = "/api/auth/oidc/start"; });
   $("ids-link").addEventListener("click", () => { location.href = "/api/auth/oidc/start?mode=link"; });
   await loadSsoConfig();
@@ -1994,6 +2244,10 @@ async function boot() {
   const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
   if (ok && body && body.user) {
     ME = body;
+    if (!DEK_RAW) {
+      const s = await tryDeviceUnlock(body.user.id);
+      if (s === "pending") { LOCK_STATE = "pending"; setTimeout(() => requestApproval(), 0); }
+    }
     showApp(body.user);
     if (h === "sso-linked") { goSettings(); toast(SSO.label + " linked to your account"); }
     return;

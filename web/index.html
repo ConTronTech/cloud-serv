@@ -41,6 +41,7 @@
           <span>Password</span>
           <input id="password" type="password" autocomplete="current-password" required minlength="8" placeholder="at least 8 characters" />
         </label>
+        <label class="trust-row"><input id="trust-device" type="checkbox" checked /> <span>Trust this device (no unlock next time)</span></label>
         <button id="auth-submit" class="btn primary" type="submit">Log in</button>
         <p id="auth-error" class="error" role="alert"></p>
       </form>
@@ -92,11 +93,19 @@
       <div class="content">
       <div id="lock-banner" class="lock-banner hidden" role="status">
         <span class="lock-ic" aria-hidden="true">🔒</span>
-        <span id="lock-text" class="lock-text"></span>
-        <form id="lock-form" class="lock-form hidden">
-          <input id="lock-pw" type="password" placeholder="Password to unlock" autocomplete="current-password" required />
-          <button class="btn primary small" type="submit">Unlock</button>
-        </form>
+        <div class="lock-main">
+          <div id="lock-text" class="lock-text"></div>
+          <div id="lock-actions" class="lock-actions"></div>
+          <form id="lock-form" class="lock-form hidden">
+            <input id="lock-pw" type="password" placeholder="Your password" autocomplete="current-password" required />
+            <button class="btn primary small" type="submit">Unlock</button>
+          </form>
+        </div>
+      </div>
+      <div id="review-banner" class="lock-banner review hidden" role="status">
+        <span class="lock-ic" aria-hidden="true">📱</span>
+        <div class="lock-main"><div id="review-text" class="lock-text"></div></div>
+        <button id="review-btn" class="btn primary small" type="button">Review</button>
       </div>
       <!-- ===== Files tab (folder browser) ===== -->
       <div id="files-tab">
@@ -161,8 +170,15 @@
             <span class="enc-label">Encrypt new uploads</span>
           </label>
           <p class="muted small-print">Off: files are stored as normal files, so ordinary backups can read and restore them.
-            On: new uploads are end-to-end encrypted in your browser. Only your password or recovery key can open them.
+            On: new uploads are end-to-end encrypted in your browser. Only your trusted devices, password or recovery key can open them.
             Existing files keep whatever form they were uploaded in.</p>
+        </section>
+
+        <section class="set-card">
+          <h3>Devices</h3>
+          <p class="muted small-print">Trusted devices open your notes and encrypted files without a password. A new device asks for approval: approve it here after checking the code matches.</p>
+          <ul id="dev-list" class="key-list"></ul>
+          <p id="dev-empty" class="muted small-print hidden">No trusted devices yet.</p>
         </section>
 
         <section id="ids-card" class="set-card hidden">
