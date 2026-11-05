@@ -8,6 +8,7 @@
 #include <fstream>
 #include <algorithm>
 #include <cstdint>
+#include <cctype>
 
 using json = nlohmann::json;
 
@@ -76,6 +77,34 @@ bool isValidEncName(const std::string& s) {
 // Cap on bytes served per Range response — bounds memory for a single request
 // while the client keeps requesting further ranges as it plays/seeks.
 const int64_t RANGE_CHUNK_CAP = 8 * 1024 * 1024;
+
+// Only these types are ever shown inline from /content. Anything else (HTML, SVG,
+// JS, XML, unknown...) is sent as an opaque download, so an uploaded web page can
+// never run as this site. Encrypted blobs are ciphertext anyway (octet-stream).
+std::string lowerMime(std::string m) {
+    auto semi = m.find(';'); if (semi != std::string::npos) m.resize(semi);
+    for (auto& ch : m) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    while (!m.empty() && m.back() == ' ') m.pop_back();
+    return m;
+}
+bool inlineSafe(const std::string& rawMime) {
+    const std::string m = lowerMime(rawMime);
+    if (m.rfind("video/", 0) == 0 || m.rfind("audio/", 0) == 0) return true;
+    static const char* ok[] = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+                               "image/bmp", "application/pdf", "text/plain"};
+    for (auto* o : ok) if (m == o) return true;
+    return false;
+}
+// Headers for anything served from a user's storage.
+void contentHeaders(crow::response& res, const std::string& mime) {
+    const bool safe = inlineSafe(mime);
+    res.set_header("Content-Type", safe ? (lowerMime(mime) == "text/plain" ? "text/plain; charset=utf-8" : lowerMime(mime))
+                                        : "application/octet-stream");
+    res.set_header("Content-Disposition", safe ? "inline" : "attachment");
+    res.set_header("X-Content-Type-Options", "nosniff");
+    // Even if a browser did render it, it gets no scripts, no forms, no same-origin powers.
+    res.add_header("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'");
+}
 
 // Parse a "bytes=start-end" Range header against a known total size.
 // Returns false if unparseable or unsatisfiable (caller should 416).
@@ -218,7 +247,9 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         if (res.code == 404) return http::jsonError(404, "not found");
 
         std::string safeName = security::Sanitizer::safeDispositionName(meta->name);
-        res.add_header("Content-Disposition", "attachment; filename=\"" + safeName + "\"");
+        res.set_header("Content-Disposition", "attachment; filename=\"" + safeName + "\"");
+        res.set_header("X-Content-Type-Options", "nosniff");
+        if (!inlineSafe(meta->mime)) res.set_header("Content-Type", "application/octet-stream");
         return res;
     });
 
@@ -243,7 +274,7 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
             res.set_static_file_info_unsafe(path, meta->mime);
             if (res.code == 404) return http::jsonError(404, "not found");
             res.add_header("Accept-Ranges", "bytes");
-            res.add_header("Content-Disposition", "inline");
+            contentHeaders(res, meta->mime);
             return res;
         }
 
@@ -261,12 +292,11 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         std::string slice = readSlice(path, start, len);
         crow::response res(206);
         res.body = std::move(slice);
-        res.add_header("Content-Type", meta->mime);
         res.add_header("Accept-Ranges", "bytes");
         res.add_header("Content-Range",
                        "bytes " + std::to_string(start) + "-" + std::to_string(end) +
                        "/" + std::to_string(size));
-        res.add_header("Content-Disposition", "inline");
+        contentHeaders(res, meta->mime);
         return res;
     });
 

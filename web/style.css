@@ -1,28 +1,22 @@
 :root {
-  --bg: #f4f6fb;
-  --panel: #ffffff;
-  --panel-2: #f0f2f8;
-  --text: #16202e;
-  --muted: #64748b;
-  --border: #e2e8f0;
-  --accent: #3b6cf6;
-  --accent-ink: #ffffff;
-  --danger: #dc2626;
-  --ok: #16a34a;
-  --shadow: 0 6px 24px rgba(20, 30, 50, 0.08);
-  --radius: 14px;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0b1220;
-    --panel: #131c2e;
-    --panel-2: #1b2740;
-    --text: #e7edf7;
-    --muted: #94a3b8;
-    --border: #263450;
-    --accent: #5b86ff;
-    --shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
-  }
+  /* ConTronTech theme: pink / red / black bevelled glass (matches controntech.uk) */
+  --bg: #050405;
+  --panel: rgba(28, 16, 24, 0.62);
+  --panel-2: rgba(255, 255, 255, 0.05);
+  --text: #f4eef1;
+  --muted: #b8a9b1;
+  --border: rgba(255, 79, 154, 0.18);
+  --accent: #ff4f9a;
+  --accent-2: #ff3b4f;
+  --accent-ink: #1a0610;
+  --danger: #ff5a6a;
+  --ok: #3ccf87;
+  --shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+  --radius: 16px;
+  --rim: rgba(255, 255, 255, 0.10);
+  --bevel: inset 1px 1px 0 rgba(255, 255, 255, 0.10), inset -1px -1px 0 rgba(0, 0, 0, 0.45);
+  --glass-blur: blur(14px) saturate(140%);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -475,4 +469,92 @@ audio.preview-media { width: 80vw; max-width: 480px; background: transparent; }
 
 @media (max-width: 480px) {
   .file-actions .btn span { display: none; }
+}
+
+/* "Encrypt new uploads" switch (sidebar footer) */
+.enc-switch { display: flex; align-items: center; gap: 10px; margin: 10px 0; cursor: pointer; font-size: 0.85rem; user-select: none; }
+.enc-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.enc-track { position: relative; width: 34px; height: 20px; border-radius: 999px; background: rgba(127,127,127,.35); transition: background .2s; flex: none; }
+.enc-track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .2s; }
+.enc-switch input:checked + .enc-track { background: #2e9e5b; }
+.enc-switch input:checked + .enc-track::after { transform: translateX(14px); }
+.enc-switch input:focus-visible + .enc-track { outline: 2px solid #6aa0ff; outline-offset: 2px; }
+
+
+/* ================= Glass theme layer ================= */
+body {
+  background:
+    radial-gradient(60vmax 60vmax at 12% 8%, rgba(255, 45, 135, 0.20), transparent 60%),
+    radial-gradient(55vmax 55vmax at 92% 30%, rgba(225, 29, 72, 0.16), transparent 60%),
+    radial-gradient(50vmax 50vmax at 40% 105%, rgba(157, 23, 77, 0.22), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+}
+::selection { background: rgba(255, 79, 154, 0.35); }
+
+/* Panels: frosted glass + bevel */
+.card, .sidebar, .topbar, .file-item, .fs-item, .grid-cell, .note-card, .cat, .storage-chip,
+.dropzone, .upload-progress, .upload-row, .select-bar, .sheet, .preview-card, .fs-search input,
+.topbar-search input, .action-item {
+  background: var(--panel);
+  -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  border-color: var(--border);
+  box-shadow: var(--bevel);
+}
+.card, .select-bar, .upload-progress, .sheet { box-shadow: var(--bevel), var(--shadow); }
+.sidebar { border-right: 1px solid var(--border); background: rgba(14, 8, 12, 0.72); }
+.topbar { border-bottom: 1px solid var(--border); background: rgba(14, 8, 12, 0.66); }
+
+/* Hover: lift + pink rim, never neon */
+.grid-cell, .fs-item, .note-card, .cat, .action-item { transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease; }
+.grid-cell:hover, .note-card:hover, .cat:hover, .action-item:hover {
+  transform: translateY(-2px); border-color: rgba(255, 79, 154, 0.5);
+  box-shadow: var(--bevel), 0 8px 22px rgba(255, 45, 135, 0.12);
+}
+.fs-item:hover { border-color: rgba(255, 79, 154, 0.4); }
+
+/* Primary actions: pink to red gradient with a bevel that presses in */
+.btn.primary, .new-btn, .avatar {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff; border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: inset 1px 1px 0 rgba(255, 255, 255, 0.35), inset -1px -1px 0 rgba(0, 0, 0, 0.35), 0 6px 18px rgba(255, 59, 79, 0.25);
+}
+.btn.primary:active, .new-btn:active { transform: translateY(1px); box-shadow: inset 2px 2px 4px rgba(0, 0, 0, 0.35); }
+.btn.ghost { border-color: var(--border); box-shadow: var(--bevel); }
+.btn.ghost:hover { background: rgba(255, 79, 154, 0.10); border-color: rgba(255, 79, 154, 0.45); }
+.btn.ghost.active, .side-item.active { color: var(--accent); }
+.side-item.active { background: rgba(255, 79, 154, 0.12); box-shadow: inset 3px 0 0 var(--accent); }
+.side-item:hover { background: rgba(255, 255, 255, 0.05); }
+
+/* Inputs */
+.field input, .note-title-input, .note-body-input {
+  background: rgba(0, 0, 0, 0.35); border-color: var(--border);
+  box-shadow: inset 1px 1px 3px rgba(0, 0, 0, 0.5);
+}
+.field input:focus, .note-title-input:focus, .note-body-input:focus,
+.topbar-search input:focus, .fs-search input:focus { outline: 2px solid rgba(255, 79, 154, 0.6); }
+
+/* Auth screen */
+.auth-card { border: 1px solid var(--border); }
+.brand h1 { background: linear-gradient(90deg, #fff, var(--accent)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.tabs { background: rgba(0, 0, 0, 0.35); }
+.tab.active { background: rgba(255, 79, 154, 0.16); color: var(--text); box-shadow: var(--bevel); }
+
+/* Files */
+.thumb { background: rgba(0, 0, 0, 0.35); }
+.thumb.is-folder { color: var(--accent); }
+.file-ic { background: rgba(255, 79, 154, 0.10); color: var(--accent); }
+.dropzone { border-style: dashed; }
+.dropzone.drag { border-color: var(--accent); background: rgba(255, 79, 154, 0.08); }
+.up-fill { background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+.crumb { color: var(--accent); }
+.toast { background: rgba(28, 16, 24, 0.92); color: var(--text); border: 1px solid var(--border); box-shadow: var(--bevel), var(--shadow); }
+.modal { background: rgba(5, 4, 5, 0.86); }
+
+/* Encrypt switch matches the theme */
+.enc-switch input:checked + .enc-track { background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+
+@media (prefers-reduced-motion: reduce) {
+  .grid-cell, .fs-item, .note-card, .cat, .action-item { transition: none; }
+  .grid-cell:hover, .note-card:hover, .cat:hover, .action-item:hover { transform: none; }
 }

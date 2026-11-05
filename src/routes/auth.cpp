@@ -204,10 +204,27 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         if (!userId) return http::jsonError(401, "unauthorized");
         auto user = db.findUserById(*userId);
         if (!user) return http::jsonError(401, "unauthorized");
+        const bool encDefault = core::Config::get_instance().get_bool("env", "FILES_ENCRYPT_DEFAULT", false);
         return http::jsonSuccess(json{
             {"user", user->toJson()},
-            {"salt", user->kdf_salt}, {"wrappedDek", user->wrapped_dek}
+            {"salt", user->kdf_salt}, {"wrappedDek", user->wrapped_dek},
+            {"encryptFiles", db.getEncryptFiles(*userId).value_or(encDefault)}
         }.dump());
+    });
+
+    // ---- Preferences: {"encryptFiles": bool} ----
+    // Only affects NEW uploads/folders. Existing files keep whatever they were stored as
+    // (the client decrypts per file), so switching never breaks access to old files.
+    CROW_ROUTE(app, "/api/auth/me/prefs").methods(crow::HTTPMethod::PATCH)
+    ([&db](const crow::request& req) {
+        auto userId = security::authenticateSession(req, db);
+        if (!userId) return http::jsonError(401, "unauthorized");
+        json body = json::parse(req.body, nullptr, false);
+        if (!body.is_object() || !body.contains("encryptFiles") || !body["encryptFiles"].is_boolean())
+            return http::jsonError(400, "encryptFiles (boolean) required");
+        const bool on = body["encryptFiles"].get<bool>();
+        if (!db.setEncryptFiles(*userId, on)) return http::jsonError(500, "could not save");
+        return http::jsonSuccess(json{{"encryptFiles", on}}.dump());
     });
 
     // ---- Logout (revoke current session token) ----

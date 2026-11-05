@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS users (
     email         TEXT UNIQUE NOT NULL,
     display_name  TEXT NOT NULL,
     password_hash TEXT NOT NULL,              -- pbkdf2$<iters>$<salt>$<hash>
-    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    encrypt_files INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS sessions (

@@ -221,6 +221,8 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active';", nullptr, nullptr, nullptr);
         // NULL = unlimited; no NOT NULL/default so "no quota set" is distinguishable from "0 bytes".
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN storage_quota_bytes INTEGER;", nullptr, nullptr, nullptr);
+        // NULL = user never chose; the server default (FILES_ENCRYPT_DEFAULT) applies.
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN encrypt_files INTEGER;", nullptr, nullptr, nullptr);
 
         // Admin bootstrap: if this DB has no admin yet, promote the earliest
         // (lowest-id) account. Runs every startup but is a no-op once an admin
@@ -1368,6 +1370,37 @@ bool CloudDB::setUserQuota(int64_t userId, std::optional<int64_t> quotaBytes) {
         return sqlite3_changes(c.h) > 0;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("setUserQuota: " + std::string(e.what()));
+        return false;
+    }
+}
+
+std::optional<bool> CloudDB::getEncryptFiles(int64_t userId) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT encrypt_files FROM users WHERE id = ?");
+        q.bind(1, userId);
+        if (!q.step()) return std::nullopt;
+        auto v = q.colOptInt64(0);
+        if (!v) return std::nullopt;
+        return *v != 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("getEncryptFiles: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::setEncryptFiles(int64_t userId, bool on) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET encrypt_files = ? WHERE id = ?");
+        q.bind(1, static_cast<int64_t>(on ? 1 : 0));
+        q.bind(2, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setEncryptFiles: " + std::string(e.what()));
         return false;
     }
 }

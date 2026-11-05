@@ -132,6 +132,9 @@ public:
     bool setUserRole(int64_t userId, const std::string& role);       // "user" | "admin"
     bool setUserSuspended(int64_t userId, bool suspended);
     bool setUserQuota(int64_t userId, std::optional<int64_t> quotaBytes); // nullopt = unlimited
+    // Per-account "encrypt my files" preference. nullopt = never set (use FILES_ENCRYPT_DEFAULT).
+    std::optional<bool> getEncryptFiles(int64_t userId);
+    bool setEncryptFiles(int64_t userId, bool on);
     // Admins who can actually act: role admin AND status active. A suspended or
     // removed admin does not count, so "last admin" guards can't be satisfied by
     // an account that is locked out.

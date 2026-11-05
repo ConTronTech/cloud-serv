@@ -89,12 +89,41 @@ function initials(s) {
   const parts = (s || "?").trim().split(/[\s@._-]+/).filter(Boolean);
   return ((parts[0]?.[0] || "?") + (parts[1]?.[0] || "")).toUpperCase();
 }
+// Per-account "Encrypt my files" switch (server-stored, default off). Only affects NEW
+// uploads, folders and renames of plain items; existing encrypted items stay encrypted
+// and still open, because every item is decrypted (or not) on its own.
+let ENCRYPT_FILES = false;
+async function loadPrefs() {
+  const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
+  if (ok && body && typeof body.encryptFiles === "boolean") ENCRYPT_FILES = body.encryptFiles;
+  const t = $("enc-toggle"); if (t) t.checked = ENCRYPT_FILES;
+}
+async function setEncryptPref(on) {
+  if (on && !confirm("Encrypt new uploads?\n\nEncrypted files can only be opened with your password or recovery key. If you lose both, those files are gone for good, and server backups can't read them.")) {
+    $("enc-toggle").checked = false; return;
+  }
+  const { ok } = await api("/api/auth/me/prefs", {
+    method: "PATCH", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ encryptFiles: !!on }),
+  });
+  if (!ok) { $("enc-toggle").checked = ENCRYPT_FILES; toast("Couldn't save the setting"); return; }
+  ENCRYPT_FILES = !!on;
+  toast(on ? "New uploads will be encrypted" : "New uploads will be stored as normal files");
+}
+// Name payload for a new item or a rename: encrypted only if the switch is on (new items)
+// or the item itself is already encrypted (renames keep its form).
+async function namePayload(name, item) {
+  const enc = item ? !!item.encName : ENCRYPT_FILES;
+  return enc ? { encName: await encryptName(name) } : { name };
+}
+
 function showApp(user) {
   $("auth-view").classList.add("hidden");
   $("app-view").classList.remove("hidden");
   const label = user ? (user.displayName || user.email) : "";
   $("who").textContent = label;
   const av = $("avatar"); if (av) { av.textContent = initials(label); av.title = label; }
+  loadPrefs();
   loadFs(0); // land on Files
 }
 
@@ -828,7 +857,7 @@ async function newFolder() {
   const { ok, body } = await api("/api/folders", {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ parentId: currentFolder, encName: await encryptName(name.trim()) }),
+    body: JSON.stringify({ parentId: currentFolder, ...(await namePayload(name.trim())) }),
   });
   if (!ok) { toast(prettyError(body) || "Could not create folder"); return; }
   loadFs(currentFolder);
@@ -841,7 +870,7 @@ async function renameFolder(f) {
   const { ok } = await api("/api/folders/" + f.id, {
     method: "PATCH",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ encName: await encryptName(name.trim()) }),
+    body: JSON.stringify(await namePayload(name.trim(), f)),
   });
   if (!ok) { toast("Rename failed"); return; }
   loadFs(currentFolder);
@@ -861,7 +890,7 @@ async function renameFileItem(f) {
   const { ok } = await api("/api/files/" + f.id, {
     method: "PATCH",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ encName: await encryptName(name.trim()) }),
+    body: JSON.stringify(await namePayload(name.trim(), f)),
   });
   if (!ok) { toast("Rename failed"); return; }
   loadFs(currentFolder);
@@ -1082,23 +1111,29 @@ async function uploadOne(file, state, folderId) {
 // rate-limited (429).
 async function uploadDirect(file, state, folderId) {
   let enc;
-  try { enc = await encryptFileForUpload(file); }
-  catch { state.textContent = "Encryption failed"; return false; }
+  if (ENCRYPT_FILES) {
+    try { enc = await encryptFileForUpload(file); }
+    catch { state.textContent = "Encryption failed"; return false; }
+  }
 
   for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
     let res;
     try {
       res = await fetch(API + "/api/files", {
         method: "POST",
-        headers: authHeaders({
+        headers: authHeaders(enc ? {
           "X-Enc-Name": enc.encName, // encrypted filename (opaque to the server)
           "X-Enc-Mime": enc.encMime, // encrypted mime type (opaque to the server)
           "X-Folder": String(folderId),
           "X-Wrapped-Key": enc.wrappedKey,
           "X-Plain-Size": String(enc.plainSize),
           "Content-Type": "application/octet-stream",
+        } : {
+          "X-Filename": encodeURIComponent(file.name), // plain file: real name + type, stored as-is
+          "X-Folder": String(folderId),
+          "Content-Type": file.type || "application/octet-stream",
         }),
-        body: enc.cipher,
+        body: enc ? enc.cipher : file,
       });
     } catch { state.textContent = "Network error"; return false; }
 
@@ -1125,12 +1160,15 @@ async function uploadDirect(file, state, folderId) {
 // bound; streaming encrypt is a later optimization); wire chunks are just
 // slices of the ciphertext, so resume/offset logic is unchanged.
 async function uploadChunked(file, state, folderId) {
-  state.textContent = "Encrypting…";
-  let enc;
-  try { enc = await encryptFileForUpload(file); }
-  catch { state.textContent = "Encryption failed"; return false; }
-  const cipher = enc.cipher;
-  const total = cipher.length;
+  let enc = null, cipher = null, total;
+  if (ENCRYPT_FILES) {
+    state.textContent = "Encrypting…";
+    try { enc = await encryptFileForUpload(file); }
+    catch { state.textContent = "Encryption failed"; return false; }
+    cipher = enc.cipher; total = cipher.length;
+  } else {
+    total = file.size; // plain file: chunks are read straight from disk, never all in memory
+  }
 
   state.textContent = "Starting…";
   let initRes;
@@ -1138,10 +1176,12 @@ async function uploadChunked(file, state, folderId) {
     initRes = await fetch(API + "/api/uploads/init", {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
+      body: JSON.stringify(enc ? {
         encName: enc.encName, encMime: enc.encMime,
         size: total, folderId,
         wrappedKey: enc.wrappedKey, plainSize: enc.plainSize,
+      } : {
+        name: file.name, mime: file.type || "application/octet-stream", size: total, folderId,
       }),
     });
   } catch { state.textContent = "Network error"; return false; }
@@ -1156,7 +1196,8 @@ async function uploadChunked(file, state, folderId) {
 
   let offset = 0;
   while (offset < total) {
-    const chunk = cipher.subarray(offset, Math.min(offset + CHUNK_SIZE, total));
+    const chunk = enc ? cipher.subarray(offset, Math.min(offset + CHUNK_SIZE, total))
+                      : file.slice(offset, Math.min(offset + CHUNK_SIZE, total));
     let done = false;
     for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
       let res;
@@ -1288,7 +1329,7 @@ async function ensureFolders(items) {
     const parentId = pathToId.get(parts.slice(0, -1).join("/")) ?? currentFolder;
     const { ok, body } = await api("/api/folders", {
       method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ parentId, encName: await encryptName(name) }),
+      body: JSON.stringify({ parentId, ...(await namePayload(name)) }),
     });
     pathToId.set(dir, ok && body && body.folder ? body.folder.id : parentId);
   }
@@ -1596,6 +1637,7 @@ async function boot() {
   $("new-close").addEventListener("click", closeNewMenu);
   $("new-modal").addEventListener("click", (e) => { if (e.target.id === "new-modal") closeNewMenu(); });
   $("new-folder-item").addEventListener("click", () => { closeNewMenu(); newFolder(); });
+  $("enc-toggle").addEventListener("change", (e) => setEncryptPref(e.target.checked));
   $("new-upload-item").addEventListener("click", () => { closeNewMenu(); $("file-input").click(); });
   $("new-uploadfolder-item").addEventListener("click", () => { closeNewMenu(); $("folder-input").click(); });
 
