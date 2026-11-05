@@ -6,6 +6,7 @@
 #include "core/config.h"
 
 #include <nlohmann/json.hpp>
+#include <cctype>
 #include <ctime>
 #include <regex>
 #include <optional>
@@ -220,11 +221,62 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         auto userId = security::authenticateSession(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
         json body = json::parse(req.body, nullptr, false);
-        if (!body.is_object() || !body.contains("encryptFiles") || !body["encryptFiles"].is_boolean())
-            return http::jsonError(400, "encryptFiles (boolean) required");
-        const bool on = body["encryptFiles"].get<bool>();
-        if (!db.setEncryptFiles(*userId, on)) return http::jsonError(500, "could not save");
-        return http::jsonSuccess(json{{"encryptFiles", on}}.dump());
+        if (!body.is_object()) return http::jsonError(400, "invalid json");
+        const bool hasEnc = body.contains("encryptFiles"), hasName = body.contains("displayName");
+        if (!hasEnc && !hasName) return http::jsonError(400, "nothing to change");
+        if (hasEnc && !body["encryptFiles"].is_boolean()) return http::jsonError(400, "encryptFiles (boolean) required");
+        std::string name;
+        if (hasName) {
+            if (!body["displayName"].is_string()) return http::jsonError(400, "invalid display name");
+            name = body["displayName"].get<std::string>();
+            while (!name.empty() && name.back() == ' ') name.pop_back();
+            while (!name.empty() && name.front() == ' ') name.erase(0, 1);
+            bool ctl = false; for (unsigned char ch : name) if (ch < 0x20 || ch == 0x7f) ctl = true;
+            if (name.empty() || name.size() > 64 || ctl) return http::jsonError(400, "display name must be 1-64 characters");
+        }
+        json out = json::object();
+        if (hasEnc) {
+            const bool on = body["encryptFiles"].get<bool>();
+            if (!db.setEncryptFiles(*userId, on)) return http::jsonError(500, "could not save");
+            out["encryptFiles"] = on;
+        }
+        if (hasName) {
+            if (!db.setDisplayName(*userId, name)) return http::jsonError(500, "could not save");
+            out["displayName"] = name;
+        }
+        return http::jsonSuccess(out.dump());
+    });
+
+    // ---- Change password (E2E-aware) ----
+    // The browser proves the current password (its derived auth key), and sends the new
+    // auth key, a fresh KDF salt and the DEK re-wrapped under the new password. Files and
+    // notes keep working because the DEK itself never changes. Other devices are signed out.
+    CROW_ROUTE(app, "/api/auth/password").methods(crow::HTTPMethod::POST)
+    ([&db](const crow::request& req) {
+        auto userId = security::authenticateSession(req, db);
+        if (!userId) return http::jsonError(401, "unauthorized");
+        json body; std::string err;
+        if (!parseJsonObject(req, body, err)) return http::jsonError(400, err);
+        const std::string cur = strField(body, "currentPassword"), next = strField(body, "newPassword");
+        const std::string salt = strField(body, "salt"), wrapped = strField(body, "wrappedDek");
+        auto isHex = [](const std::string& v) { for (char ch : v) if (!std::isxdigit(static_cast<unsigned char>(ch))) return false; return true; };
+        auto isB64ish = [](const std::string& v) {
+            for (char ch : v) if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '+' || ch == '/' || ch == '=' || ch == '.')) return false;
+            return true; };
+        if (next.size() < 8 || next.size() > 256) return http::jsonError(400, "invalid new password");
+        if (salt.size() < 16 || salt.size() > 128 || !isHex(salt)) return http::jsonError(400, "invalid salt");
+        if (wrapped.empty() || wrapped.size() > 1024 || !isB64ish(wrapped) || wrapped.find('.') == std::string::npos)
+            return http::jsonError(400, "invalid key material");
+        auto user = db.findUserById(*userId);
+        if (!user) return http::jsonError(401, "unauthorized");
+        if (!security::Crypto::verifyPassword(cur, user->password_hash))
+            return http::jsonError(403, "current password is wrong");
+        if (!db.setPasswordAndKeys(*userId, security::Crypto::hashPassword(next), salt, wrapped))
+            return http::jsonError(500, "could not save");
+        std::string token = security::bearerToken(req.get_header_value("Authorization"));
+        if (token.empty()) token = security::cookieSessionToken(req.get_header_value("Cookie"));
+        int signedOut = db.deleteOtherSessions(*userId, security::Crypto::sha256Hex(token));
+        return http::jsonSuccess(json{{"ok", true}, {"otherSessionsSignedOut", signedOut}}.dump());
     });
 
     // ---- Logout (revoke current session token) ----

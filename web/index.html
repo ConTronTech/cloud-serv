@@ -61,14 +61,10 @@
         <button id="nav-starred" class="side-item" type="button">Starred</button>
         <div class="side-divider"></div>
         <button id="nav-notes" class="side-item" type="button">Notes</button>
+        <button id="nav-settings" class="side-item" type="button">Settings</button>
       </nav>
       <div class="side-foot">
         <div id="storage-chip" class="storage-chip"></div>
-        <label class="enc-switch" title="Only affects new uploads. Existing files keep their current form.">
-          <input id="enc-toggle" type="checkbox">
-          <span class="enc-track" aria-hidden="true"></span>
-          <span class="enc-label">Encrypt new uploads</span>
-        </label>
         <div class="side-user">
           <span id="who" class="who"></span>
           <button id="logout" class="btn ghost small" type="button">Log out</button>
@@ -121,6 +117,67 @@
 
         <ul id="fs-list" class="fs-list"></ul>
         <p id="fs-empty" class="muted empty hidden">This folder is empty.</p>
+      </div>
+
+      <!-- ===== Settings tab ===== -->
+      <div id="settings-tab" class="hidden settings">
+        <h2 class="settings-h">Settings</h2>
+
+        <section class="set-card">
+          <h3>Account</h3>
+          <dl class="set-facts">
+            <dt>Email</dt><dd id="set-email"></dd>
+            <dt>Role</dt><dd id="set-role"></dd>
+            <dt>Storage</dt><dd id="set-storage"></dd>
+          </dl>
+          <form id="set-name-form" class="set-row">
+            <label class="field grow"><span>Display name</span>
+              <input id="set-name" type="text" maxlength="64" autocomplete="name" /></label>
+            <button class="btn primary small" type="submit">Save</button>
+          </form>
+          <p id="set-name-status" class="set-status"></p>
+        </section>
+
+        <section class="set-card">
+          <h3>Files</h3>
+          <label class="enc-switch" title="Only affects new uploads. Existing files keep their current form.">
+            <input id="enc-toggle" type="checkbox">
+            <span class="enc-track" aria-hidden="true"></span>
+            <span class="enc-label">Encrypt new uploads</span>
+          </label>
+          <p class="muted small-print">Off: files are stored as normal files, so ordinary backups can read and restore them.
+            On: new uploads are end-to-end encrypted in your browser. Only your password or recovery key can open them.
+            Existing files keep whatever form they were uploaded in.</p>
+        </section>
+
+        <section class="set-card">
+          <h3>Change password</h3>
+          <form id="pw-form" class="set-grid" autocomplete="off">
+            <label class="field"><span>Current password</span><input id="pw-current" type="password" autocomplete="current-password" required /></label>
+            <label class="field"><span>New password</span><input id="pw-new" type="password" autocomplete="new-password" minlength="8" required /></label>
+            <label class="field"><span>Confirm new password</span><input id="pw-confirm" type="password" autocomplete="new-password" minlength="8" required /></label>
+            <div class="set-actions"><button class="btn primary small" type="submit">Change password</button></div>
+          </form>
+          <p id="pw-status" class="set-status"></p>
+          <p class="muted small-print">Your files, notes and recovery key keep working. Other signed-in devices are signed out.</p>
+        </section>
+
+        <section class="set-card">
+          <h3>API keys</h3>
+          <p class="muted small-print">For scripts, the command line or other apps. A key is shown once when created.</p>
+          <form id="key-form" class="set-row">
+            <label class="field grow"><span>New key name</span><input id="key-name" type="text" maxlength="64" placeholder="e.g. backup script" /></label>
+            <button class="btn primary small" type="submit">Create key</button>
+          </form>
+          <div id="key-new" class="key-new hidden">
+            <div class="muted small-print">Copy this now. It won't be shown again.</div>
+            <code id="key-new-value" class="key-value"></code>
+            <div class="set-actions"><button id="key-copy" class="btn ghost small" type="button">Copy</button>
+              <button id="key-done" class="btn primary small" type="button">Done</button></div>
+          </div>
+          <ul id="key-list" class="key-list"></ul>
+          <p id="key-empty" class="muted small-print hidden">No API keys yet.</p>
+        </section>
       </div>
 
       <!-- ===== Notes tab ===== -->

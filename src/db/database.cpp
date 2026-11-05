@@ -438,6 +438,49 @@ void CloudDB::deleteSession(const std::string& tokenHash) {
     }
 }
 
+int CloudDB::deleteOtherSessions(int64_t userId, const std::string& keepTokenHash) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "DELETE FROM sessions WHERE user_id = ? AND token_hash != ?");
+        q.bind(1, userId);
+        q.bind(2, keepTokenHash);
+        q.exec();
+        return sqlite3_changes(c.h);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("deleteOtherSessions: " + std::string(e.what()));
+        return -1;
+    }
+}
+
+bool CloudDB::setDisplayName(int64_t userId, const std::string& name) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET display_name = ? WHERE id = ?");
+        q.bind(1, name); q.bind(2, userId); q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setDisplayName: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::setPasswordAndKeys(int64_t userId, const std::string& pwHash,
+                                 const std::string& kdfSalt, const std::string& wrappedDek) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET password_hash = ?, kdf_salt = ?, wrapped_dek = ? WHERE id = ?");
+        q.bind(1, pwHash); q.bind(2, kdfSalt); q.bind(3, wrappedDek); q.bind(4, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setPasswordAndKeys: " + std::string(e.what()));
+        return false;
+    }
+}
+
 int CloudDB::purgeExpiredSessions() {
     std::unique_lock lock(db_mutex_);
     try {

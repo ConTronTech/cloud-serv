@@ -43,4 +43,28 @@ BID=$(id_of "$(A -X POST "http://$API/api/files" -H "X-Filename: tool.exe" -H "c
 A -o "$TESTDIR/bin.out" "http://$API/api/files/$BID"
 [ "$(sha256sum < "$TESTDIR/bin.dat")" = "$(sha256sum < "$TESTDIR/bin.out")" ] && ok "binary identical after download" || bad "binary changed"
 want "plain name stored" '"name":"tool.exe"' "$(A "http://$API/api/files")"
+echo "== display name =="
+want "set display name" '"displayName":"New Name"' "$(A -X PATCH "http://$API/api/auth/me/prefs" -d '{"displayName":"  New Name "}')"
+want "me shows new name" '"displayName":"New Name"' "$(A "http://$API/api/auth/me")"
+want "empty name rejected" '1-64' "$(A -X PATCH "http://$API/api/auth/me/prefs" -d '{"displayName":"   "}')"
+want "control chars rejected" '1-64' "$(A -X PATCH "http://$API/api/auth/me/prefs" -d '{"displayName":"a\u0007b"}')"
+want "nothing to change rejected" 'nothing to change' "$(A -X PATCH "http://$API/api/auth/me/prefs" -d '{}')"
+
+echo "== change password =="
+# second session for the same account (simulates another device)
+T2=$(tok_of "$(curl -s "http://$API/api/auth/login" -d '{"email":"p@e.cc","password":"supersecret"}')")
+[ -n "$T2" ] && ok "second device logged in" || bad "second login failed"
+NEWSALT=00112233445566778899aabbccddeeff
+want "wrong current password -> 403" 'current password is wrong' "$(A -X POST "http://$API/api/auth/password" -d "{\"currentPassword\":\"nope-nope\",\"newPassword\":\"newsecret123\",\"salt\":\"$NEWSALT\",\"wrappedDek\":\"aaaa.bbbb\"}")"
+want "bad salt rejected" 'invalid salt' "$(A -X POST "http://$API/api/auth/password" -d '{"currentPassword":"supersecret","newPassword":"newsecret123","salt":"zz","wrappedDek":"aaaa.bbbb"}')"
+want "bad key material rejected" 'invalid key material' "$(A -X POST "http://$API/api/auth/password" -d "{\"currentPassword\":\"supersecret\",\"newPassword\":\"newsecret123\",\"salt\":\"$NEWSALT\",\"wrappedDek\":\"<script>\"}")"
+R=$(A -X POST "http://$API/api/auth/password" -d "{\"currentPassword\":\"supersecret\",\"newPassword\":\"newsecret123\",\"salt\":\"$NEWSALT\",\"wrappedDek\":\"aaaa.bbbb\"}")
+want "password changed" '"ok":true' "$R"
+want "other device signed out (count)" '"otherSessionsSignedOut":1' "$R"
+want "this device still signed in" '"user"' "$(A "http://$API/api/auth/me")"
+want "other device token now rejected" 'unauthorized' "$(curl -s -H "authorization: Bearer $T2" "http://$API/api/auth/me")"
+want "old password no longer works" 'invalid credentials' "$(curl -s "http://$API/api/auth/login" -d '{"email":"p@e.cc","password":"supersecret"}')"
+want "new password works" '"token"' "$(curl -s "http://$API/api/auth/login" -d '{"email":"p@e.cc","password":"newsecret123"}')"
+want "new salt served" "$NEWSALT" "$(curl -s "http://$API/api/auth/salt?email=p@e.cc")"
+want "no auth -> 401" 'unauthorized' "$(curl -s -X POST "http://$API/api/auth/password" -d '{}')"
 finish

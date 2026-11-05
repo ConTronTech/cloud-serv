@@ -680,6 +680,7 @@ function gridCell(kind, item) {
   li.append(thumb, name, menu);
   if (selectMode) li.classList.add("selecting");
   if (isSelected(kind, item.id)) li.classList.add("selected");
+  li.addEventListener("contextmenu", (e) => itemContextMenu(e, kind, item));
   li.addEventListener("click", (e) => {
     if (e.target.closest(".menu-btn")) return;
     rowActivate(li, kind, item);
@@ -745,6 +746,7 @@ function listRow(kind, item, icText, displayName, modified, size) {
   menuCell.append(menuButton(kind, item));
 
   li.append(nameCell, cell("cell-mod", modified), cell("cell-size", kind === "folder" ? "—" : size), menuCell);
+  li.addEventListener("contextmenu", (e) => itemContextMenu(e, kind, item));
   li.addEventListener("click", (e) => {
     if (e.target.closest(".menu-btn")) return;
     rowActivate(li, kind, item);
@@ -782,33 +784,81 @@ function setSort(by) {
 }
 
 // ---- per-item action sheet ----
+// One list of actions per item, used by both the ••• sheet and the right-click menu.
+function itemActions(kind, item) {
+  if (kind === "folder") return [
+    { label: "Open", fn: () => loadFs(item.id) },
+    { label: item.starred ? "★ Unstar" : "☆ Star", fn: () => toggleStar("folder", item) },
+    { label: "Rename", fn: () => renameFolder(item) },
+    { label: "Move", fn: () => openMove("folder", item) },
+    "-",
+    { label: "Delete", fn: () => deleteFolder(item), danger: true },
+  ];
+  return [
+    { label: "Open", fn: () => openPreview(item) },
+    { label: "Download", fn: () => downloadFile(item) },
+    { label: item.starred ? "★ Unstar" : "☆ Star", fn: () => toggleStar("file", item) },
+    { label: "Rename", fn: () => renameFileItem(item) },
+    { label: "Move", fn: () => openMove("file", item) },
+    "-",
+    { label: "Delete", fn: () => deleteFile(item), danger: true },
+  ];
+}
+
 function openActions(kind, item) {
   const list = $("action-list");
   list.textContent = "";
   $("action-title").textContent = dispName(item);
-  const add = (label, fn, danger) => {
+  for (const a of itemActions(kind, item)) {
+    if (a === "-") continue;
     const b = document.createElement("button");
-    b.className = "action-item" + (danger ? " danger" : "");
-    b.type = "button"; b.textContent = label;
-    b.addEventListener("click", () => { closeActions(); fn(); });
+    b.className = "action-item" + (a.danger ? " danger" : "");
+    b.type = "button"; b.textContent = a.label;
+    b.addEventListener("click", () => { closeActions(); a.fn(); });
     list.appendChild(b);
-  };
-  if (kind === "folder") {
-    add("Open", () => loadFs(item.id));
-    add(item.starred ? "★ Unstar" : "☆ Star", () => toggleStar("folder", item));
-    add("Rename", () => renameFolder(item));
-    add("Move", () => openMove("folder", item));
-    add("Delete", () => deleteFolder(item), true);
-  } else {
-    add("Open", () => openPreview(item));
-    add(item.starred ? "★ Unstar" : "☆ Star", () => toggleStar("file", item));
-    add("Download", () => downloadFile(item));
-    add("Rename", () => renameFileItem(item));
-    add("Move", () => openMove("file", item));
-    add("Delete", () => deleteFile(item), true);
   }
   $("action-modal").classList.remove("hidden");
 }
+
+function selCount() { return selFolders.size + selFiles.size; }
+
+// ---- right-click (context) menu ----
+let ctxEl = null;
+function closeCtx() { if (ctxEl) { ctxEl.remove(); ctxEl = null; } }
+function openCtx(e, actions, title) {
+  e.preventDefault(); e.stopPropagation();
+  closeCtx();
+  const m = document.createElement("div");
+  m.className = "ctx-menu"; m.setAttribute("role", "menu");
+  if (title) { const t = document.createElement("div"); t.className = "ctx-title"; t.textContent = title; m.appendChild(t); }
+  for (const a of actions) {
+    if (a === "-") { const hr = document.createElement("div"); hr.className = "ctx-sep"; m.appendChild(hr); continue; }
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "ctx-item" + (a.danger ? " danger" : ""); b.setAttribute("role", "menuitem");
+    b.textContent = a.label;
+    b.addEventListener("click", (ev) => { ev.stopPropagation(); closeCtx(); a.fn(); });
+    m.appendChild(b);
+  }
+  document.body.appendChild(m);
+  const r = m.getBoundingClientRect();
+  m.style.left = Math.max(6, Math.min(e.clientX, window.innerWidth - r.width - 6)) + "px";
+  m.style.top = Math.max(6, Math.min(e.clientY, window.innerHeight - r.height - 6)) + "px";
+  ctxEl = m;
+  const first = m.querySelector(".ctx-item"); if (first) first.focus({ preventScroll: true });
+}
+// Right-click on an item. If it is part of a multi-selection, act on the whole selection.
+function itemContextMenu(e, kind, item) {
+  if (selectMode && isSelected(kind, item.id) && selCount() > 1) {
+    openCtx(e, [
+      { label: `Move ${selCount()} items`, fn: () => $("sel-move").click() },
+      "-",
+      { label: `Delete ${selCount()} items`, fn: () => $("sel-delete").click(), danger: true },
+    ], `${selCount()} selected`);
+    return;
+  }
+  openCtx(e, itemActions(kind, item), dispName(item));
+}
+
 function closeActions() { $("action-modal").classList.add("hidden"); }
 
 async function toggleStar(kind, item) {
@@ -847,7 +897,7 @@ async function deleteFile(f) {
   if (!confirm(`Delete "${dispName(f)}"?`)) return;
   const { ok } = await api("/api/files/" + f.id, { method: "DELETE", headers: authHeaders() });
   if (!ok) { toast("Delete failed."); return; }
-  loadFs(currentFolder);
+  refreshCurrentView();
 }
 
 // ---- folder + file operations ----
@@ -1051,40 +1101,87 @@ function previewCard(file, name) {
   return card;
 }
 
+// Media opens in a card: header (name, size, position, prev/next, download, close) and a
+// bounded media area, so it never takes over the whole screen. Plain (unencrypted) video,
+// audio and images stream straight from the server with seeking; encrypted ones are
+// decrypted in the browser first.
+let previewList = [], previewIndex = -1;
+function previewable(f) { return previewKind(f.mime, dispName(f)) !== "other"; }
+
 async function openPreview(file) {
+  previewList = sortItems(curFiles, true).filter(previewable);
+  previewIndex = previewList.findIndex((f) => f.id === file.id);
+  if (previewIndex < 0) { previewList = [file]; previewIndex = 0; }
+  await renderPreview(previewList[previewIndex]);
+}
+
+function previewStep(d) {
+  if (previewList.length < 2 || $("preview-modal").classList.contains("hidden")) return;
+  previewIndex = (previewIndex + d + previewList.length) % previewList.length;
+  renderPreview(previewList[previewIndex]);
+}
+
+function pvButton(label, title, fn, cls) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "pv-btn" + (cls ? " " + cls : ""); b.textContent = label; b.title = title;
+  b.setAttribute("aria-label", title); b.addEventListener("click", fn);
+  return b;
+}
+
+async function renderPreview(file) {
   const modal = $("preview-modal");
   const c = $("preview-content");
   const name = dispName(file);
   const kind = previewKind(file.mime, name);
+  if (previewObjectUrl) { URL.revokeObjectURL(previewObjectUrl); previewObjectUrl = null; }
 
-  c.textContent = "Loading…";
+  const card = document.createElement("div"); card.className = "pv-card pv-" + kind;
+  const head = document.createElement("div"); head.className = "pv-head";
+  const titles = document.createElement("div"); titles.className = "pv-titles";
+  const t = document.createElement("div"); t.className = "pv-title"; t.textContent = name; t.title = name;
+  const meta = document.createElement("div"); meta.className = "pv-meta";
+  meta.textContent = fmtSize(file.size || 0) + (previewList.length > 1 ? `  ·  ${previewIndex + 1} of ${previewList.length}` : "") +
+                     (file.wrappedKey ? "  ·  encrypted" : "");
+  titles.append(t, meta);
+  const actions = document.createElement("div"); actions.className = "pv-actions";
+  if (previewList.length > 1) actions.append(pvButton("‹", "Previous (←)", () => previewStep(-1)), pvButton("›", "Next (→)", () => previewStep(1)));
+  actions.append(pvButton("⤓", "Download", () => downloadFile(file)), pvButton("✕", "Close (Esc)", closePreview, "pv-close"));
+  head.append(titles, actions);
+  const body = document.createElement("div"); body.className = "pv-body"; body.textContent = "Loading…";
+  card.append(head, body);
+  c.textContent = ""; c.append(card);
   modal.classList.remove("hidden");
 
-  // Non-renderable types: no fetch, just the download card.
-  if (kind === "other") { c.textContent = ""; c.append(previewCard(file, name)); return; }
+  if (kind === "other") { body.textContent = ""; body.append(previewCard(file, name)); return; }
 
-  // Everything else needs the decrypted bytes (download-then-view).
-  let bytes;
-  try { bytes = await fetchPlaintext(file); }
-  catch { c.textContent = "Preview failed."; return; }
-  if (modal.classList.contains("hidden")) return; // closed while loading
-
-  if (kind === "text") {
-    const text = new TextDecoder().decode(bytes.subarray(0, 512 * 1024)); // cap huge files
-    const pre = document.createElement("pre"); pre.className = "preview-text"; pre.textContent = text;
-    c.textContent = ""; c.append(pre, previewCaption(name));
-    return;
+  let src;
+  const streamable = !file.wrappedKey && (kind === "video" || kind === "audio" || kind === "image");
+  if (streamable) {
+    src = API + "/api/files/" + file.id + "/content"; // session cookie authenticates; Range for seeking
+  } else {
+    let bytes;
+    try { bytes = await fetchPlaintext(file); }
+    catch { body.textContent = "Preview failed."; return; }
+    if (modal.classList.contains("hidden") || previewList[previewIndex] !== file) return; // closed or moved on
+    if (kind === "text") {
+      const pre = document.createElement("pre"); pre.className = "preview-text";
+      pre.textContent = new TextDecoder().decode(bytes.subarray(0, 512 * 1024)); // cap huge files
+      body.textContent = ""; body.append(pre); return;
+    }
+    src = URL.createObjectURL(new Blob([bytes], { type: file.mime || "application/octet-stream" }));
+    previewObjectUrl = src;
   }
-
-  const url = URL.createObjectURL(new Blob([bytes], { type: file.mime || "application/octet-stream" }));
-  if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
-  previewObjectUrl = url;
   let el;
-  if (kind === "image") { el = document.createElement("img"); el.className = "preview-media"; el.src = url; }
-  else if (kind === "video") { el = document.createElement("video"); el.className = "preview-media"; el.controls = true; el.autoplay = true; el.playsInline = true; el.src = url; }
-  else if (kind === "audio") { el = document.createElement("audio"); el.className = "preview-media"; el.controls = true; el.autoplay = true; el.src = url; }
-  else if (kind === "pdf") { el = document.createElement("iframe"); el.className = "preview-pdf"; el.src = url; }
-  c.textContent = ""; c.append(el, previewCaption(name));
+  if (kind === "image") { el = document.createElement("img"); el.className = "pv-media"; el.alt = name; el.src = src; }
+  else if (kind === "video") { el = document.createElement("video"); el.className = "pv-media"; el.controls = true; el.autoplay = true; el.playsInline = true; el.preload = "metadata"; el.src = src; }
+  else if (kind === "audio") {
+    el = document.createElement("div"); el.className = "pv-audio";
+    const ic = document.createElement("div"); ic.className = "pv-audio-icon"; ic.textContent = "♪";
+    const au = document.createElement("audio"); au.controls = true; au.autoplay = true; au.src = src;
+    el.append(ic, au);
+  }
+  else if (kind === "pdf") { el = document.createElement("iframe"); el.className = "pv-pdf"; el.title = name; el.src = src; }
+  body.textContent = ""; body.append(el);
 }
 
 function closePreview() {
@@ -1418,18 +1515,126 @@ let editingNoteId = null;
 
 // ---- sidebar navigation ----
 function setActiveNav(nav) {
-  ["files", "recent", "starred", "notes"].forEach((n) => {
+  ["files", "recent", "starred", "notes", "settings"].forEach((n) => {
     const el = $("nav-" + n); if (el) el.classList.toggle("active", n === nav);
   });
 }
-function showFilesTab() { $("files-tab").classList.remove("hidden"); $("notes-tab").classList.add("hidden"); }
+function showFilesTab() { $("files-tab").classList.remove("hidden"); $("notes-tab").classList.add("hidden"); $("settings-tab").classList.add("hidden"); }
 
 function goNotes() {
   setActiveNav("notes");
   $("files-tab").classList.add("hidden");
+  $("settings-tab").classList.add("hidden");
   $("notes-tab").classList.remove("hidden");
   showNotesList(); loadNotes();
   closeSidebar();
+}
+
+// ---- Settings ----
+let ME = null;
+function goSettings() {
+  setActiveNav("settings");
+  $("files-tab").classList.add("hidden"); $("notes-tab").classList.add("hidden");
+  $("settings-tab").classList.remove("hidden");
+  closeSidebar();
+  loadSettings();
+}
+function setStatus(id, msg, bad) { const el = $(id); el.textContent = msg || ""; el.classList.toggle("bad", !!bad); }
+
+async function loadSettings() {
+  const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
+  if (!ok || !body) { toast("Couldn't load settings"); return; }
+  ME = body;
+  const u = body.user || {};
+  $("set-email").textContent = u.email || "";
+  $("set-role").textContent = u.role === "admin" ? "Admin" : "User";
+  $("set-name").value = u.displayName || "";
+  $("set-storage").textContent = $("storage-chip").textContent || "—";
+  if (typeof body.encryptFiles === "boolean") { ENCRYPT_FILES = body.encryptFiles; $("enc-toggle").checked = ENCRYPT_FILES; }
+  loadApiKeys();
+}
+
+async function saveDisplayName(e) {
+  e.preventDefault();
+  const name = $("set-name").value.trim();
+  if (!name) { setStatus("set-name-status", "Name can't be empty", true); return; }
+  const { ok, body } = await api("/api/auth/me/prefs", {
+    method: "PATCH", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ displayName: name }),
+  });
+  if (!ok) { setStatus("set-name-status", prettyError(body) || "Couldn't save", true); return; }
+  setStatus("set-name-status", "Saved");
+  $("who").textContent = name;
+  const av = $("avatar"); if (av) { av.textContent = initials(name); av.title = name; }
+}
+
+// Password change keeps every file and note readable: the data key (DEK) never changes,
+// it is only re-wrapped under the new password. The recovery key keeps working too.
+async function changePassword(e) {
+  e.preventDefault();
+  const cur = $("pw-current").value, next = $("pw-new").value, conf = $("pw-confirm").value;
+  if (next.length < 8) { setStatus("pw-status", "New password must be at least 8 characters", true); return; }
+  if (next !== conf) { setStatus("pw-status", "New passwords don't match", true); return; }
+  setStatus("pw-status", "Checking…");
+  const me = ME || (await api("/api/auth/me", { headers: authHeaders() })).body;
+  if (!me || !me.salt || !me.wrappedDek) { setStatus("pw-status", "Couldn't load your keys", true); return; }
+  let oldAuth, dek;
+  try {
+    const old = await deriveKeys(cur, me.salt);
+    oldAuth = old.authKeyB64;
+    dek = await unwrapBytes(me.wrappedDek, old.kek);   // proves the current password locally
+  } catch { setStatus("pw-status", "Current password is wrong", true); return; }
+  setStatus("pw-status", "Re-wrapping your key…");
+  const saltHex = toHex(randBytes(16));
+  const fresh = await deriveKeys(next, saltHex);
+  const wrappedDek = await wrapBytes(dek, fresh.kek);
+  const { ok, body } = await api("/api/auth/password", {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ currentPassword: oldAuth, newPassword: fresh.authKeyB64, salt: saltHex, wrappedDek }),
+  });
+  if (!ok) { setStatus("pw-status", prettyError(body) || "Couldn't change password", true); return; }
+  ["pw-current", "pw-new", "pw-confirm"].forEach((id) => { $(id).value = ""; });
+  const n = body && body.otherSessionsSignedOut;
+  setStatus("pw-status", "Password changed" + (n > 0 ? ` · signed out ${n} other device${n === 1 ? "" : "s"}` : ""));
+  ME = null;
+}
+
+async function loadApiKeys() {
+  const list = $("key-list"); list.textContent = "";
+  const { ok, body } = await api("/api/auth/api-keys", { headers: authHeaders() });
+  const keys = (ok && body && body.keys) || [];
+  $("key-empty").classList.toggle("hidden", keys.length > 0);
+  for (const k of keys) {
+    const li = document.createElement("li"); li.className = "key-row";
+    const info = document.createElement("div"); info.className = "key-info";
+    const nm = document.createElement("div"); nm.className = "key-name"; nm.textContent = k.name || "Unnamed key";
+    const sub = document.createElement("div"); sub.className = "key-sub";
+    sub.textContent = (k.prefix ? k.prefix + "…" : "") + (k.createdAt ? "  ·  created " + fmtDate(k.createdAt) : "") +
+                      (k.lastUsedAt ? "  ·  last used " + fmtDate(k.lastUsedAt) : "");
+    info.append(nm, sub);
+    const rm = document.createElement("button"); rm.type = "button"; rm.className = "btn ghost small"; rm.textContent = "Revoke";
+    rm.addEventListener("click", async () => {
+      if (!confirm(`Revoke "${k.name || k.prefix}"? Anything using it stops working.`)) return;
+      const r = await api("/api/auth/api-keys/" + k.id, { method: "DELETE", headers: authHeaders() });
+      if (!r.ok) { toast("Couldn't revoke"); return; }
+      loadApiKeys();
+    });
+    li.append(info, rm); list.appendChild(li);
+  }
+}
+
+async function createApiKey(e) {
+  e.preventDefault();
+  const name = $("key-name").value.trim() || "API key";
+  const { ok, body } = await api("/api/auth/api-keys", {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ name }),
+  });
+  if (!ok || !body || !body.key) { toast(prettyError(body) || "Couldn't create key"); return; }
+  $("key-name").value = "";
+  $("key-new-value").textContent = body.key;
+  $("key-new").classList.remove("hidden");
+  loadApiKeys();
 }
 
 // Recent / Starred views (files-tab, results mode).
@@ -1631,6 +1836,35 @@ async function boot() {
   $("nav-recent").addEventListener("click", () => loadView("recent"));
   $("nav-starred").addEventListener("click", () => loadView("starred"));
   $("nav-notes").addEventListener("click", goNotes);
+  $("nav-settings").addEventListener("click", goSettings);
+  $("set-name-form").addEventListener("submit", saveDisplayName);
+  $("pw-form").addEventListener("submit", changePassword);
+  $("key-form").addEventListener("submit", createApiKey);
+  $("key-copy").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText($("key-new-value").textContent); toast("Copied"); }
+    catch { toast("Copy failed: select it and copy manually"); }
+  });
+  $("key-done").addEventListener("click", () => { $("key-new").classList.add("hidden"); $("key-new-value").textContent = ""; });
+  // Right-click on empty space in the file area
+  $("files-tab").addEventListener("contextmenu", (e) => {
+    if (e.target.closest(".fs-item, .grid-cell, input, textarea")) return;
+    openCtx(e, [
+      { label: "New folder", fn: () => newFolder() },
+      { label: "Upload files", fn: () => $("file-input").click() },
+      { label: "Upload folder", fn: () => $("folder-input").click() },
+      "-",
+      { label: "Refresh", fn: () => refreshCurrentView() },
+    ]);
+  });
+  document.addEventListener("click", closeCtx);
+  window.addEventListener("resize", closeCtx);
+  document.addEventListener("scroll", closeCtx, true);
+  document.addEventListener("keydown", (e) => {
+    if ($("preview-modal").classList.contains("hidden")) return;
+    if (e.key === "ArrowLeft") previewStep(-1);
+    if (e.key === "ArrowRight") previewStep(1);
+  });
+
 
   // New menu
   $("new-btn").addEventListener("click", openNewMenu);
@@ -1649,7 +1883,7 @@ async function boot() {
   // preview modal
   $("preview-close").addEventListener("click", closePreview);
   $("preview-modal").addEventListener("click", (e) => { if (e.target.id === "preview-modal") closePreview(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closePreview(); closeMove(); closeActions(); closeSort(); closeNewMenu(); } });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeCtx(); closePreview(); closeMove(); closeActions(); closeSort(); closeNewMenu(); } });
 
   setMode("login");
 

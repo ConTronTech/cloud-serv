@@ -44,6 +44,8 @@ public:
     // Returns the owning user id if the session hash is valid and unexpired.
     std::optional<int64_t> userForSession(const std::string& tokenHash);
     void deleteSession(const std::string& tokenHash);
+    // Sign out every other device of this user (keeps the session with keepTokenHash).
+    int deleteOtherSessions(int64_t userId, const std::string& keepTokenHash);
     int  purgeExpiredSessions();  // returns rows removed
 
     // ---- API keys ----
@@ -134,6 +136,11 @@ public:
     bool setUserQuota(int64_t userId, std::optional<int64_t> quotaBytes); // nullopt = unlimited
     // Per-account "encrypt my files" preference. nullopt = never set (use FILES_ENCRYPT_DEFAULT).
     std::optional<bool> getEncryptFiles(int64_t userId);
+    bool setDisplayName(int64_t userId, const std::string& name);
+    // Password change: new auth hash + new KDF salt + DEK re-wrapped under the new password.
+    // The recovery-key wrap is untouched (it wraps the same DEK, so it stays valid).
+    bool setPasswordAndKeys(int64_t userId, const std::string& pwHash,
+                            const std::string& kdfSalt, const std::string& wrappedDek);
     bool setEncryptFiles(int64_t userId, bool on);
     // Admins who can actually act: role admin AND status active. A suspended or
     // removed admin does not count, so "last admin" guards can't be satisfied by
