@@ -156,7 +156,9 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
         auto [bytes, count] = db.usage(*userId);
-        return http::jsonSuccess(json{{"used", bytes}, {"files", count}}.dump());
+        auto u = db.findUserById(*userId);
+        json quota = (u && u->storage_quota_bytes) ? json(*u->storage_quota_bytes) : json(nullptr);   // null = unlimited
+        return http::jsonSuccess(json{{"used", bytes}, {"files", count}, {"quota", quota}}.dump());
     });
 
     // ---- Search / category listing (across all folders) ----

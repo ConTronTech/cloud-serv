@@ -11,6 +11,7 @@
 #include "routes/devices.h"
 #include "routes/profile.h"
 #include "routes/events.h"
+#include "routes/storage.h"
 #include "routes/files.h"
 #include "routes/fs.h"
 #include "routes/notes.h"
@@ -148,6 +149,7 @@ int main(int argc, char* argv[]) {
         routes::registerDeviceRoutes(app, db);
         routes::registerProfileRoutes(app, db);
         routes::registerEventRoutes(app, db);
+        routes::registerStorageRoutes(app, db);
         routes::registerFileRoutes(app, db, store);
         routes::registerFsRoutes(app, db, store);
         routes::registerNoteRoutes(app, db);

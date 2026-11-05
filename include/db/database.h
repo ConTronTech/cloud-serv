@@ -62,6 +62,14 @@ public:
     bool deletePendingUser(int64_t userId);                           // deny: only status 'pending'
     int  countUsersWithStatus(const std::string& status);
 
+    // ---- Storage increase requests ----
+    struct StorageRequest { int64_t id = 0, user_id = 0, requested_bytes = 0; std::string email, display_name, message, status, created_at; };
+    int64_t createStorageRequest(int64_t userId, int64_t requestedBytes, const std::string& message); // replaces a pending one
+    std::vector<StorageRequest> listPendingStorageRequests();
+    std::optional<StorageRequest> getStorageRequest(int64_t id);
+    std::optional<StorageRequest> latestStorageRequest(int64_t userId);
+    bool decideStorageRequest(int64_t id, const std::string& status, int64_t adminId);   // approved | denied
+
     // ---- Trusted devices (per-browser key pairs; server stores only sealed copies of the DEK) ----
     struct Device { int64_t id = 0; int64_t user_id = 0; std::string name, public_key, wrapped_dek, status, created_at, last_used_at, created_ip; };
     int64_t createDevice(int64_t userId, const std::string& name, const std::string& publicKey,

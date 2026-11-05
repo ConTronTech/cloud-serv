@@ -535,7 +535,10 @@ async function loadUsage() {
   const { ok, body } = await api("/api/usage", { headers: authHeaders() });
   const el = $("storage-chip");
   if (ok && body) {
-    el.textContent = `${fmtSize(body.used || 0)} used · ${body.files || 0} file${body.files === 1 ? "" : "s"}`;
+    USAGE = { used: body.used || 0, quota: body.quota == null ? null : body.quota, files: body.files || 0 };
+    el.textContent = (USAGE.quota == null ? `${fmtSize(USAGE.used)} used` : `${fmtSize(USAGE.used)} of ${fmtSize(USAGE.quota)} used`) +
+      ` · ${USAGE.files} file${USAGE.files === 1 ? "" : "s"}`;
+    el.classList.toggle("near-full", USAGE.quota != null && USAGE.used > USAGE.quota * 0.9);
   }
 }
 
@@ -1429,7 +1432,9 @@ async function runUploads(jobs) {
 async function uploadFiles(fileList) {
   const files = Array.from(fileList);
   if (!files.length) return;
-  await runUploads(files.map((f) => ({ file: f, folderId: currentFolder, label: f.name })));
+  const keep = await fitToQuota(files.map((f) => ({ file: f, label: f.name })));
+  if (!keep || !keep.length) return;
+  await runUploads(keep.map((it) => ({ file: it.file, folderId: currentFolder, label: it.label })));
 }
 
 // Recreate the folder hierarchy for {file, path} items under the current folder.
@@ -1460,6 +1465,8 @@ async function ensureFolders(items) {
 // Upload {file, path} items, preserving the folder tree.
 async function uploadItems(items) {
   if (!items.length) { toast("Nothing to upload."); return; }
+  items = await fitToQuota(items.map((it) => ({ ...it, label: (it.path ? it.path + "/" : "") + it.file.name })));
+  if (!items || !items.length) return;   // cancelled: no folders were created
   const box = $("uploads");
   const prep = document.createElement("div");
   prep.className = "upload-row";
@@ -1881,6 +1888,120 @@ const listGen = {};
 function beginList(id) { listGen[id] = (listGen[id] || 0) + 1; return listGen[id]; }
 function isStale(id, g) { return listGen[id] !== g; }
 
+// ======================= Storage limit: fit, skip or ask =======================
+let USAGE = { used: 0, quota: null, files: 0 };
+function storedSize(bytes) {   // what a file will take on the server (encryption adds a little per 1 MB frame)
+  return ENCRYPT_FILES ? bytes + (Math.ceil(bytes / ENC_CHUNK) + 1) * ENC_OVERHEAD : bytes;
+}
+function niceGb(bytes) { return Math.ceil(bytes / 1073741824 * 10) / 10; }
+
+// Before a batch starts: if it won't fit, let the person skip files, ask for more, or cancel.
+// Resolves to the items to upload, or null (cancelled). Nothing is created on the server first.
+async function fitToQuota(items) {
+  await loadUsage();
+  if (USAGE.quota == null) return items;                       // unlimited
+  const free = Math.max(0, USAGE.quota - USAGE.used);
+  const sizes = items.map((it) => storedSize(it.file.size));
+  const total = sizes.reduce((a, b) => a + b, 0);
+  if (total <= free) return items;
+
+  // Suggest: skip the biggest files until the rest fits.
+  const skip = new Set();
+  let need = total - free;
+  for (const i of [...items.keys()].sort((a, b) => sizes[b] - sizes[a])) { if (need <= 0) break; skip.add(i); need -= sizes[i]; }
+
+  return new Promise((resolve) => {
+    const m = $("quota-modal"), list = $("quota-list");
+    $("quota-title").textContent = `Not enough space for ${items.length === 1 ? "this file" : "all " + items.length + " files"}`;
+    $("quota-sub").textContent = `This upload needs ${fmtSize(total)}, and you have ${fmtSize(free)} free of your ${fmtSize(USAGE.quota)} limit.`;
+    const frag = document.createDocumentFragment();
+    items.forEach((it, i) => {
+      const row = document.createElement("label"); row.className = "quota-row";
+      const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = skip.has(i);
+      cb.addEventListener("change", () => { cb.checked ? skip.add(i) : skip.delete(i); refresh(); });
+      const nm = document.createElement("span"); nm.className = "quota-name"; nm.textContent = it.label || it.file.name; nm.title = nm.textContent;
+      const sz = document.createElement("span"); sz.className = "quota-size"; sz.textContent = fmtSize(sizes[i]);
+      row.append(cb, nm, sz); frag.appendChild(row);
+    });
+    list.replaceChildren(frag);
+    const suggestGb = niceGb(USAGE.used + total + 64 * 1048576);
+    $("quota-ask-gb").value = String(Math.max(suggestGb, niceGb(USAGE.quota) + 0.5));
+    $("quota-ask-msg").value = "";
+    $("quota-ask").classList.add("hidden");
+    $("quota-ask-status").textContent = "";
+    function refresh() {
+      const up = items.reduce((a, _, i) => a + (skip.has(i) ? 0 : sizes[i]), 0);
+      const fits = up <= free, n = items.length - skip.size;
+      $("quota-sum").textContent = `Uploading ${n} of ${items.length} · ${fmtSize(up)} of ${fmtSize(free)} free`;
+      $("quota-sum").classList.toggle("bad", !fits);
+      $("quota-go").disabled = !fits || n === 0;
+      $("quota-go").textContent = n === 0 ? "Nothing to upload" : fits ? `Upload ${n} file${n === 1 ? "" : "s"}, skip ${skip.size}` : "Still too big: skip more";
+    }
+    refresh();
+    const done = (v) => { m.classList.add("hidden"); resolve(v); };
+    $("quota-go").onclick = () => done(items.filter((_, i) => !skip.has(i)));
+    $("quota-cancel").onclick = () => done(null);
+    $("quota-more").onclick = () => { $("quota-ask").classList.toggle("hidden"); $("quota-ask-gb").focus(); };
+    $("quota-ask-send").onclick = async () => {
+      const gb = Number($("quota-ask-gb").value);
+      if (!isFinite(gb) || gb * 1073741824 <= USAGE.quota) { $("quota-ask-status").textContent = `Ask for more than your current ${fmtSize(USAGE.quota)}`; return; }
+      const r = await api("/api/storage-requests", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ requestedBytes: Math.round(gb * 1073741824), message: $("quota-ask-msg").value.trim() }) });
+      if (!r.ok) { $("quota-ask-status").textContent = prettyError(r.body) || "Couldn't send the request"; return; }
+      $("quota-ask-status").textContent = `Sent: asked for ${gb} GB. You'll see it here as soon as an admin decides. Upload what fits now, or cancel and try again later.`;
+      $("quota-ask-send").disabled = true;
+      setTimeout(() => { $("quota-ask-send").disabled = false; }, 3000);
+    };
+    m.classList.remove("hidden");
+  });
+}
+
+// Live: my storage request was decided.
+async function onQuotaEvent() {
+  await loadUsage();
+  const { ok, body } = await api("/api/storage-requests/mine", { headers: authHeaders() });
+  const r = ok && body && body.request;
+  if (!r) return;
+  if (r.status === "approved") toast(`Storage increased: your limit is now ${fmtSize(USAGE.quota || r.requestedBytes)}`);
+  else if (r.status === "denied") toast("Your storage request was declined");
+}
+
+// Admin: storage requests
+async function loadStorageRequests() {
+  const list = $("sreq-list"); const g = beginList("sreq-list"); const frag = document.createDocumentFragment();
+  const { ok, body } = await api("/api/admin/storage-requests", { headers: authHeaders() });
+  const reqs = (ok && body && body.requests) || [];
+  if (isStale("sreq-list", g)) return;
+  $("sreq-empty").classList.toggle("hidden", reqs.length > 0);
+  for (const r of reqs) {
+    const li = document.createElement("li"); li.className = "key-row";
+    li.append(infoBlock(`${r.displayName || r.email} · ${r.email}`,
+      `uses ${fmtSize(r.usedBytes)} of ${r.quotaBytes == null ? "unlimited" : fmtSize(r.quotaBytes)} · asks for ${fmtSize(r.requestedBytes)} · ${fmtDate(r.createdAt)}`,
+      r.message ? "“" + r.message + "”" : ""));
+    li.append(rowBtn("Approve", "primary", () => decideStorage(r, r.requestedBytes)));
+    li.append(rowBtn("Other amount", "ghost", () => {
+      const v = prompt(`Give ${r.email} how many GB in total?`, String(niceGb(r.requestedBytes)));
+      if (v === null) return;
+      const gb = Number(v);
+      if (!isFinite(gb) || gb <= 0) { toast("Enter a number of GB"); return; }
+      decideStorage(r, Math.round(gb * 1073741824));
+    }));
+    li.append(rowBtn("Deny", "ghost", async () => {
+      if (!confirm(`Decline ${r.email}'s request?`)) return;
+      const x = await api("/api/admin/storage-requests/" + r.id + "/deny", { method: "POST", headers: authHeaders() });
+      if (!x.ok) toast(prettyError(x.body) || "Couldn't decline");
+    }));
+    frag.appendChild(li);
+  }
+  list.replaceChildren(frag);
+}
+async function decideStorage(r, bytes) {
+  const x = await api("/api/admin/storage-requests/" + r.id + "/approve", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ grantBytes: bytes }) });
+  if (!x.ok) { toast(prettyError(x.body) || "Couldn't approve"); return; }
+  toast(`${r.email} now has ${fmtSize(bytes)}`);
+}
+
 // ======================= Live updates (WebSocket) =======================
 // One connection per tab to /api/events. The server sends tiny hints when something
 // changes; we refetch only what's on screen. No timers polling the server.
@@ -1911,13 +2032,16 @@ function disconnectEvents() {
 // After (re)connecting, anything may have changed while we weren't listening.
 function catchUp() {
   refreshAdminBadge(); checkPendingDevices();
-  if (adminOpen()) { loadRequests(); loadInvites(); loadUsers(); }
+  if (adminOpen()) { loadRequests(); loadInvites(); loadUsers(); loadStorageRequests(); }
+  loadUsage();
   if (LOCK_STATE === "pending") handleEvent("devices");
 }
 function handleEvent(t) {
   if (t === "requests") soon("req", () => { refreshAdminBadge(); if (adminOpen()) loadRequests(); });
   else if (t === "invites") soon("inv", () => { if (adminOpen()) loadInvites(); });
   else if (t === "users") soon("usr", () => { if (adminOpen()) loadUsers(); });
+  else if (t === "storage") soon("sto", () => { refreshAdminBadge(); if (adminOpen()) loadStorageRequests(); });
+  else if (t === "quota") soon("quo", onQuotaEvent);
   else if (t === "devices") soon("dev", async () => {
     if (LOCK_STATE === "pending") {
       const s = await tryDeviceUnlock(uidNow());
@@ -1997,8 +2121,8 @@ function updateAdminNav() {
 }
 async function refreshAdminBadge() {
   if (!isAdmin()) return;
-  const { ok, body } = await api("/api/admin/requests", { headers: authHeaders() });
-  const n = ok && body ? (body.requests || []).length : 0;
+  const [a, b] = await Promise.all([api("/api/admin/requests", { headers: authHeaders() }), api("/api/admin/storage-requests", { headers: authHeaders() })]);
+  const n = (a.ok && a.body ? (a.body.requests || []).length : 0) + (b.ok && b.body ? (b.body.requests || []).length : 0);
   const bd = $("admin-badge"); bd.textContent = n; bd.classList.toggle("hidden", n === 0);
   $("avatar-dot").classList.toggle("hidden", n === 0);
 }
@@ -2007,7 +2131,7 @@ function goAdmin() {
   ["files-tab", "notes-tab", "settings-tab"].forEach((t) => $(t).classList.add("hidden"));
   $("admin-tab").classList.remove("hidden");
   closeSidebar(); closeUserMenu();
-  loadRequests(); loadInvites(); loadUsers();
+  loadRequests(); loadInvites(); loadUsers(); loadStorageRequests();
   startAdminLive();
 }
 function rowBtn(label, cls, fn) {

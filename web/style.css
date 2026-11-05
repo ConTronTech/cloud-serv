@@ -708,3 +708,24 @@ button.avatar { border: 0; cursor: pointer; padding: 0; overflow: hidden; font: 
 .um-item.danger { color: var(--danger); }
 .um-sep { height: 1px; background: var(--border); margin: 5px 4px; }
 .um-avatar { overflow: hidden; border-radius: 50%; display: grid; place-items: center; flex: none; }
+
+/* ===== Not enough space dialog ===== */
+.quota-card { width: min(640px, 94vw); max-height: 90vh; display: flex; flex-direction: column; padding: 1.3rem 1.4rem; gap: 0.4rem; }
+.quota-card h2 { margin: 0; font-size: 1.2rem; }
+.quota-card p { margin: 0.2rem 0; }
+.quota-list { overflow-y: auto; max-height: 40vh; margin: 0.5rem 0; border: 1px solid var(--border); border-radius: 12px; background: rgba(0, 0, 0, 0.25); }
+.quota-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.55rem 0.8rem; border-bottom: 1px solid rgba(255, 255, 255, 0.05); cursor: pointer; font-size: 0.9rem; }
+.quota-row:last-child { border-bottom: 0; }
+.quota-row:hover { background: rgba(255, 79, 154, 0.06); }
+.quota-row input { accent-color: var(--accent); width: 16px; height: 16px; flex: none; }
+.quota-row input:checked ~ .quota-name { text-decoration: line-through; color: var(--muted); }
+.quota-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quota-size { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+.quota-sum { font-weight: 600; color: var(--ok); }
+.quota-sum.bad { color: var(--danger); }
+.quota-ask { border-top: 1px solid var(--border); padding-top: 0.7rem; margin-top: 0.3rem; }
+.quota-ask .btn { width: auto; }
+.quota-actions { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.6rem; flex-wrap: wrap; }
+.quota-actions .btn { width: auto; }
+.quota-actions .grow { flex: 1; }
+.storage-chip.near-full { border-color: rgba(255, 90, 106, 0.6); color: #ffb3bb; }

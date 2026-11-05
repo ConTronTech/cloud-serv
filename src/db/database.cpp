@@ -105,6 +105,17 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_session_hash ON sessions(token_hash);
+            CREATE TABLE IF NOT EXISTS storage_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                requested_bytes INTEGER NOT NULL,
+                message TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                decided_at DATETIME,
+                decided_by INTEGER,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS invites (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 code_hash TEXT UNIQUE NOT NULL,
@@ -571,6 +582,88 @@ CloudDB::Device readDevice(Stmt& q) {
 }
 const char* kDeviceCols = "id, user_id, name, public_key, wrapped_dek, status, created_at, COALESCE(last_used_at,''), created_ip";
 } // namespace
+
+namespace {
+const char* kSrCols = "r.id, r.user_id, r.requested_bytes, COALESCE(u.email,''), COALESCE(u.display_name,''), r.message, r.status, r.created_at";
+CloudDB::StorageRequest readSr(Stmt& q) {
+    CloudDB::StorageRequest r;
+    r.id = q.colInt64(0); r.user_id = q.colInt64(1); r.requested_bytes = q.colInt64(2); r.email = q.colText(3);
+    r.display_name = q.colText(4); r.message = q.colText(5); r.status = q.colText(6); r.created_at = q.colText(7);
+    return r;
+}
+} // namespace
+
+int64_t CloudDB::createStorageRequest(int64_t userId, int64_t requestedBytes, const std::string& message) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        { Stmt d(c.h, "DELETE FROM storage_requests WHERE user_id = ? AND status = 'pending'"); d.bind(1, userId); d.exec(); }
+        Stmt q(c.h, "INSERT INTO storage_requests(user_id, requested_bytes, message) VALUES(?, ?, ?)");
+        q.bind(1, userId); q.bind(2, requestedBytes); q.bind(3, message);
+        if (sqlite3_step(q.s) != SQLITE_DONE) return -1;
+        return sqlite3_last_insert_rowid(c.h);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("createStorageRequest: " + std::string(e.what()));
+        return -1;
+    }
+}
+
+std::vector<CloudDB::StorageRequest> CloudDB::listPendingStorageRequests() {
+    std::shared_lock lock(db_mutex_);
+    std::vector<StorageRequest> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        const std::string sql = std::string("SELECT ") + kSrCols + " FROM storage_requests r LEFT JOIN users u ON u.id = r.user_id WHERE r.status = 'pending' ORDER BY r.id";
+        Stmt q(c.h, sql.c_str());
+        while (q.step()) out.push_back(readSr(q));
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("listPendingStorageRequests: " + std::string(e.what()));
+    }
+    return out;
+}
+
+std::optional<CloudDB::StorageRequest> CloudDB::getStorageRequest(int64_t id) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        const std::string sql = std::string("SELECT ") + kSrCols + " FROM storage_requests r LEFT JOIN users u ON u.id = r.user_id WHERE r.id = ?";
+        Stmt q(c.h, sql.c_str());
+        q.bind(1, id);
+        if (!q.step()) return std::nullopt;
+        return readSr(q);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("getStorageRequest: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+std::optional<CloudDB::StorageRequest> CloudDB::latestStorageRequest(int64_t userId) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        const std::string sql = std::string("SELECT ") + kSrCols + " FROM storage_requests r LEFT JOIN users u ON u.id = r.user_id WHERE r.user_id = ? ORDER BY r.id DESC LIMIT 1";
+        Stmt q(c.h, sql.c_str());
+        q.bind(1, userId);
+        if (!q.step()) return std::nullopt;
+        return readSr(q);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("latestStorageRequest: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::decideStorageRequest(int64_t id, const std::string& status, int64_t adminId) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE storage_requests SET status = ?, decided_at = CURRENT_TIMESTAMP, decided_by = ? WHERE id = ? AND status = 'pending'");
+        q.bind(1, status); q.bind(2, adminId); q.bind(3, id); q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("decideStorageRequest: " + std::string(e.what()));
+        return false;
+    }
+}
 
 int64_t CloudDB::createInvite(const std::string& codeHash, const std::string& label, int64_t createdBy, int64_t expiresAtEpoch) {
     std::unique_lock lock(db_mutex_);

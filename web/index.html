@@ -172,6 +172,13 @@
         </section>
 
         <section class="set-card">
+          <h3>Storage requests</h3>
+          <p class="muted small-print">People asking for a bigger storage limit. Approve gives them what they asked for; "Other amount" lets you choose.</p>
+          <ul id="sreq-list" class="key-list"></ul>
+          <p id="sreq-empty" class="muted small-print hidden">Nobody waiting.</p>
+        </section>
+
+        <section class="set-card">
           <h3>Invite codes</h3>
           <p class="muted small-print">Each code works once and skips the approval queue. It's shown only when you create it.</p>
           <form id="inv-form" class="set-row">
@@ -328,6 +335,31 @@
         <div class="recovery-actions">
           <button id="recovery-download" class="btn ghost" type="button">Download key file</button>
           <button id="recovery-continue" class="btn primary" type="button">I've saved it — continue</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Not enough space ===== -->
+    <div id="quota-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="quota-title">
+      <div class="card quota-card">
+        <h2 id="quota-title">Not enough space</h2>
+        <p id="quota-sub" class="muted"></p>
+        <p class="small-print muted">Ticked files are skipped. The biggest ones are ticked so the rest fits; change it however you like.</p>
+        <div id="quota-list" class="quota-list"></div>
+        <p id="quota-sum" class="quota-sum"></p>
+        <div id="quota-ask" class="quota-ask hidden">
+          <div class="set-row">
+            <label class="field"><span>New limit (GB)</span><input id="quota-ask-gb" type="number" min="0.1" step="0.5" /></label>
+            <label class="field grow"><span>Message for the admin (optional)</span><input id="quota-ask-msg" type="text" maxlength="300" placeholder="What it's for" /></label>
+            <button id="quota-ask-send" class="btn primary small" type="button">Send request</button>
+          </div>
+          <p id="quota-ask-status" class="small-print"></p>
+        </div>
+        <div class="quota-actions">
+          <button id="quota-more" class="btn ghost small" type="button">Request more storage</button>
+          <span class="grow"></span>
+          <button id="quota-cancel" class="btn ghost small" type="button">Cancel upload</button>
+          <button id="quota-go" class="btn primary small" type="button">Upload</button>
         </div>
       </div>
     </div>
