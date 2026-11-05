@@ -99,6 +99,7 @@ async function loadPrefs() {
   const t = $("enc-toggle"); if (t) t.checked = ENCRYPT_FILES;
 }
 async function setEncryptPref(on) {
+  if (on && !DEK_RAW) { $("enc-toggle").checked = false; toast("Unlock encryption on this device first (banner at the top)"); return; }
   if (on && !confirm("Encrypt new uploads?\n\nEncrypted files can only be opened with your password or recovery key. If you lose both, those files are gone for good, and server backups can't read them.")) {
     $("enc-toggle").checked = false; return;
   }
@@ -124,6 +125,7 @@ function showApp(user) {
   $("who").textContent = label;
   const av = $("avatar"); if (av) { av.textContent = initials(label); av.title = label; }
   loadPrefs();
+  refreshMe();
   loadFs(0); // land on Files
 }
 
@@ -1208,6 +1210,7 @@ async function uploadOne(file, state, folderId) {
 // rate-limited (429).
 async function uploadDirect(file, state, folderId) {
   let enc;
+  if (ENCRYPT_FILES && !DEK_RAW) { state.textContent = "Locked: unlock this device to upload encrypted"; return false; }
   if (ENCRYPT_FILES) {
     try { enc = await encryptFileForUpload(file); }
     catch { state.textContent = "Encryption failed"; return false; }
@@ -1258,6 +1261,7 @@ async function uploadDirect(file, state, folderId) {
 // slices of the ciphertext, so resume/offset logic is unchanged.
 async function uploadChunked(file, state, folderId) {
   let enc = null, cipher = null, total;
+  if (ENCRYPT_FILES && !DEK_RAW) { state.textContent = "Locked: unlock this device to upload encrypted"; return false; }
   if (ENCRYPT_FILES) {
     state.textContent = "Encrypting…";
     try { enc = await encryptFileForUpload(file); }
@@ -1530,6 +1534,86 @@ function goNotes() {
   closeSidebar();
 }
 
+// ---- Sign in with authentik (SSO) + "locked" mode ----
+// A session can exist without the encryption key on this device (SSO login, or a new tab).
+// Plain files work normally; encrypted items stay locked until the key is unlocked here.
+let SSO = { enabled: false, label: "SSO" };
+const SSO_ERRORS = {
+  "not-allowed": "Your account isn't allowed to use cloud-serv. Ask the owner to add you to the right group.",
+  "email-in-use": "An account with that email already exists. Log in with your password, then link it under Settings > Sign-in methods.",
+  "linked-elsewhere": "That identity is already linked to a different account.",
+  "expired": "The sign-in took too long or was already used. Please try again.",
+  "cancelled": "Sign-in was cancelled.",
+  "idp-unreachable": "Couldn't reach the sign-in provider. Try again shortly.",
+  "not-signed-in": "Log in first, then link the account from Settings.",
+  "no-email": "The sign-in provider didn't share an email address.",
+  "account-suspended": "This account is suspended.",
+};
+async function loadSsoConfig() {
+  const { ok, body } = await api("/api/auth/oidc/config");
+  if (ok && body) SSO = { enabled: !!body.enabled, label: body.label || "SSO" };
+  $("sso-row").classList.toggle("hidden", !SSO.enabled);
+  $("sso-btn-label").textContent = "Sign in with " + SSO.label;
+}
+function hashParam() { return decodeURIComponent((location.hash || "").replace(/^#/, "")); }
+function clearHash() { history.replaceState(null, "", location.pathname + location.search); }
+
+// Unlock banner: shown while this device doesn't hold the key.
+function updateLockBanner() {
+  const b = $("lock-banner"); if (!b) return;
+  const locked = !DEK_RAW;
+  const hasKeys = !!(ME && ME.wrappedDek);
+  b.classList.toggle("hidden", !locked);
+  $("lock-form").classList.toggle("hidden", !hasKeys);
+  $("lock-text").textContent = hasKeys
+    ? "Encrypted items (notes and any encrypted files) are locked on this device."
+    : "Encryption isn't set up on this account yet. Plain files work normally.";
+}
+async function unlockWithPassword(e) {
+  e.preventDefault();
+  const pw = $("lock-pw").value;
+  const me = ME || (await api("/api/auth/me", { headers: authHeaders() })).body;
+  if (!me || !me.salt || !me.wrappedDek) { toast("Nothing to unlock on this account"); return; }
+  try {
+    const { kek } = await deriveKeys(pw, me.salt);
+    setDEK(await unwrapBytes(me.wrappedDek, kek));
+  } catch { toast("That password didn't unlock it"); return; }
+  $("lock-pw").value = "";
+  clearThumbCache(); updateLockBanner(); toast("Unlocked on this device");
+  refreshCurrentView();
+}
+async function refreshMe() {
+  const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
+  if (ok && body) ME = body;
+  updateLockBanner();
+  return ok ? body : null;
+}
+
+// Settings > Sign-in methods
+async function loadIdentities() {
+  const box = $("ids-list"); box.textContent = "";
+  const { ok, body } = await api("/api/auth/identities", { headers: authHeaders() });
+  if (!ok || !body) return;
+  $("ids-card").classList.toggle("hidden", !body.ssoEnabled && !(body.identities || []).length);
+  $("ids-link").textContent = "Link " + (body.label || "SSO");
+  $("ids-password").textContent = body.localLogin ? "Email + password: on" : "Email + password: not set (this account signs in with " + (body.label || "SSO") + ")";
+  for (const i of body.identities || []) {
+    const li = document.createElement("li"); li.className = "key-row";
+    const info = document.createElement("div"); info.className = "key-info";
+    const nm = document.createElement("div"); nm.className = "key-name"; nm.textContent = i.provider + (i.email ? " · " + i.email : "");
+    const sub = document.createElement("div"); sub.className = "key-sub"; sub.textContent = i.createdAt ? "linked " + fmtDate(i.createdAt) : "";
+    info.append(nm, sub);
+    const rm = document.createElement("button"); rm.type = "button"; rm.className = "btn ghost small"; rm.textContent = "Unlink";
+    rm.addEventListener("click", async () => {
+      if (!confirm(`Unlink ${i.provider}? You won't be able to sign in with it until you link it again.`)) return;
+      const r = await api("/api/auth/identities/" + i.id, { method: "DELETE", headers: authHeaders() });
+      if (!r.ok) { toast(prettyError(r.body) || "Couldn't unlink"); return; }
+      loadIdentities();
+    });
+    li.append(info, rm); box.appendChild(li);
+  }
+}
+
 // ---- Settings ----
 let ME = null;
 function goSettings() {
@@ -1551,7 +1635,9 @@ async function loadSettings() {
   $("set-name").value = u.displayName || "";
   $("set-storage").textContent = $("storage-chip").textContent || "—";
   if (typeof body.encryptFiles === "boolean") { ENCRYPT_FILES = body.encryptFiles; $("enc-toggle").checked = ENCRYPT_FILES; }
+  updateLockBanner();
   loadApiKeys();
+  loadIdentities();
 }
 
 async function saveDisplayName(e) {
@@ -1693,7 +1779,7 @@ let notesMigrating = false;
 // were encrypted. Oldest first and with preserveUpdatedAt so the list order and
 // "Edited" times don't change. A failure leaves that note as-is for next time.
 async function migrateLegacyNotes(notes) {
-  if (notesMigrating) return;
+  if (notesMigrating || !DEK_RAW) return;   // needs the key on this device
   const legacy = notes.filter((n) => !n.encTitle).reverse();
   if (!legacy.length) return;
   notesMigrating = true;
@@ -1887,13 +1973,32 @@ async function boot() {
 
   setMode("login");
 
-  // Need both a valid session cookie AND the decryption key (per-tab). Reopening the app
-  // in a fresh tab clears the key, so you log in again to re-derive it.
-  if (restoreDEK()) {
-    const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
-    if (ok && body && body.user) { showApp(body.user); return; }
-    clearDEK();
+  $("lock-form").addEventListener("submit", unlockWithPassword);
+  $("sso-btn").addEventListener("click", () => { location.href = "/api/auth/oidc/start"; });
+  $("ids-link").addEventListener("click", () => { location.href = "/api/auth/oidc/start?mode=link"; });
+  await loadSsoConfig();
+
+  // Coming back from the sign-in provider?
+  const h = hashParam();
+  if (h.startsWith("sso-error=")) {
+    clearHash();
+    const code = h.slice(10);
+    $("auth-error").textContent = SSO_ERRORS[code] || ("Sign-in failed (" + code + ")");
   }
+  const cameFromSso = h === "sso" || h === "sso-linked";
+  if (cameFromSso) clearHash();
+
+  // A valid session is enough to open the app. The encryption key is per device/tab:
+  // without it, plain files work and encrypted items stay locked until unlocked.
+  restoreDEK();
+  const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
+  if (ok && body && body.user) {
+    ME = body;
+    showApp(body.user);
+    if (h === "sso-linked") { goSettings(); toast(SSO.label + " linked to your account"); }
+    return;
+  }
+  clearDEK();
   showAuth();
 }
 

@@ -37,6 +37,17 @@ public:
     // key derivations that must not be client-computable, e.g. the decoy salt.
     std::string serverSecret();
 
+    // ---- External identities (Sign in with authentik / OIDC) ----
+    struct Identity { int64_t id = 0; int64_t user_id = 0; std::string issuer, subject, email, created_at; };
+    std::optional<int64_t> userForIdentity(const std::string& issuer, const std::string& subject);
+    // false if that identity is already linked to an account
+    bool linkIdentity(int64_t userId, const std::string& issuer, const std::string& subject, const std::string& email);
+    std::vector<Identity> listIdentities(int64_t userId);
+    bool unlinkIdentity(int64_t userId, int64_t identityId);
+    // Accounts created through SSO have no password the user knows: local_login = 0.
+    bool setLocalLogin(int64_t userId, bool on);
+    bool hasLocalLogin(int64_t userId);
+
     // ---- Sessions ----
     // Stores only the hash of the token; expiresAt is a unix epoch (seconds).
     bool createSession(int64_t userId, const std::string& tokenHash,

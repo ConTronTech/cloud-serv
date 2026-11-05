@@ -639,3 +639,25 @@ img.pv-media { background: transparent; object-fit: contain; }
 .set-row .grow { flex: 1 1 auto; min-width: 0; }
 .set-row .grow input { width: 100%; }
 .set-grid .set-actions { grid-column: 1 / -1; justify-content: flex-start; margin-top: 0.2rem; }
+
+/* ===== SSO button + "or" divider (login card) ===== */
+.sso-row { margin-top: 0.4rem; }
+.sso-or { display: flex; align-items: center; gap: 0.7rem; color: var(--muted); font-size: 0.8rem; margin: 0.6rem 0 0.9rem; }
+.sso-or::before, .sso-or::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.sso-btn {
+  width: 100%; display: flex; align-items: center; justify-content: center; gap: 0.55rem; font-weight: 600;
+  color: var(--text); background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border); box-shadow: var(--bevel);
+}
+.sso-btn:hover { background: rgba(255, 79, 154, 0.12); border-color: rgba(255, 79, 154, 0.5); }
+.sso-ic { color: var(--accent); }
+
+/* ===== Locked-on-this-device banner ===== */
+.lock-banner {
+  display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 1rem;
+  padding: 0.7rem 0.9rem; border-radius: 12px; border: 1px solid rgba(255, 79, 154, 0.35);
+  background: rgba(255, 79, 154, 0.08); box-shadow: var(--bevel); font-size: 0.88rem;
+}
+.lock-text { flex: 1; min-width: 200px; }
+.lock-form { display: flex; gap: 0.5rem; }
+.lock-form input { font: inherit; color: var(--text); background: rgba(0, 0, 0, 0.35); border: 1px solid var(--border); border-radius: 10px; padding: 0.45rem 0.7rem; width: 210px; }
+.lock-form .btn { width: auto; }

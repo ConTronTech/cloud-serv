@@ -7,6 +7,7 @@
 #include "cli/admin_cli.h"
 #include "routes/admin.h"
 #include "routes/auth.h"
+#include "routes/oidc.h"
 #include "routes/files.h"
 #include "routes/fs.h"
 #include "routes/notes.h"
@@ -78,11 +79,11 @@ int main(int argc, char* argv[]) {
         security::RateLimiter rateLimiter;
         rateLimiter.init(
             config.get_bool("env", "RATE_LIMIT_ENABLED", true),
-            config.get_int("env", "READ_RPM", 240),
-            config.get_int("env", "WRITE_RPM", 60),
-            config.get_int("env", "BURST_SIZE", 30),
-            config.get_int("env", "BAN_THRESHOLD", 10),
-            config.get_int("env", "BAN_DURATION", 600)
+            config.get_int("env", "READ_RPM", 1200),
+            config.get_int("env", "WRITE_RPM", 600),
+            config.get_int("env", "BURST_SIZE", 200),
+            config.get_int("env", "BAN_THRESHOLD", 100),
+            config.get_int("env", "BAN_DURATION", 300)
         );
         std::string proxyStr = config.get("env", "TRUSTED_PROXIES", "");
         if (!proxyStr.empty()) {
@@ -140,6 +141,7 @@ int main(int argc, char* argv[]) {
         int64_t maxFileBytes = maxFileMb * 1024 * 1024;
 
         routes::registerAuthRoutes(app, db, sessionSeconds);
+        routes::registerOidcRoutes(app, db, sessionSeconds);
         routes::registerFileRoutes(app, db, store);
         routes::registerFsRoutes(app, db, store);
         routes::registerNoteRoutes(app, db);

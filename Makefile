@@ -9,7 +9,7 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -pthread \
 
 # -lssl -lcrypto: password hashing (PBKDF2), SHA-256, CSPRNG in security/crypto
 # -lsqlite3: system SQLite (libsqlite3-dev)
-LDFLAGS = -lpthread -lssl -lcrypto -lsqlite3
+LDFLAGS = -lpthread -lssl -lcrypto -lsqlite3 -lcurl
 
 # Project sources
 PROJECT_SOURCES = src/main.cpp \
@@ -23,10 +23,12 @@ PROJECT_SOURCES = src/main.cpp \
                   src/routes/files.cpp \
                   src/routes/fs.cpp \
                   src/routes/notes.cpp \
+                  src/routes/oidc.cpp \
                   src/routes/uploads.cpp \
                   src/routes/static_files.cpp \
                   src/security/crypto.cpp \
                   src/security/e2e_keys.cpp \
+                  src/security/oidc.cpp \
                   src/security/request_auth.cpp \
                   src/security/rate_limiter.cpp \
                   src/security/sanitizer.cpp \

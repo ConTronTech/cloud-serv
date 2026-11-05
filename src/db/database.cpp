@@ -105,6 +105,17 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_session_hash ON sessions(token_hash);
+            CREATE TABLE IF NOT EXISTS user_identities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                issuer TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                email TEXT DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(issuer, subject),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_identity_user ON user_identities(user_id);
             CREATE TABLE IF NOT EXISTS api_keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -223,6 +234,8 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN storage_quota_bytes INTEGER;", nullptr, nullptr, nullptr);
         // NULL = user never chose; the server default (FILES_ENCRYPT_DEFAULT) applies.
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN encrypt_files INTEGER;", nullptr, nullptr, nullptr);
+        // 0 = account was created through SSO and has no usable local password.
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN local_login INTEGER NOT NULL DEFAULT 1;", nullptr, nullptr, nullptr);
 
         // Admin bootstrap: if this DB has no admin yet, promote the earliest
         // (lowest-id) account. Runs every startup but is a no-op once an admin
@@ -435,6 +448,91 @@ void CloudDB::deleteSession(const std::string& tokenHash) {
         q.exec();
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("deleteSession: " + std::string(e.what()));
+    }
+}
+
+std::optional<int64_t> CloudDB::userForIdentity(const std::string& issuer, const std::string& subject) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT user_id FROM user_identities WHERE issuer = ? AND subject = ?");
+        q.bind(1, issuer); q.bind(2, subject);
+        if (!q.step()) return std::nullopt;
+        return q.colInt64(0);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("userForIdentity: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::linkIdentity(int64_t userId, const std::string& issuer, const std::string& subject, const std::string& email) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "INSERT INTO user_identities(user_id, issuer, subject, email) VALUES(?, ?, ?, ?)");
+        q.bind(1, userId); q.bind(2, issuer); q.bind(3, subject); q.bind(4, email);
+        return sqlite3_step(q.s) == SQLITE_DONE;   // UNIQUE(issuer, subject) -> false
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().warn("linkIdentity: " + std::string(e.what()));
+        return false;
+    }
+}
+
+std::vector<CloudDB::Identity> CloudDB::listIdentities(int64_t userId) {
+    std::shared_lock lock(db_mutex_);
+    std::vector<Identity> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id, user_id, issuer, subject, email, created_at FROM user_identities WHERE user_id = ? ORDER BY id");
+        q.bind(1, userId);
+        while (q.step()) {
+            Identity i; i.id = q.colInt64(0); i.user_id = q.colInt64(1); i.issuer = q.colText(2);
+            i.subject = q.colText(3); i.email = q.colText(4); i.created_at = q.colText(5);
+            out.push_back(i);
+        }
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("listIdentities: " + std::string(e.what()));
+    }
+    return out;
+}
+
+bool CloudDB::unlinkIdentity(int64_t userId, int64_t identityId) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "DELETE FROM user_identities WHERE id = ? AND user_id = ?");
+        q.bind(1, identityId); q.bind(2, userId); q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("unlinkIdentity: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::setLocalLogin(int64_t userId, bool on) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET local_login = ? WHERE id = ?");
+        q.bind(1, static_cast<int64_t>(on ? 1 : 0)); q.bind(2, userId); q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setLocalLogin: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::hasLocalLogin(int64_t userId) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT local_login FROM users WHERE id = ?");
+        q.bind(1, userId);
+        if (!q.step()) return false;
+        return q.colInt64(0) != 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("hasLocalLogin: " + std::string(e.what()));
+        return false;
     }
 }
 
