@@ -123,7 +123,8 @@ function showApp(user) {
   $("app-view").classList.remove("hidden");
   const label = user ? (user.displayName || user.email) : "";
   $("who").textContent = label;
-  const av = $("avatar"); if (av) { av.textContent = initials(label); av.title = label; }
+  if (!ME || !ME.user) ME = Object.assign(ME || {}, { user });
+  renderAvatar();
   loadPrefs();
   refreshMe().then(async () => {
     if (DEK_RAW && trustThisBrowser()) { try { await enrollThisDevice(uidNow()); } catch {} }
@@ -463,6 +464,7 @@ function showRecoveryKey(key, user, onContinue) {
 }
 
 async function logout() {
+  closeUserMenu(); stopAdminLive(); ME = null;
   stopApprovalPoll(); if (pendingPoll) { clearInterval(pendingPoll); pendingPoll = null; }
   await api("/api/auth/logout", { method: "POST", headers: authHeaders() });
   clearDEK();
@@ -1844,7 +1846,7 @@ async function loadDevices() {
 
 async function refreshMe() {
   const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
-  if (ok && body) { ME = body; updateAdminNav(); }
+  if (ok && body) { ME = body; updateAdminNav(); renderAvatar(); }
   updateLockBanner();
   return ok ? body : null;
 }
@@ -1874,6 +1876,67 @@ async function loadIdentities() {
   }
 }
 
+// ======================= Avatar / user menu =======================
+function avatarLabel() { const u = (ME && ME.user) || {}; return u.displayName || u.email || ""; }
+function renderAvatar() {
+  const label = avatarLabel();
+  const v = ME && ME.avatarVersion;
+  for (const id of ["avatar", "um-avatar"]) {
+    const el = $(id); if (!el) continue;
+    el.textContent = ""; el.title = label;
+    if (v) {
+      const img = document.createElement("img"); img.alt = ""; img.src = "/api/auth/me/avatar?v=" + v;
+      img.addEventListener("error", () => { el.textContent = initials(label); });
+      el.append(img);
+    } else el.textContent = initials(label);
+  }
+  $("who").textContent = label;
+  $("um-email").textContent = (ME && ME.user && ME.user.email) || "";
+  $("um-remove-pic").classList.toggle("hidden", !v);
+}
+function openUserMenu() { $("user-menu").classList.remove("hidden"); $("avatar").setAttribute("aria-expanded", "true"); }
+function closeUserMenu() { $("user-menu").classList.add("hidden"); $("avatar").setAttribute("aria-expanded", "false"); }
+function toggleUserMenu(e) { e.stopPropagation(); $("user-menu").classList.contains("hidden") ? openUserMenu() : closeUserMenu(); }
+
+// Square-crop + shrink in the browser (256 px JPEG), so the server only ever gets a small image.
+async function uploadAvatar(file) {
+  if (!file) return;
+  if (!/^image\//.test(file.type)) { toast("Pick an image file"); return; }
+  let bmp;
+  try { bmp = await createImageBitmap(file); } catch { toast("Couldn't read that image"); return; }
+  const side = Math.min(bmp.width, bmp.height), S = 256;
+  const c = document.createElement("canvas"); c.width = c.height = S;
+  c.getContext("2d").drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, S, S);
+  bmp.close();
+  let blob = null;
+  for (const q of [0.88, 0.75, 0.6]) {
+    blob = await new Promise((r) => c.toBlob(r, "image/jpeg", q));
+    if (blob && blob.size < 290 * 1024) break;
+  }
+  const res = await fetch(API + "/api/auth/me/avatar", { method: "PUT", headers: authHeaders({ "Content-Type": "image/jpeg" }), body: blob });
+  let body = null; try { body = await res.json(); } catch {}
+  if (!res.ok) { toast(prettyError(body) || "Couldn't save the picture"); return; }
+  if (ME) ME.avatarVersion = body && body.avatarVersion;
+  renderAvatar(); toast("Profile picture updated");
+}
+async function removeAvatar() {
+  const { ok } = await api("/api/auth/me/avatar", { method: "DELETE", headers: authHeaders() });
+  if (!ok) { toast("Couldn't remove it"); return; }
+  if (ME) ME.avatarVersion = 0;
+  renderAvatar(); toast("Picture removed");
+}
+
+// Admin page keeps itself current while it's open.
+let adminLive = null;
+function startAdminLive() {
+  stopAdminLive();
+  adminLive = setInterval(() => {
+    if ($("admin-tab").classList.contains("hidden") || document.hidden) return;
+    loadRequests(); loadInvites(); loadUsers(); refreshAdminBadge();
+  }, 6000);
+}
+function stopAdminLive() { if (adminLive) { clearInterval(adminLive); adminLive = null; } }
+
 // ======================= Admin page =======================
 let SIGNUP_REQUESTS = false;
 async function loadSignupMode() {
@@ -1891,13 +1954,15 @@ async function refreshAdminBadge() {
   const { ok, body } = await api("/api/admin/requests", { headers: authHeaders() });
   const n = ok && body ? (body.requests || []).length : 0;
   const bd = $("admin-badge"); bd.textContent = n; bd.classList.toggle("hidden", n === 0);
+  $("avatar-dot").classList.toggle("hidden", n === 0);
 }
 function goAdmin() {
   setActiveNav("admin");
   ["files-tab", "notes-tab", "settings-tab"].forEach((t) => $(t).classList.add("hidden"));
   $("admin-tab").classList.remove("hidden");
-  closeSidebar();
+  closeSidebar(); closeUserMenu();
   loadRequests(); loadInvites(); loadUsers();
+  startAdminLive();
 }
 function rowBtn(label, cls, fn) {
   const b = document.createElement("button"); b.type = "button"; b.className = "btn small " + cls; b.textContent = label;
@@ -2005,7 +2070,7 @@ function goSettings() {
   setActiveNav("settings");
   $("files-tab").classList.add("hidden"); $("notes-tab").classList.add("hidden"); $("admin-tab").classList.add("hidden");
   $("settings-tab").classList.remove("hidden");
-  closeSidebar();
+  closeSidebar(); closeUserMenu();
   loadSettings();
 }
 function setStatus(id, msg, bad) { const el = $(id); el.textContent = msg || ""; el.classList.toggle("bad", !!bad); }
@@ -2036,8 +2101,8 @@ async function saveDisplayName(e) {
   });
   if (!ok) { setStatus("set-name-status", prettyError(body) || "Couldn't save", true); return; }
   setStatus("set-name-status", "Saved");
-  $("who").textContent = name;
-  const av = $("avatar"); if (av) { av.textContent = initials(name); av.title = name; }
+  if (ME && ME.user) ME.user.displayName = name;
+  renderAvatar();
 }
 
 // Password change keeps every file and note readable: the data key (DEK) never changes,
@@ -2310,6 +2375,13 @@ async function boot() {
   $("nav-notes").addEventListener("click", goNotes);
   $("nav-settings").addEventListener("click", goSettings);
   $("nav-admin").addEventListener("click", goAdmin);
+  $("avatar").addEventListener("click", toggleUserMenu);
+  $("user-menu").addEventListener("click", (e) => e.stopPropagation());
+  document.addEventListener("click", closeUserMenu);
+  $("um-pic").addEventListener("click", () => { closeUserMenu(); $("avatar-input").click(); });
+  $("avatar-input").addEventListener("change", (e) => { uploadAvatar(e.target.files[0]); e.target.value = ""; });
+  $("um-remove-pic").addEventListener("click", () => { closeUserMenu(); removeAvatar(); });
+  window.addEventListener("focus", () => { if (!$("admin-tab").classList.contains("hidden")) { loadRequests(); loadInvites(); loadUsers(); refreshAdminBadge(); } });
   $("inv-form").addEventListener("submit", createInvite);
   $("inv-copy").addEventListener("click", async () => {
     try { await navigator.clipboard.writeText($("inv-new-value").textContent); toast("Copied"); } catch { toast("Copy failed: select it and copy manually"); }
@@ -2361,7 +2433,7 @@ async function boot() {
   // preview modal
   $("preview-close").addEventListener("click", closePreview);
   $("preview-modal").addEventListener("click", (e) => { if (e.target.id === "preview-modal") closePreview(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeCtx(); closePreview(); closeMove(); closeActions(); closeSort(); closeNewMenu(); } });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeUserMenu(); closeCtx(); closePreview(); closeMove(); closeActions(); closeSort(); closeNewMenu(); } });
 
   setMode("login");
 

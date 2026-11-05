@@ -1,4 +1,5 @@
 #include "routes/auth.h"
+#include "routes/profile.h"
 #include "security/crypto.h"
 #include "security/rate_limiter.h"
 #include "security/request_auth.h"
@@ -260,6 +261,7 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
             {"user", user->toJson()},
             {"salt", user->kdf_salt}, {"wrappedDek", user->wrapped_dek},
             {"wrappedDekRecovery", user->wrapped_dek_recovery},
+            {"avatarVersion", avatarVersion(*userId)},
             {"encryptFiles", db.getEncryptFiles(*userId).value_or(encDefault)}
         }.dump());
     });

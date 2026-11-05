@@ -25,6 +25,7 @@ PROJECT_SOURCES = src/main.cpp \
                   src/routes/fs.cpp \
                   src/routes/notes.cpp \
                   src/routes/oidc.cpp \
+                  src/routes/profile.cpp \
                   src/routes/uploads.cpp \
                   src/routes/static_files.cpp \
                   src/security/crypto.cpp \
