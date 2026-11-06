@@ -40,7 +40,8 @@ $(c '1;35' cloudctl) - manage cloud-serv ($INSTALL_DIR)
   admin <email>       create an admin account (prints a recovery key file path)
   tree <email> <dir>  switch an (empty) account to real folders at TREE_ROOT/<dir> (encryption off)
   rescan [email]      re-index real-folder accounts now (running server: instant; stopped: needs email)
-  backup [dir]        full backup: database, files, avatars, config, TLS (default $DATA_DIR/../cloud-serv-backups)
+  backup [dir] [--keep N]  backup: database, files, avatars, config, TLS (default $DATA_DIR/../cloud-serv-backups);
+                      real-folder trees are NOT included. --keep N deletes all but the newest N
   restore <file>      restore a backup made by 'backup' (keeps the old data aside)
   update <zip>        install a new deploy zip from package.sh (auto-backs up the database first)
   config [show|edit]  show the config (secrets hidden) or edit it, then restart
@@ -130,7 +131,15 @@ cmd_rescan() {
 
 cmd_backup() {
     need_root backup
-    local dest="${1:-$(dirname "$DATA_DIR")/cloud-serv-backups}" ts out tmp
+    local dest="" keep=0 ts out tmp
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --keep) keep="${2:-}"; shift 2 || die "--keep needs a number";;
+            *) dest="$1"; shift;;
+        esac
+    done
+    [[ "$keep" =~ ^[0-9]+$ ]] || die "--keep needs a number"
+    dest="${dest:-$(dirname "$DATA_DIR")/cloud-serv-backups}"
     ts="$(date +%Y%m%d-%H%M%S)"; out="$dest/cloud-serv-$ts.tar.gz"
     install -d -m 0700 "$dest"
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
@@ -147,6 +156,11 @@ EOF
         -C "$DATA_DIR" --exclude=cloud.db --exclude='cloud.db-*' --exclude=recovery.tmp .
     chmod 0600 "$out"
     say "done: $out ($(du -h "$out" | cut -f1)). It holds your config secrets and any unencrypted files: keep it private."
+    if [ "$keep" -gt 0 ]; then
+        # Only our own timestamped files; newest first; never the one just written.
+        local old; old="$(ls -1t "$dest"/cloud-serv-[0-9]*-[0-9]*.tar.gz 2>/dev/null | tail -n +$((keep + 1)))"
+        [ -n "$old" ] && { printf '%s\n' "$old" | xargs -r rm -f --; say "pruned $(printf '%s\n' "$old" | wc -l) old backup(s), keeping $keep"; }
+    fi
 }
 
 cmd_restore() {
@@ -274,6 +288,9 @@ menu() {
     done
 }
 
+# Everything runs from main() and the script exits on the same line, so bash has read the
+# whole file before anything executes: `cloudctl update` replacing this file mid-run is safe.
+main() {
 case "${1:-}" in
     "") menu ;;
     help|-h|--help) cmd_help ;;
@@ -282,3 +299,5 @@ case "${1:-}" in
     version) cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo dev ;;
     *) die "unknown command '$1' (cloudctl help)" ;;
 esac
+}
+main "$@"; exit $?
