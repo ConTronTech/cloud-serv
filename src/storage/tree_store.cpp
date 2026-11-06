@@ -356,7 +356,7 @@ std::string TreeStore::servePath(const std::string& acct, const Rel& parent, con
 }
 
 namespace {
-void walkDir(int dirFd, const TreeStore::Rel& rel, std::vector<TreeStore::Entry>& out,
+void walkDir(int dirFd, const TreeStore::Rel& rel, int32_t selfIdx, std::vector<TreeStore::Entry>& out,
              std::vector<std::string>& skipped, int depth) {
     if (depth > kMaxDepth) { skipped.push_back(printable(joinRel(rel, "")) + " (too deep)"); return; }
     int fd = ::dup(dirFd);
@@ -384,15 +384,16 @@ void walkDir(int dirFd, const TreeStore::Rel& rel, std::vector<TreeStore::Entry>
             continue;
         }
         TreeStore::Entry e;
-        e.parent = rel; e.name = n; e.dir = isDir;
+        e.parent = selfIdx; e.name = n; e.dir = isDir;
         e.size = isReg ? static_cast<int64_t>(st.st_size) : 0;
         e.mtime = static_cast<int64_t>(st.st_mtime);
-        out.push_back(e);
+        const int32_t myIdx = static_cast<int32_t>(out.size());
+        out.push_back(std::move(e));
         if (isDir) {
             int sub = ::openat(dirFd, n.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (sub < 0) { skipped.push_back(printable(joinRel(rel, n)) + " (cannot open)"); continue; }
             TreeStore::Rel child = rel; child.push_back(n);
-            walkDir(sub, child, out, skipped, depth + 1);
+            walkDir(sub, child, myIdx, out, skipped, depth + 1);
             ::close(sub);
         }
     }
@@ -402,7 +403,7 @@ void walkDir(int dirFd, const TreeStore::Rel& rel, std::vector<TreeStore::Entry>
 bool TreeStore::walk(const std::string& acct, std::vector<Entry>& out, std::vector<std::string>& skipped) const {
     Fd a(openAccount(acct));
     if (!a.ok()) return false;
-    walkDir(a.fd, Rel{}, out, skipped, 0);
+    walkDir(a.fd, Rel{}, -1, out, skipped, 0);
     return true;
 }
 

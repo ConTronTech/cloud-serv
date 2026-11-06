@@ -64,7 +64,10 @@ public:
                           int64_t* sizeOut = nullptr) const;
 
     // Walk the whole account tree (no symlinks, no special files, reserved dirs skipped).
-    struct Entry { Rel parent; std::string name; bool dir = false; int64_t size = 0; int64_t mtime = 0; };
+    // `parent` = index (in the walk's output) of the folder this entry is in; -1 = account root.
+    // Folders are always listed before anything inside them. Kept compact on purpose:
+    // a real tree has ~1M entries, so no per-entry path copies.
+    struct Entry { int32_t parent = -1; std::string name; bool dir = false; int64_t size = 0; int64_t mtime = 0; };
     bool walk(const std::string& acct, std::vector<Entry>& out,
               std::vector<std::string>& skipped) const;
 

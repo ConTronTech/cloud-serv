@@ -4,6 +4,7 @@
 #include "utils/logger.h"
 
 #include <atomic>
+#include <malloc.h>
 #include <chrono>
 #include <csignal>
 #include <mutex>
@@ -32,15 +33,17 @@ TreeScanResult scanTreeAccount(CloudDB& db, const TreeStore& tree, int64_t userI
     disk.reserve(found.size());
     for (auto& e : found) {
         CloudDB::DiskEntry d;
-        d.parent = std::move(e.parent);
+        d.parent = e.parent;
         d.name = std::move(e.name);
         d.dir = e.dir;
         d.size = e.size;
         d.mtime = e.mtime;
-        if (!d.dir) d.mime = TreeStore::mimeFor(d.name);
         disk.push_back(std::move(d));
     }
-    r.ok = db.treeSync(userId, disk, r.stats);
+    std::vector<TreeStore::Entry>().swap(found);   // free the walk before the sync
+    r.ok = db.treeSync(userId, disk, TreeStore::mimeFor, r.stats);
+    std::vector<CloudDB::DiskEntry>().swap(disk);
+    ::malloc_trim(0);   // hand the scan's memory back to the OS (glibc keeps it otherwise)
     if (tree.trashDays() > 0) r.trashPurged = tree.purgeTrash(acct);
     r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return r;

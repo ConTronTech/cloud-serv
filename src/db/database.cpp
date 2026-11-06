@@ -11,6 +11,9 @@
 #include <fstream>
 #include <set>
 #include <map>
+#include <unordered_map>
+#include <unordered_set>
+#include <climits>
 #include <functional>
 #include <sys/stat.h>
 
@@ -2462,13 +2465,9 @@ std::vector<std::pair<int64_t, std::string>> CloudDB::treeAccounts() {
     return out;
 }
 
-bool CloudDB::treeSync(int64_t userId, const std::vector<DiskEntry>& disk, TreeSyncStats& stats) {
+bool CloudDB::treeSync(int64_t userId, const std::vector<DiskEntry>& disk,
+                       const std::function<std::string(const std::string&)>& mimeFor, TreeSyncStats& stats) {
     std::unique_lock lock(db_mutex_);
-    auto joinPath = [](const std::vector<std::string>& parent, const std::string& name) {
-        std::string p;
-        for (const auto& c : parent) { p += c; p += '/'; }
-        return p + name;
-    };
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
         if (sqlite3_exec(c.h, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) return false;
@@ -2477,127 +2476,136 @@ bool CloudDB::treeSync(int64_t userId, const std::vector<DiskEntry>& disk, TreeS
             utils::Logger::get_instance().error("treeSync: " + what);
             return false;
         };
-
-        // Current folders -> full path. Parents may be listed after children, so resolve lazily.
-        struct Row { int64_t parent; std::string name; };
-        std::map<int64_t, Row> folders;
-        {
-            Stmt q(c.h, "SELECT id, parent_id, name FROM folders WHERE user_id = ?");
-            q.bind(1, userId);
-            while (q.step()) folders[q.colInt64(0)] = Row{q.colInt64(1), q.colText(2)};
-        }
-        std::map<int64_t, std::string> pathOf;   // folder id -> "a/b/c"
-        std::function<std::string(int64_t, int)> resolve = [&](int64_t id, int depth) -> std::string {
-            if (id == 0) return "";
-            auto hit = pathOf.find(id);
-            if (hit != pathOf.end()) return hit->second;
-            auto it = folders.find(id);
-            if (it == folders.end() || depth > 256) return std::string("\x01orphan/") + std::to_string(id);
-            std::string pp = resolve(it->second.parent, depth + 1);
-            std::string p = pp.empty() ? it->second.name : pp + "/" + it->second.name;
-            pathOf[id] = p;
-            return p;
+        auto reset = [](Stmt& st) { sqlite3_reset(st.s); sqlite3_clear_bindings(st.s); };
+        auto key = [](int64_t parent, const std::string& name) {
+            std::string k = std::to_string(parent);
+            k += '\x01'; k += name;
+            return k;
         };
-        std::map<std::string, int64_t> folderByPath;   // first row wins; extra rows count as stale
-        std::set<int64_t> staleFolders;
-        for (const auto& [id, row] : folders) {
-            std::string p = resolve(id, 0);
-            if (!folderByPath.emplace(p, id).second) staleFolders.insert(id);
-        }
 
-        struct FRow { int64_t id; int64_t size; int64_t stored; };
-        std::map<std::string, FRow> fileByPath;
-        std::vector<int64_t> staleFiles;
+        // ---- Folders: (parent id, name) -> id. Duplicate rows for one key are stale. ----
+        std::unordered_map<std::string, int64_t> folderByKey;
+        std::vector<int64_t> allFolders;
         {
-            Stmt q(c.h, "SELECT id, folder_id, name, size, stored_size FROM files WHERE user_id = ?");
+            Stmt q(c.h, "SELECT id, parent_id, name FROM folders WHERE user_id = ? ORDER BY id");
             q.bind(1, userId);
             while (q.step()) {
-                int64_t fid = q.colInt64(1);
-                std::string fp = fid == 0 ? "" : resolve(fid, 0);
-                std::string p = fp.empty() ? q.colText(2) : fp + "/" + q.colText(2);
-                if (!fileByPath.emplace(p, FRow{q.colInt64(0), q.colInt64(3), q.colInt64(4)}).second)
-                    staleFiles.push_back(q.colInt64(0));
+                int64_t id = q.colInt64(0);
+                allFolders.push_back(id);
+                folderByKey.emplace(key(q.colInt64(1), q.colText(2)), id);   // first (oldest) wins
             }
         }
+        std::unordered_set<int64_t> keepFolders;
+        std::vector<int64_t> dirId(disk.size(), -1);   // disk index -> folder row id (dirs only)
 
         Stmt insFolder(c.h, "INSERT INTO folders(user_id, parent_id, name, enc_name, created_at) "
                             "VALUES(?, ?, ?, '', datetime(?, 'unixepoch'))");
+        for (size_t i = 0; i < disk.size(); i++) {
+            const auto& e = disk[i];
+            if (!e.dir) continue;
+            int64_t parentId = 0;
+            if (e.parent >= 0) {
+                parentId = dirId[static_cast<size_t>(e.parent)];
+                if (parentId < 0) continue;     // parent couldn't be indexed: skip subtree
+            }
+            auto it = folderByKey.find(key(parentId, e.name));
+            if (it != folderByKey.end()) {
+                dirId[i] = it->second;
+            } else {
+                insFolder.bind(1, userId); insFolder.bind(2, parentId); insFolder.bind(3, e.name); insFolder.bind(4, e.mtime);
+                if (sqlite3_step(insFolder.s) != SQLITE_DONE) return fail(std::string("insert folder: ") + sqlite3_errmsg(c.h));
+                reset(insFolder);
+                dirId[i] = sqlite3_last_insert_rowid(c.h);
+                stats.foldersAdded++;
+            }
+            keepFolders.insert(dirId[i]);
+        }
+
+        // ---- Files: sort disk files by (folder id, name) and merge with the DB's sorted rows. ----
+        struct DF { int64_t folder; uint32_t idx; };
+        std::vector<DF> files;
+        files.reserve(disk.size());
+        for (size_t i = 0; i < disk.size(); i++) {
+            const auto& e = disk[i];
+            if (e.dir) continue;
+            int64_t folder = 0;
+            if (e.parent >= 0) {
+                folder = dirId[static_cast<size_t>(e.parent)];
+                if (folder < 0) continue;
+            }
+            files.push_back(DF{folder, static_cast<uint32_t>(i)});
+        }
+        // BINARY collation in SQLite = byte order = std::string::compare.
+        std::sort(files.begin(), files.end(), [&](const DF& x, const DF& y) {
+            if (x.folder != y.folder) return x.folder < y.folder;
+            return disk[x.idx].name < disk[y.idx].name;
+        });
+
+        std::vector<int64_t> delFiles;
+        std::vector<std::pair<int64_t, int64_t>> updFiles;   // id, new size
+        std::vector<uint32_t> newFiles;                        // index into `files`
+        {
+            Stmt q(c.h, "SELECT id, folder_id, name, size, stored_size FROM files WHERE user_id = ? "
+                        "ORDER BY folder_id, name COLLATE BINARY, id");
+            q.bind(1, userId);
+            size_t j = 0;
+            bool have = q.step();
+            int64_t lastFolder = INT64_MIN; std::string lastName;
+            while (have || j < files.size()) {
+                if (!have) { newFiles.push_back(static_cast<uint32_t>(j++)); continue; }
+                const int64_t rid = q.colInt64(0), rf = q.colInt64(1);
+                const std::string rn = q.colText(2);
+                if (rf == lastFolder && rn == lastName) {   // duplicate row for the same path
+                    delFiles.push_back(rid); have = q.step(); continue;
+                }
+                int cmp;
+                if (j >= files.size()) cmp = -1;
+                else if (rf != files[j].folder) cmp = rf < files[j].folder ? -1 : 1;
+                else cmp = rn.compare(disk[files[j].idx].name);
+                if (cmp < 0) {                 // row with nothing on disk
+                    delFiles.push_back(rid);
+                    have = q.step();
+                } else if (cmp > 0) {          // disk file with no row
+                    newFiles.push_back(static_cast<uint32_t>(j++));
+                } else {                       // same path: keep, maybe update the size
+                    const int64_t sz = disk[files[j].idx].size;
+                    if (q.colInt64(3) != sz || q.colInt64(4) != sz) updFiles.emplace_back(rid, sz);
+                    lastFolder = rf; lastName = rn;
+                    j++; have = q.step();
+                }
+            }
+        }
+
         Stmt insFile(c.h, "INSERT INTO files(user_id, folder_id, name, mime, size, storage_key, wrapped_key, "
                           "enc_name, enc_mime, stored_size, created_at) "
                           "VALUES(?, ?, ?, ?, ?, '-', '', '', '', ?, datetime(?, 'unixepoch'))");
-        Stmt updFile(c.h, "UPDATE files SET size = ?, stored_size = ? WHERE id = ? AND user_id = ?");
-        auto reset = [](Stmt& s) { sqlite3_reset(s.s); sqlite3_clear_bindings(s.s); };
-
-        std::set<std::string> seenFolders, seenFiles;
-        // The walk lists every folder before anything inside it.
-        for (const auto& e : disk) {
-            if (!e.dir) continue;
-            std::string p = joinPath(e.parent, e.name);
-            seenFolders.insert(p);
-            if (folderByPath.count(p)) continue;
-            std::string pp = joinPath(std::vector<std::string>(e.parent.begin(), e.parent.end()), "");
-            if (!pp.empty()) pp.pop_back();
-            int64_t parentId = 0;
-            if (!pp.empty()) {
-                auto it = folderByPath.find(pp);
-                if (it == folderByPath.end()) continue;   // parent wasn't indexable; skip subtree
-                parentId = it->second;
-            }
-            insFolder.bind(1, userId); insFolder.bind(2, parentId); insFolder.bind(3, e.name); insFolder.bind(4, e.mtime);
-            if (sqlite3_step(insFolder.s) != SQLITE_DONE) return fail(std::string("insert folder: ") + sqlite3_errmsg(c.h));
-            folderByPath[p] = sqlite3_last_insert_rowid(c.h);
-            reset(insFolder);
-            stats.foldersAdded++;
-        }
-        for (const auto& e : disk) {
-            if (e.dir) continue;
-            std::string p = joinPath(e.parent, e.name);
-            int64_t parentId = 0;
-            if (!e.parent.empty()) {
-                std::string pp = joinPath(e.parent, ""); pp.pop_back();
-                auto it = folderByPath.find(pp);
-                if (it == folderByPath.end()) continue;
-                parentId = it->second;
-            }
-            seenFiles.insert(p);
-            auto it = fileByPath.find(p);
-            if (it != fileByPath.end()) {
-                if (it->second.size != e.size || it->second.stored != e.size) {
-                    updFile.bind(1, e.size); updFile.bind(2, e.size); updFile.bind(3, it->second.id); updFile.bind(4, userId);
-                    if (sqlite3_step(updFile.s) != SQLITE_DONE) return fail(std::string("update file: ") + sqlite3_errmsg(c.h));
-                    reset(updFile);
-                    stats.filesUpdated++;
-                }
-                continue;
-            }
-            insFile.bind(1, userId); insFile.bind(2, parentId); insFile.bind(3, e.name);
-            insFile.bind(4, e.mime.empty() ? std::string("application/octet-stream") : e.mime);
-            insFile.bind(5, e.size); insFile.bind(6, e.size); insFile.bind(7, e.mtime);
+        for (uint32_t k : newFiles) {
+            const auto& f = files[k];
+            const auto& e = disk[f.idx];
+            insFile.bind(1, userId); insFile.bind(2, f.folder); insFile.bind(3, e.name);
+            insFile.bind(4, mimeFor(e.name)); insFile.bind(5, e.size); insFile.bind(6, e.size); insFile.bind(7, e.mtime);
             if (sqlite3_step(insFile.s) != SQLITE_DONE) return fail(std::string("insert file: ") + sqlite3_errmsg(c.h));
             reset(insFile);
-            stats.filesAdded++;
         }
-
-        // Rows whose path no longer exists on disk.
+        stats.filesAdded += static_cast<int64_t>(newFiles.size());
+        Stmt updFile(c.h, "UPDATE files SET size = ?, stored_size = ? WHERE id = ? AND user_id = ?");
+        for (const auto& [id, sz] : updFiles) {
+            updFile.bind(1, sz); updFile.bind(2, sz); updFile.bind(3, id); updFile.bind(4, userId);
+            if (sqlite3_step(updFile.s) != SQLITE_DONE) return fail(std::string("update file: ") + sqlite3_errmsg(c.h));
+            reset(updFile);
+        }
+        stats.filesUpdated += static_cast<int64_t>(updFiles.size());
         Stmt delFile(c.h, "DELETE FROM files WHERE id = ? AND user_id = ?");
-        auto dropFile = [&](int64_t id) {
-            delFile.bind(1, id); delFile.bind(2, userId);
-            sqlite3_step(delFile.s); reset(delFile);
-            stats.filesRemoved++;
-        };
-        for (const auto& [p, row] : fileByPath) if (!seenFiles.count(p)) dropFile(row.id);
-        for (int64_t id : staleFiles) dropFile(id);
+        for (int64_t id : delFiles) { delFile.bind(1, id); delFile.bind(2, userId); sqlite3_step(delFile.s); reset(delFile); }
+        stats.filesRemoved += static_cast<int64_t>(delFiles.size());
+
         Stmt delFolder(c.h, "DELETE FROM folders WHERE id = ? AND user_id = ?");
-        for (const auto& [p, id] : folderByPath) {
-            if (seenFolders.count(p) || staleFolders.count(id)) continue;
+        for (int64_t id : allFolders) {
+            if (keepFolders.count(id)) continue;
             delFolder.bind(1, id); delFolder.bind(2, userId); sqlite3_step(delFolder.s); reset(delFolder);
             stats.foldersRemoved++;
         }
-        for (int64_t id : staleFolders) {
-            delFolder.bind(1, id); delFolder.bind(2, userId); sqlite3_step(delFolder.s); reset(delFolder);
-            stats.foldersRemoved++;
-        }
-        // Files left pointing at a folder that is gone (stale duplicate folders).
+        // Belt and braces: no file row may point at a folder that no longer exists.
         {
             Stmt q(c.h, "DELETE FROM files WHERE user_id = ? AND folder_id <> 0 AND folder_id NOT IN (SELECT id FROM folders WHERE user_id = ?)");
             q.bind(1, userId); q.bind(2, userId); q.exec();

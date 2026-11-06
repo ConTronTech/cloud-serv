@@ -197,10 +197,11 @@ public:
     bool setTreeMode(int64_t userId, const std::string& dir);
     // Every tree account: (user id, dir).
     std::vector<std::pair<int64_t, std::string>> treeAccounts();
-    // One entry found on disk by the scanner.
+    // One entry found on disk by the scanner. `parent` = index of its folder in the same
+    // vector (-1 = account root); folders come before their contents.
     struct DiskEntry {
-        std::vector<std::string> parent;   // folder path, root-first
-        std::string name, mime;
+        int32_t parent = -1;
+        std::string name;
         bool dir = false;
         int64_t size = 0, mtime = 0;
     };
@@ -208,8 +209,11 @@ public:
                                    foldersRemoved = 0, filesRemoved = 0;
                            bool changed() const { return foldersAdded || filesAdded || filesUpdated || foldersRemoved || filesRemoved; } };
     // Make the account's folder/file rows match `disk` exactly, in one transaction.
-    // Rows still on disk keep their ids and stars.
-    bool treeSync(int64_t userId, const std::vector<DiskEntry>& disk, TreeSyncStats& stats);
+    // Rows still on disk keep their ids and stars. mimeFor names new files' types.
+    // Memory stays ~O(entries) small structs: folders matched by (parent id, name),
+    // files by a sort-merge against the database's own sorted rows.
+    bool treeSync(int64_t userId, const std::vector<DiskEntry>& disk,
+                  const std::function<std::string(const std::string&)>& mimeFor, TreeSyncStats& stats);
     // Admins who can actually act: role admin AND status active. A suspended or
     // removed admin does not count, so "last admin" guards can't be satisfied by
     // an account that is locked out.
