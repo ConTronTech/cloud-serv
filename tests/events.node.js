@@ -46,6 +46,18 @@ const post = (path, tok, body) => fetch(BASE + path, { method: "POST", headers: 
   ok(!admin.got.includes("files") && !admin.got.includes("notes"), "admin doesn't hear the user's files/notes");
   user2.ws.close();
   admin.ws.close(); user.ws.close();
+  // one account can hold at most 10 sockets; others are unaffected
+  await sleep(300);
+  const many = [];
+  for (let i = 0; i < 11; i++) many.push(await open({ Cookie: "session=" + TU, Origin: "http://" + host }));
+  ok(many.slice(0, 10).every((c) => c.open) && !many[10].open, "per-user cap: 10 sockets ok, 11th refused");
+  const other = await open({ Cookie: "session=" + TA, Origin: "http://" + host });
+  ok(other.open, "another account still connects while one is capped");
+  many.forEach((c) => c.ws.close()); other.ws.close();
+  await sleep(400);
+  const again = await open({ Cookie: "session=" + TU, Origin: "http://" + host });
+  ok(again.open, "closed sockets free their slots");
+  again.ws.close();
   console.log(`\nRESULTS: ${PASS} passed, ${FAIL} failed`);
   process.exit(FAIL ? 1 : 0);
 })();

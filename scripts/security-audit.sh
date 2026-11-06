@@ -14,7 +14,7 @@ SRVLOG="$(mktemp)"
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 bad(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
-want(){ if printf '%s' "$3" | grep -qF -- "$2"; then ok "$1"; else bad "$1 (got: $(printf '%s' "$3" | head -c 80))"; fi; }
+want(){ if printf '%s' "$3" | grep -qiF -- "$2"; then ok "$1"; else bad "$1 (got: $(printf '%s' "$3" | head -c 80))"; fi; }
 
 # Isolated config: throwaway data dir + test port, so real data is untouched.
 TMPCONF="$TMPDATA/config.env"
@@ -27,6 +27,7 @@ WEB_DIR=web
 SESSION_SECONDS=3600
 RATE_LIMIT_ENABLED=false
 LOG_LEVEL=WARN
+REGISTRATION_INVITE_CODE=audit-invite
 EOF
 ./cloud_serv "$TMPCONF" > "$SRVLOG" 2>&1 &
 SRV=$!
@@ -34,8 +35,8 @@ for i in $(seq 1 20); do curl -s "$API/api/health" | grep -q ok && break; sleep 
 if ! curl -s "$API/api/health" | grep -q ok; then echo "SERVER FAILED TO START"; cat "$SRVLOG"; exit 1; fi
 echo "server up on :$PORT"; echo
 
-T1=$(curl -s $API/api/auth/register -d '{"email":"alice@example.com","password":"supersecret"}' | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
-T2=$(curl -s $API/api/auth/register -d '{"email":"bob@example.com","password":"supersecret"}'   | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+T1=$(curl -s $API/api/auth/register -d '{"email":"alice@example.com","password":"supersecret","inviteCode":"audit-invite"}' | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+T2=$(curl -s $API/api/auth/register -d '{"email":"bob@example.com","password":"supersecret","inviteCode":"audit-invite"}'   | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
 
 echo "== SQL injection =="
 printf '{"email":"alice@example.com\\u0027 OR 1=1--","password":"x"}' > "$TMPDATA/sqli.json"
@@ -69,10 +70,10 @@ echo "== Input validation =="
 want "malformed JSON"      "invalid json"   "$(curl -s $API/api/auth/login --data-binary '{bad')"
 want "short password"      "at least 8"     "$(curl -s $API/api/auth/register -d '{"email":"a@b.cc","password":"short12"}')"
 want "bad email"           "invalid email"  "$(curl -s $API/api/auth/register -d '{"email":"nope","password":"supersecret"}')"
-want "duplicate email 409" "already registered" "$(curl -s $API/api/auth/register -d '{"email":"alice@example.com","password":"supersecret"}')"
+want "duplicate email -> generic answer, no enumeration" "registration is not open" "$(curl -s $API/api/auth/register -d '{"email":"alice@example.com","password":"supersecret","inviteCode":"audit-invite"}')"
 
 echo "== Logout revocation =="
-TX=$(curl -s $API/api/auth/login -d '{"email":"bob@example.com","password":"supersecret"}' | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+TX=$(curl -s $API/api/auth/login -d '{"email":"bob@example.com","password":"supersecret","inviteCode":"audit-invite"}' | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
 curl -s -X POST $API/api/auth/logout -H "authorization: Bearer $TX" >/dev/null
 want "revoked session -> unauthorized" "unauthorized" "$(curl -s $API/api/auth/me -H "authorization: Bearer $TX")"
 
