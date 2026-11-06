@@ -101,6 +101,7 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
         }
         int64_t parentId = intField(body, "parentId", 0);
 
+        if (!db.folderExists(*userId, parentId)) return http::jsonError(400, "folder not found");
         int64_t id = db.createFolder(*userId, parentId, name, encName);
         if (id < 0) return http::jsonError(400, "could not create folder");
         auto f = db.getFolder(*userId, id);

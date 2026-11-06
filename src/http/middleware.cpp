@@ -172,10 +172,10 @@ void addSecurityHeaders(crow::response& res) {
     res.add_header("X-Content-Type-Options", "nosniff");
     res.add_header("X-Frame-Options", "DENY");
     res.add_header("X-XSS-Protection", "1; mode=block");
-    // HSTS handled by nginx TLS termination — not set here (ignored on plain HTTP anyway)
+    // TLS is in-daemon; browsers ignore HSTS on plain HTTP, so it's safe to always send.
+    // No includeSubDomains: the box is reached by IP / tailnet name.
+    res.add_header("Strict-Transport-Security", "max-age=31536000");
     res.add_header("Referrer-Policy", "strict-origin-when-cross-origin");
-    // Note: script-src needs 'unsafe-inline' because WebUI uses onclick handlers in
-    // dynamically generated HTML. TODO: refactor to addEventListener to drop unsafe-inline.
     // blob: is needed for client-side decrypted media (preview <video>/<audio>/<img>
     // and the PDF <iframe>); data: for canvas-generated E2E thumbnails.
     res.add_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; frame-src blob:; connect-src 'self'");
