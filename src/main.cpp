@@ -170,7 +170,7 @@ int main(int argc, char* argv[]) {
             std::string keyPath = config.get("env", "TLS_KEY_PATH", "data/tls/server.key");
             security::tls::ensure_server_cert(certPath, keyPath,
                 config.get_bool("env", "TLS_PREFER_TAILSCALE_CERT", true));
-            app.ssl_file(certPath, keyPath);
+            app.ssl_chainfile(certPath, keyPath);   // sends intermediates too (Tailscale/Let's Encrypt certs need them)
         } else {
             utils::Logger::get_instance().warn("TLS disabled (TLS_ENABLED=false) — serving plain HTTP");
         }
