@@ -70,6 +70,11 @@ cloudctl rescan                          # after copying files in by hand (runni
 - Stars/ids survive a rescan for anything still at the same path. A rename done outside the app looks
   like delete + add (the star is lost); renames done in the app keep everything.
 
+## Scale (measured)
+- 1,000,000 files / 10k folders: first import 5 s, rescan 2.5 s, **peak ~180 MB** (walk keeps a parent
+  index per entry; sync matches folders by (parent, name) and files by sort-merge; `malloc_trim` after).
+- Production (CT 130, USB SSD): 862,634 files / 113,243 folders indexed in 12 s.
+
 ## Not done yet
 - inotify (instant pickup); today it's startup + every TREE_SCAN_MINUTES + SIGHUP.
 - Converting an account that already has blob files (set-tree refuses non-empty accounts).
