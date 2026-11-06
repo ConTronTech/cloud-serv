@@ -9,7 +9,7 @@ using json = nlohmann::json;
 
 // ---- Domain models for the cloud suite ----
 // Everything a user owns is scoped by user_id. These structs mirror rows in
-// the tables CloudDB creates (see schema.sql).
+// the tables CloudDB creates (created on first start in src/db/database.cpp).
 
 struct User {
     int64_t id = 0;
