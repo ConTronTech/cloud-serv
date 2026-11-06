@@ -207,8 +207,13 @@ s = sqlite3.connect(sys.argv[1]); d = sqlite3.connect(sys.argv[2]); s.backup(d);
 EOF
     chown "$SVC_USER:$SVC_USER" "$DATA_DIR"/backups/pre-update-*.db; chmod 0600 "$DATA_DIR"/backups/pre-update-*.db
     say "installing $(cat "$tmp/cloud-serv/VERSION" 2>/dev/null || echo new version) over $INSTALL_DIR"
+    # The web app goes live only when the new server does: deploy.sh swaps it in right
+    # before the restart. Copying it straight over meant the browser got new pages
+    # talking to the old server for the whole compile.
+    rm -rf "$INSTALL_DIR/.web-next"
+    [ -d "$tmp/cloud-serv/web" ] && mv "$tmp/cloud-serv/web" "$INSTALL_DIR/.web-next"
     cp -a "$tmp/cloud-serv/." "$INSTALL_DIR/"
-    "$INSTALL_DIR/deploy.sh" --yes
+    CS_WEB_NEXT="$INSTALL_DIR/.web-next" "$INSTALL_DIR/deploy.sh" --yes
 }
 
 cmd_config() {

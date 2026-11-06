@@ -251,6 +251,11 @@ if [ "${MAKE_ADMIN:-0}" = 1 ]; then
 fi
 
 # ---- 7. start --------------------------------------------------------------------
+# cloudctl update stages the new web app aside; swap it in now, with the new binary.
+if [ -n "${CS_WEB_NEXT:-}" ] && [ -d "$CS_WEB_NEXT" ]; then
+    rm -rf "$SRC/web.old"; [ -d "$SRC/web" ] && mv "$SRC/web" "$SRC/web.old"
+    mv "$CS_WEB_NEXT" "$SRC/web"; rm -rf "$SRC/web.old"
+fi
 say "starting $SERVICE"
 systemctl restart "$SERVICE"
 for _ in $(seq 1 30); do
