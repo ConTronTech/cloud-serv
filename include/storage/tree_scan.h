@@ -22,7 +22,10 @@ struct TreeScanResult {
 TreeScanResult scanTreeAccount(CloudDB& db, const TreeStore& tree, int64_t userId, const std::string& acct);
 
 // Background thread: scan every tree account at startup, then every `minutes`
-// (0 = startup only). Pushes a live "files" event to the account when anything changed.
+// (0 = startup + SIGHUP only). Pushes a live "files" event to the account when anything changed.
 void startTreeScanner(CloudDB& db, const TreeStore& tree, int minutes);
+// Stop the scanner and wait for it (a scan in progress finishes first). Call before
+// `db`/`tree` go away: the thread holds references to both.
+void stopTreeScanner();
 
 } // namespace storage

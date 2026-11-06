@@ -174,4 +174,9 @@ T=$(tok_of "$(curl -s "$U/api/auth/login" -d '{"email":"tree@e.cc","password":"s
 want "restored account lists its folders again" '"name":"Docs"' "$(A "$U/api/fs")"
 want "restored account reads its files" "hello treegrown" "$(A "$U/api/files/$A_ID")"
 
+echo "== clean shutdown with the scanner running =="
+kill -HUP "$SRV_PID"; kill -TERM "$SRV_PID"; wait "$SRV_PID"; RC=$?; SRV_PID=""
+[ "$RC" = 0 ] && ok "server exits 0 on SIGTERM" || bad "server exit code $RC"
+tail -5 "$TESTDIR/server.log" | grep -q "cannot open account dir" && bad "scanner ran after shutdown (use-after-free)" || ok "scanner stopped before shutdown"
+
 finish

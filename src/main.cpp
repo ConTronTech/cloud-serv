@@ -255,6 +255,7 @@ int main(int argc, char* argv[]) {
         // 12. Graceful shutdown — always stop + join the maintenance thread,
         //     even if run() threw (otherwise ~thread would std::terminate).
         utils::Logger::get_instance().info("Shutting down...");
+        storage::stopTreeScanner();   // it references db + tree, which die at the end of this scope
         {
             std::lock_guard<std::mutex> lk(mtx);
             running.store(false);

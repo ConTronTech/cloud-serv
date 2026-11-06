@@ -13,6 +13,8 @@ namespace storage {
 
 namespace {
 std::atomic<bool> g_rescanNow{false};
+std::atomic<bool> g_stop{false};
+std::thread g_thread;
 extern "C" void onSighup(int) { g_rescanNow.store(true); }
 } // namespace
 
@@ -53,10 +55,13 @@ void startTreeScanner(CloudDB& db, const TreeStore& tree, int minutes) {
     sa.sa_flags = SA_RESTART;
     ::sigaction(SIGHUP, &sa, nullptr);
 
-    std::thread([&db, &tree, minutes]() {
+    if (g_thread.joinable()) return;   // already running
+    g_stop.store(false);
+    g_thread = std::thread([&db, &tree, minutes]() {
         auto& log = utils::Logger::get_instance();
-        for (;;) {
+        while (!g_stop.load()) {
             for (const auto& [uid, acct] : db.treeAccounts()) {
+                if (g_stop.load()) return;
                 auto r = scanTreeAccount(db, tree, uid, acct);
                 if (!r.ok) continue;
                 const auto& s = r.stats;
@@ -74,11 +79,17 @@ void startTreeScanner(CloudDB& db, const TreeStore& tree, int minutes) {
             // Wait for the next round, or for SIGHUP.
             const auto until = std::chrono::steady_clock::now() + std::chrono::minutes(minutes > 0 ? minutes : 0);
             while (!g_rescanNow.exchange(false)) {
+                if (g_stop.load()) return;
                 if (minutes > 0 && std::chrono::steady_clock::now() >= until) break;
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         }
-    }).detach();
+    });
+}
+
+void stopTreeScanner() {
+    g_stop.store(true);
+    if (g_thread.joinable()) g_thread.join();
 }
 
 } // namespace storage
