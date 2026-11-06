@@ -1,13 +1,26 @@
 name: CI
 
+# Docs-only changes don't touch the build: skip CI for them.
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**/*.md', 'config.env.example', 'LICENSE']
   pull_request:
+    paths-ignore: ['docs/**', '**/*.md', 'config.env.example', 'LICENSE']
+
+# A newer push to the same branch cancels the run it replaces.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 500M
     steps:
       - uses: actions/checkout@v4
 
@@ -15,10 +28,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential g++ make libasio-dev libssl-dev libsqlite3-dev libcurl4-openssl-dev
+            build-essential g++ make ccache libasio-dev libssl-dev libsqlite3-dev libcurl4-openssl-dev
+
+      # ccache keeps every compiled file between runs, keyed by its exact source + headers +
+      # flags. A change to one .cpp recompiles that one file; the rest come from the cache.
+      - name: Restore compile cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-
 
       - name: Build
-        run: make
+        run: |
+          ccache -z
+          make -j"$(nproc)" CXX="ccache g++"
+          ccache -s
 
       - name: Run test suite
         run: bash tests/run.sh
