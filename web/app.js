@@ -1237,16 +1237,26 @@ const CHUNK_THRESHOLD = 8 * 1024 * 1024;   // files larger than this upload in c
 const CHUNK_SIZE = 5 * 1024 * 1024;        // per-chunk size (< server MAX_BODY_SIZE)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// One "Cancel" per batch of uploads: aborts requests in flight and stops queued ones.
+function newUploadBatch() {
+  return { cancelled: false, ctl: new AbortController(), cancel() { this.cancelled = true; this.ctl.abort(); } };
+}
+function cancelButton(onClick, label = "Cancel") {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "up-cancel"; b.textContent = label;
+  b.addEventListener("click", () => { b.disabled = true; onClick(); });
+  return b;
+}
 function sessionExpired() { clearDEK(); showAuth(); }
 
 // Dispatch: small files go in one request, big files stream in chunks.
-async function uploadOne(file, state, folderId) {
-  return file.size > CHUNK_THRESHOLD ? uploadChunked(file, state, folderId) : uploadDirect(file, state, folderId);
+async function uploadOne(file, state, folderId, batch) {
+  return file.size > CHUNK_THRESHOLD ? uploadChunked(file, state, folderId, batch) : uploadDirect(file, state, folderId, batch);
 }
 
 // Small file: encrypt client-side, then single POST, retrying with backoff if
 // rate-limited (429).
-async function uploadDirect(file, state, folderId) {
+async function uploadDirect(file, state, folderId, batch) {
   let enc;
   if (ENCRYPT_FILES && !DEK_RAW) { state.textContent = "Locked: unlock this device to upload encrypted"; return false; }
   if (ENCRYPT_FILES) {
@@ -1255,9 +1265,11 @@ async function uploadDirect(file, state, folderId) {
   }
 
   for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
+    if (batch && batch.cancelled) { state.textContent = "Cancelled"; return false; }
     let res;
     try {
       res = await fetch(API + "/api/files", {
+        signal: batch ? batch.ctl.signal : undefined,
         method: "POST",
         headers: authHeaders(enc ? {
           "X-Enc-Name": enc.encName, // encrypted filename (opaque to the server)
@@ -1273,7 +1285,7 @@ async function uploadDirect(file, state, folderId) {
         }),
         body: enc ? enc.cipher : file,
       });
-    } catch { state.textContent = "Network error"; return false; }
+    } catch { state.textContent = batch && batch.cancelled ? "Cancelled" : "Network error"; return false; }
 
     // Always drain the response body, even on success — if we drop it unread,
     // Chrome cancels the stream and resets the connection mid-write, which makes
@@ -1297,7 +1309,7 @@ async function uploadDirect(file, state, folderId) {
 // chunks (resumable) -> complete. We encrypt the whole file up front (memory-
 // bound; streaming encrypt is a later optimization); wire chunks are just
 // slices of the ciphertext, so resume/offset logic is unchanged.
-async function uploadChunked(file, state, folderId) {
+async function uploadChunked(file, state, folderId, batch) {
   let enc = null, cipher = null, total;
   if (ENCRYPT_FILES && !DEK_RAW) { state.textContent = "Locked: unlock this device to upload encrypted"; return false; }
   if (ENCRYPT_FILES) {
@@ -1313,6 +1325,7 @@ async function uploadChunked(file, state, folderId) {
   let initRes;
   try {
     initRes = await fetch(API + "/api/uploads/init", {
+      signal: batch ? batch.ctl.signal : undefined,
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(enc ? {
@@ -1323,7 +1336,7 @@ async function uploadChunked(file, state, folderId) {
         name: file.name, mime: file.type || "application/octet-stream", size: total, folderId,
       }),
     });
-  } catch { state.textContent = "Network error"; return false; }
+  } catch { state.textContent = batch && batch.cancelled ? "Cancelled" : "Network error"; return false; }
   if (initRes.status === 401) { sessionExpired(); return false; }
   if (!initRes.ok) {
     let b = null; try { b = await initRes.json(); } catch {}
@@ -1335,6 +1348,7 @@ async function uploadChunked(file, state, folderId) {
 
   let offset = 0;
   while (offset < total) {
+    if (batch && batch.cancelled) { abort(); state.textContent = "Cancelled"; return false; }
     const chunk = enc ? cipher.subarray(offset, Math.min(offset + CHUNK_SIZE, total))
                       : file.slice(offset, Math.min(offset + CHUNK_SIZE, total));
     let done = false;
@@ -1342,11 +1356,12 @@ async function uploadChunked(file, state, folderId) {
       let res;
       try {
         res = await fetch(API + "/api/uploads/" + uploadId, {
+          signal: batch ? batch.ctl.signal : undefined,
           method: "PUT",
           headers: authHeaders({ "X-Offset": String(offset), "Content-Type": "application/octet-stream" }),
           body: chunk,
         });
-      } catch { state.textContent = "Network error"; abort(); return false; }
+      } catch { state.textContent = batch && batch.cancelled ? "Cancelled" : "Network error"; abort(); return false; }
 
       if (res.ok) { offset = (await res.json()).received; done = true; break; }
       if (res.status === 429 && attempt < UPLOAD_MAX_ATTEMPTS) { await sleep(Math.min(500 * attempt, 3000)); continue; }
@@ -1374,10 +1389,12 @@ async function uploadChunked(file, state, folderId) {
 }
 
 // A fixed, always-visible overall upload progress bar.
-function makeUploadProgress(total) {
+function makeUploadProgress(total, onCancel) {
   const bar = document.createElement("div");
   bar.className = "upload-progress";
   const label = document.createElement("div"); label.className = "up-label";
+  let cancelBtn = null;
+  if (onCancel) { cancelBtn = cancelButton(onCancel, "Cancel all"); bar.append(cancelBtn); }
   const track = document.createElement("div"); track.className = "up-track";
   const fill = document.createElement("div"); fill.className = "up-fill";
   track.append(fill);
@@ -1388,7 +1405,14 @@ function makeUploadProgress(total) {
       fill.style.width = Math.round((done / total) * 100) + "%";
       label.textContent = `Uploading… ${done}/${total}` + (failed ? ` · ${failed} failed` : "");
     },
-    finish(done, failed) {
+    finish(done, failed, cancelled) {
+      if (cancelBtn) cancelBtn.remove();
+      if (cancelled) {
+        bar.classList.add("err");
+        label.textContent = `Cancelled · ${done - failed} of ${total} uploaded`;
+        setTimeout(() => bar.remove(), 5000);
+        return;
+      }
       fill.style.width = "100%";
       bar.classList.toggle("err", failed > 0);
       label.textContent = failed
@@ -1406,7 +1430,8 @@ async function runUploads(jobs) {
   const total = jobs.length;
   const showRows = total <= 8; // per-file rows only for small batches
   let done = 0, failed = 0;
-  const progress = makeUploadProgress(total);
+  const batch = newUploadBatch();
+  const progress = makeUploadProgress(total, () => batch.cancel());
   progress.update(0, 0);
 
   const rows = jobs.map((j) => {
@@ -1424,10 +1449,11 @@ async function runUploads(jobs) {
 
   let next = 0;
   async function worker() {
-    while (next < rows.length) {
+    while (next < rows.length && !batch.cancelled) {
       const j = rows[next++];
       if (j.row) j.state.textContent = "Uploading…";
-      const ok = await uploadOne(j.file, j.state, j.folderId);
+      const ok = await uploadOne(j.file, j.state, j.folderId, batch);
+      if (batch.cancelled && !ok) { if (j.row) j.row.classList.add("err"); break; }
       if (ok) { if (j.row) { j.state.textContent = "Done"; setTimeout(() => j.row.remove(), 1500); } }
       else {
         failed++;
@@ -1439,7 +1465,8 @@ async function runUploads(jobs) {
     }
   }
   await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, rows.length) }, worker));
-  progress.finish(done, failed);
+  if (batch.cancelled) rows.forEach((j) => { if (j.row && j.state.textContent === "Queued…") j.state.textContent = "Cancelled"; });
+  progress.finish(done, failed, batch.cancelled);
   loadFs(currentFolder);
 }
 
@@ -1549,7 +1576,8 @@ function buildFolderTar(top, items) {
   return { blob: new Blob(parts, { type: "application/x-tar" }), files, bytes };
 }
 
-async function uploadFolderArchive(top, items, row, state) {
+async function uploadFolderArchive(top, items, row, state, batch) {
+  const sig = batch.ctl.signal;
   state.textContent = "Packing…";
   const { blob, files } = buildFolderTar(top, items);
   const total = blob.size;
@@ -1557,26 +1585,29 @@ async function uploadFolderArchive(top, items, row, state) {
   let initRes;
   try {
     initRes = await fetch(API + "/api/uploads/init", {
-      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+      signal: sig, method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ kind: "tree-folder", name, mime: "application/x-tar", size: total, folderId: currentFolder }),
     });
-  } catch { state.textContent = "Network error"; return false; }
+  } catch { state.textContent = batch.cancelled ? "Cancelled" : "Network error"; return false; }
   if (initRes.status === 401) { sessionExpired(); return false; }
   if (!initRes.ok) { let b = null; try { b = await initRes.json(); } catch {} state.textContent = prettyError(b) || "Upload failed"; return false; }
   const { uploadId } = await initRes.json();
   const abort = () => fetch(API + "/api/uploads/" + uploadId, { method: "DELETE", headers: authHeaders() }).catch(() => {});
 
   let offset = 0;
+  const cancelled = () => { abort(); state.textContent = "Cancelled: nothing was saved"; return false; };
   while (offset < total) {
+    if (batch.cancelled) return cancelled();
     const chunk = blob.slice(offset, Math.min(offset + CHUNK_SIZE, total));
     let done = false;
     for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS * 2; attempt++) {
+      if (batch.cancelled) return cancelled();
       let res;
       try {
         res = await fetch(API + "/api/uploads/" + uploadId, {
-          method: "PUT", headers: authHeaders({ "X-Offset": String(offset), "Content-Type": "application/octet-stream" }), body: chunk,
+          signal: sig, method: "PUT", headers: authHeaders({ "X-Offset": String(offset), "Content-Type": "application/octet-stream" }), body: chunk,
         });
-      } catch { await sleep(1000 * attempt); continue; }   // flaky network: retry the same chunk
+      } catch { if (batch.cancelled) return cancelled(); await sleep(1000 * attempt); continue; }   // flaky network: retry the same chunk
       if (res.ok) { offset = (await res.json()).received; done = true; break; }
       if (res.status === 429) { await sleep((Number(res.headers.get("Retry-After")) || 2) * 1000); continue; }
       if (res.status === 409) { try { const j = await res.json(); if (typeof j.received === "number") { offset = j.received; done = true; break; } } catch {} }
@@ -1589,6 +1620,7 @@ async function uploadFolderArchive(top, items, row, state) {
     if (!done) { state.textContent = "Network error"; abort(); return false; }
     state.textContent = `Uploading ${files} file${files === 1 ? "" : "s"}… ` + Math.floor((offset / total) * 100) + "%";
   }
+  if (batch.cancelled) return cancelled();
   state.textContent = "Unpacking…";
   const comp = await fetch(API + "/api/uploads/" + uploadId + "/complete", { method: "POST", headers: authHeaders() });
   let b = null; try { b = await comp.json(); } catch {}
@@ -1614,9 +1646,13 @@ async function uploadItemsAsArchives(items) {
     const row = document.createElement("div"); row.className = "upload-row";
     const label = document.createElement("span"); label.textContent = top + "/";
     const state = document.createElement("span"); state.textContent = "Queued…";
-    row.append(label, state); box.appendChild(row);
-    const ok = await uploadFolderArchive(top, group, row, state);
-    if (ok) setTimeout(() => row.remove(), 4000); else row.classList.add("err");
+    const batch = newUploadBatch();
+    const btn = cancelButton(() => batch.cancel());
+    row.append(label, state, btn); box.appendChild(row);
+    const ok = await uploadFolderArchive(top, group, row, state, batch);
+    btn.remove();
+    if (ok) setTimeout(() => row.remove(), 4000);
+    else { row.classList.add("err"); if (batch.cancelled) setTimeout(() => row.remove(), 5000); }
     loadFs(currentFolder);
   }
   if (loose.length) await runUploads(loose.map((it) => ({ file: it.file, folderId: currentFolder, label: it.file.name })));
