@@ -8,6 +8,8 @@
 #include <utility>
 #include <shared_mutex>
 #include <functional>
+#include <mutex>
+#include <unordered_map>
 
 // CloudDB — the multi-user data layer for the cloud suite.
 //
@@ -278,4 +280,10 @@ public:
 private:
     std::string dbPath_;
     mutable std::shared_mutex db_mutex_;  // reads: shared_lock, writes: unique_lock
+    // usage() per account, cached: summing ~1M rows on every call was ~130 ms. Every write
+    // that changes an account's files/sizes calls usageChanged(); account lifecycle clears all.
+    std::mutex usageMx_;
+    std::unordered_map<int64_t, std::pair<int64_t, int64_t>> usageCache_;
+    void usageChanged(int64_t userId) { std::lock_guard<std::mutex> lk(usageMx_); usageCache_.erase(userId); }
+    void usageChangedAll() { std::lock_guard<std::mutex> lk(usageMx_); usageCache_.clear(); }
 };

@@ -174,6 +174,25 @@ T=$(tok_of "$(curl -s "$U/api/auth/login" -d '{"email":"tree@e.cc","password":"s
 want "restored account lists its folders again" '"name":"Docs"' "$(A "$U/api/fs")"
 want "restored account reads its files" "hello treegrown" "$(A "$U/api/files/$A_ID")"
 
+echo "== deleting a big folder is fast (indexed recursive delete) =="
+python3 -I -c "
+import os,sys
+r=sys.argv[1]
+for i in range(8000): os.makedirs(f'{r}/Other/o{i//100}/d{i}', exist_ok=True)
+for i in range(2000): os.makedirs(f'{r}/Huge/h{i//50}/d{i}', exist_ok=True)
+for i in range(0,2000,10): open(f'{r}/Huge/h{i//50}/d{i}/f.txt','w').write('x')
+" "$TR"
+hup_until '"name":"Huge"' "$U/api/fs" present >/dev/null
+HUGE=$(fid "" Huge)
+S=$(date +%s%N); R=$(A -X DELETE "$U/api/folders/$HUGE"); E=$(( ($(date +%s%N) - S) / 1000000 ))
+want "big folder delete ok" '"ok":true' "$R"
+[ "$E" -lt 1500 ] && ok "2,000-folder delete next to 8,000 others took ${E} ms (< 1.5 s)" || bad "big folder delete took ${E} ms"
+[ -d "$TR/.trash/$(date +%Y-%m-%d)/Huge/h0/d0" ] && ok "big folder went to trash intact" || bad "big folder not in trash"
+want "other folders untouched" '"name":"Other"' "$(A "$U/api/fs")"
+U1=$(A "$U/api/usage"); A -X POST "$U/api/files" -H "X-Filename: cache-test.txt" --data-binary "12345" >/dev/null
+U2=$(A "$U/api/usage")
+[ "$U1" != "$U2" ] && ok "usage cache refreshes after an upload ($U1 -> $U2)" || bad "usage cache stale after upload"
+
 echo "== clean shutdown with the scanner running =="
 kill -HUP "$SRV_PID"; kill -TERM "$SRV_PID"; wait "$SRV_PID"; RC=$?; SRV_PID=""
 [ "$RC" = 0 ] && ok "server exits 0 on SIGTERM" || bad "server exit code $RC"

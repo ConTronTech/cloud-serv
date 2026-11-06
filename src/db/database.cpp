@@ -1076,6 +1076,7 @@ int64_t CloudDB::addFile(int64_t userId, int64_t folderId, const std::string& na
                          const std::string& wrappedKey, const std::string& encName,
                          const std::string& encMime, int64_t storedSize) {
     std::unique_lock lock(db_mutex_);
+    usageChanged(userId);   // under the write lock: a reader caching now waited for us
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
         Stmt q(c.h, "INSERT INTO files(user_id, folder_id, name, mime, size, storage_key, wrapped_key, enc_name, enc_mime, stored_size) "
@@ -1191,6 +1192,7 @@ bool CloudDB::renameFile(int64_t userId, int64_t fileId, const std::string& name
 
 bool CloudDB::deleteFile(int64_t userId, int64_t fileId) {
     std::unique_lock lock(db_mutex_);
+    usageChanged(userId);   // under the write lock: a reader caching now waited for us
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
         Stmt q(c.h, "DELETE FROM files WHERE id = ? AND user_id = ?");
@@ -1207,12 +1209,22 @@ bool CloudDB::deleteFile(int64_t userId, int64_t fileId) {
 // ==== Aggregates / search ====
 
 std::pair<int64_t, int64_t> CloudDB::usage(int64_t userId) {
+    {
+        std::lock_guard<std::mutex> lk(usageMx_);
+        auto it = usageCache_.find(userId);
+        if (it != usageCache_.end()) return it->second;
+    }
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
         Stmt q(c.h, "SELECT COALESCE(SUM(stored_size), 0), COUNT(*) FROM files WHERE user_id = ?");
         q.bind(1, userId);
-        if (q.step()) return { q.colInt64(0), q.colInt64(1) };
+        if (q.step()) {
+            std::pair<int64_t, int64_t> v{ q.colInt64(0), q.colInt64(1) };
+            std::lock_guard<std::mutex> lk(usageMx_);
+            usageCache_[userId] = v;
+            return v;
+        }
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("usage: " + std::string(e.what()));
     }
@@ -1544,6 +1556,7 @@ bool CloudDB::moveFolder(int64_t userId, int64_t folderId, int64_t newParentId) 
 bool CloudDB::deleteFolderRecursive(int64_t userId, int64_t folderId,
                                     std::vector<std::string>& storageKeys) {
     std::unique_lock lock(db_mutex_);
+    usageChanged(userId);   // under the write lock: a reader caching now waited for us
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
 
@@ -1553,7 +1566,7 @@ bool CloudDB::deleteFolderRecursive(int64_t userId, int64_t folderId,
             "WITH RECURSIVE sub(id) AS ("
             "  SELECT id FROM folders WHERE id = ?1 AND user_id = ?2"
             "  UNION ALL"
-            "  SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id WHERE f.user_id = ?2"
+            "  SELECT f.id FROM sub CROSS JOIN folders f ON f.user_id = ?2 AND f.parent_id = sub.id"   /* CROSS JOIN pins the order so idx_folders_user(user_id, parent_id) is used; the plain JOIN scanned every folder per step */
             ") SELECT storage_key FROM files WHERE user_id = ?2 AND folder_id IN (SELECT id FROM sub)";
         {
             Stmt q(c.h, collectSql);
@@ -1570,7 +1583,7 @@ bool CloudDB::deleteFolderRecursive(int64_t userId, int64_t folderId,
             "WITH RECURSIVE sub(id) AS ("
             "  SELECT id FROM folders WHERE id = ?1 AND user_id = ?2"
             "  UNION ALL"
-            "  SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id WHERE f.user_id = ?2"
+            "  SELECT f.id FROM sub CROSS JOIN folders f ON f.user_id = ?2 AND f.parent_id = sub.id"   /* CROSS JOIN pins the order so idx_folders_user(user_id, parent_id) is used; the plain JOIN scanned every folder per step */
             ") DELETE FROM files WHERE user_id = ?2 AND folder_id IN (SELECT id FROM sub)";
         { Stmt q(c.h, delFilesSql); q.bind(1, folderId); q.bind(2, userId); q.exec(); }
 
@@ -1578,7 +1591,7 @@ bool CloudDB::deleteFolderRecursive(int64_t userId, int64_t folderId,
             "WITH RECURSIVE sub(id) AS ("
             "  SELECT id FROM folders WHERE id = ?1 AND user_id = ?2"
             "  UNION ALL"
-            "  SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id WHERE f.user_id = ?2"
+            "  SELECT f.id FROM sub CROSS JOIN folders f ON f.user_id = ?2 AND f.parent_id = sub.id"   /* CROSS JOIN pins the order so idx_folders_user(user_id, parent_id) is used; the plain JOIN scanned every folder per step */
             ") DELETE FROM folders WHERE user_id = ?2 AND id IN (SELECT id FROM sub)";
         int changes = 0;
         { Stmt q(c.h, delFoldersSql); q.bind(1, folderId); q.bind(2, userId); q.exec(); changes = sqlite3_changes(c.h); }
@@ -1976,6 +1989,13 @@ bool CloudDB::hasQuotaRoom(int64_t userId, int64_t additionalBytes) {
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        // Unlimited (the common case): answer without summing every file of the account.
+        {
+            Stmt u(c.h, "SELECT storage_quota_bytes FROM users WHERE id = ?");
+            u.bind(1, userId);
+            if (!u.step()) return true;
+            if (u.colIsNull(0)) return true;
+        }
         // Finished files plus the bytes of uploads still in progress.
         Stmt q(c.h, "SELECT storage_quota_bytes, "
                     "(SELECT COALESCE(SUM(stored_size), 0) FROM files WHERE user_id = ?) + "
@@ -2120,6 +2140,7 @@ CloudDB::LifecycleResult CloudDB::removeUser(
     namespace fs = std::filesystem;
     LifecycleResult r;
     std::unique_lock lock(db_mutex_);
+    usageChangedAll();   // under the write lock: a reader caching now waited for us
     std::string backupDir;
     bool backupCreated = false;
     auto fail = [&](const std::string& msg) {
@@ -2212,6 +2233,7 @@ CloudDB::LifecycleResult CloudDB::restoreUser(
     namespace fs = std::filesystem;
     LifecycleResult r;
     std::unique_lock lock(db_mutex_);
+    usageChangedAll();   // under the write lock: a reader caching now waited for us
     std::vector<std::string> placedKeys;
     bool blobsPlaced = false;
     auto fail = [&](int code, const std::string& msg) {
@@ -2352,6 +2374,7 @@ CloudDB::LifecycleResult CloudDB::wipeUser(int64_t targetId, int64_t byAdminId, 
     namespace fs = std::filesystem;
     LifecycleResult r;
     std::unique_lock lock(db_mutex_);
+    usageChangedAll();   // under the write lock: a reader caching now waited for us
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
         std::string email, displayName, status;
@@ -2471,6 +2494,7 @@ std::vector<std::pair<int64_t, std::string>> CloudDB::treeAccounts() {
 bool CloudDB::treeSync(int64_t userId, const std::vector<DiskEntry>& disk,
                        const std::function<std::string(const std::string&)>& mimeFor, TreeSyncStats& stats) {
     std::unique_lock lock(db_mutex_);
+    usageChanged(userId);   // under the write lock: a reader caching now waited for us
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
         if (sqlite3_exec(c.h, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) return false;
@@ -2641,6 +2665,7 @@ bool CloudDB::treeInsertSubtree(int64_t userId, int64_t parentId, const std::str
                                 const std::function<std::string(const std::string&)>& mimeFor,
                                 int64_t& rootId, TreeSyncStats& stats) {
     std::unique_lock lock(db_mutex_);
+    usageChanged(userId);   // under the write lock: a reader caching now waited for us
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
         if (sqlite3_exec(c.h, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) return false;
