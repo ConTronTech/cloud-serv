@@ -122,7 +122,7 @@ public:
     int64_t addFile(int64_t userId, int64_t folderId, const std::string& name,
                     const std::string& mime, int64_t size, const std::string& storageKey,
                     const std::string& wrappedKey = "", const std::string& encName = "",
-                    const std::string& encMime = "");
+                    const std::string& encMime = "", int64_t storedSize = -1);
     std::vector<FileMeta> listFiles(int64_t userId, int64_t folderId);
     std::optional<FileMeta> getFile(int64_t userId, int64_t fileId);
     bool moveFile(int64_t userId, int64_t fileId, int64_t folderId);
@@ -156,6 +156,9 @@ public:
     std::optional<UploadSession> getUploadSession(int64_t userId, const std::string& id);
     bool setUploadReceived(int64_t userId, const std::string& id, int64_t received);
     bool deleteUploadSession(int64_t userId, const std::string& id);
+    // Removes upload sessions untouched for maxAgeSeconds; returns (userId, storageKey)
+    // of each so the caller can delete the partial blobs.
+    std::vector<std::pair<int64_t, std::string>> takeStaleUploads(int64_t maxAgeSeconds);
 
     // ---- Notes ----
     int64_t createNote(int64_t userId, const std::string& title, const std::string& body,

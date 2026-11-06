@@ -4,6 +4,8 @@
 #include "security/sanitizer.h"
 #include "utils/logger.h"
 #include "routes/events.h"
+#include "storage/user_lock.h"
+#include <mutex>
 
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -197,10 +199,14 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
         // E2E: the body may be ciphertext with a wrapped per-file key; the client
         // reports the plaintext size for display. Opaque to us either way.
         std::string wrappedKey = req.get_header_value("X-Wrapped-Key");
-        int64_t size = static_cast<int64_t>(req.body.size());
+        const int64_t stored = static_cast<int64_t>(req.body.size());
+        int64_t size = stored;   // display only; never more than what was sent
         std::string plainSize = req.get_header_value("X-Plain-Size");
-        if (!plainSize.empty()) { try { size = std::stoll(plainSize); } catch (...) {} }
+        if (!plainSize.empty()) {
+            try { int64_t p = std::stoll(plainSize); if (p >= 0 && p <= stored) size = p; } catch (...) {}
+        }
 
+        std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
         if (!db.hasQuotaRoom(*userId, static_cast<int64_t>(req.body.size())))
             return http::jsonError(413, "storage quota exceeded");
 
@@ -210,7 +216,7 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
             return http::jsonError(500, "storage write failed");
         }
 
-        int64_t id = db.addFile(*userId, folderId, name, mime, size, storageKey, wrappedKey, encName, encMime);
+        int64_t id = db.addFile(*userId, folderId, name, mime, size, storageKey, wrappedKey, encName, encMime, stored);
         if (id < 0) {
             store.remove(*userId, storageKey);  // don't leak an orphan blob
             return http::jsonError(500, "could not record file");

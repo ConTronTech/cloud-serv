@@ -6,6 +6,8 @@
 #include <string>
 
 #include "routes/events.h"
+#include "storage/user_lock.h"
+#include <mutex>
 using json = nlohmann::json;
 
 namespace routes {
@@ -82,6 +84,10 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
                 mime = "application/octet-stream";
         }
 
+        // Half-finished uploads count against quota, so drop any left idle for a day.
+        for (auto& [uid, key] : db.takeStaleUploads(24 * 3600)) store.remove(uid, key);
+
+        std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
         int64_t size = intField(body, "size", 0);
         if (size < 0) size = 0;
         if (size > maxFileBytes) return http::jsonError(413, "file too large");
@@ -126,6 +132,9 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
+        // Held across the offset check and the append: two copies of one chunk can't
+        // both land, and parallel uploads can't jointly overrun the quota.
+        std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
         auto s = db.getUploadSession(*userId, id);
         if (!s) return http::jsonError(404, "not found");
 
@@ -144,9 +153,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         int64_t newReceived = s->received + static_cast<int64_t>(req.body.size());
         if (newReceived > maxFileBytes) return http::jsonError(413, "file too large");
         if (s->size > 0 && newReceived > s->size) return http::jsonError(400, "exceeds declared size");
-        // Per-chunk quota gate: this session's total isn't in usage() yet (it
-        // only counts completed files), so this checks this chunk's own bytes
-        // against current usage each time rather than the session's running total.
+        // Quota gate: finished files + every in-progress upload (this one included) + this chunk.
         if (!db.hasQuotaRoom(*userId, static_cast<int64_t>(req.body.size())))
             return http::jsonError(413, "storage quota exceeded");
 
@@ -163,6 +170,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
+        std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
         auto s = db.getUploadSession(*userId, id);
         if (!s) return http::jsonError(404, "not found");
 
@@ -173,9 +181,10 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
 
         // Display size = plaintext size when the client declared one (E2E),
         // otherwise the bytes received.
-        int64_t displaySize = s->plain_size > 0 ? s->plain_size : s->received;
+        // Display size = the client's plaintext size, kept sane; quota uses bytes on disk.
+        int64_t displaySize = s->plain_size > 0 && s->plain_size <= s->received ? s->plain_size : s->received;
         int64_t fileId = db.addFile(*userId, s->folder_id, s->name, s->mime, displaySize,
-                                    s->storage_key, s->wrapped_key, s->enc_name, s->enc_mime);
+                                    s->storage_key, s->wrapped_key, s->enc_name, s->enc_mime, s->received);
         if (fileId < 0) return http::jsonError(500, "could not finalize");
         db.deleteUploadSession(*userId, id); // keep the blob; it's now a real file
 
@@ -189,6 +198,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
     ([&db, &store](const crow::request& req, const std::string& id) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
+        std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
         auto s = db.getUploadSession(*userId, id);
         if (!s) return http::jsonError(404, "not found");
         store.remove(*userId, s->storage_key);

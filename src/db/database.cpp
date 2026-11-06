@@ -260,6 +260,11 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
         sqlite3_exec(c.h, "ALTER TABLE files ADD COLUMN enc_mime TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN enc_mime TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE removed_users ADD COLUMN reason TEXT NOT NULL DEFAULT '';", nullptr, nullptr, nullptr);
+        // Quota counts bytes on disk, never the client-reported display size.
+        sqlite3_exec(c.h, "ALTER TABLE files ADD COLUMN stored_size INTEGER NOT NULL DEFAULT -1;", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "UPDATE files SET stored_size = size WHERE stored_size < 0;", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN touched_at INTEGER NOT NULL DEFAULT 0;", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "UPDATE upload_sessions SET touched_at = CAST(strftime('%s','now') AS INTEGER) WHERE touched_at = 0;", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE notes ADD COLUMN enc_title TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE notes ADD COLUMN enc_body TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';", nullptr, nullptr, nullptr);
@@ -1059,12 +1064,13 @@ bool CloudDB::revokeApiKey(int64_t userId, int64_t keyId) {
 int64_t CloudDB::addFile(int64_t userId, int64_t folderId, const std::string& name,
                          const std::string& mime, int64_t size, const std::string& storageKey,
                          const std::string& wrappedKey, const std::string& encName,
-                         const std::string& encMime) {
+                         const std::string& encMime, int64_t storedSize) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
-        Stmt q(c.h, "INSERT INTO files(user_id, folder_id, name, mime, size, storage_key, wrapped_key, enc_name, enc_mime) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        Stmt q(c.h, "INSERT INTO files(user_id, folder_id, name, mime, size, storage_key, wrapped_key, enc_name, enc_mime, stored_size) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        q.bind(10, storedSize < 0 ? size : storedSize);
         q.bind(1, userId);
         q.bind(2, folderId);
         q.bind(3, name);
@@ -1194,7 +1200,7 @@ std::pair<int64_t, int64_t> CloudDB::usage(int64_t userId) {
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
-        Stmt q(c.h, "SELECT COALESCE(SUM(size), 0), COUNT(*) FROM files WHERE user_id = ?");
+        Stmt q(c.h, "SELECT COALESCE(SUM(stored_size), 0), COUNT(*) FROM files WHERE user_id = ?");
         q.bind(1, userId);
         if (q.step()) return { q.colInt64(0), q.colInt64(1) };
     } catch (const std::exception& e) {
@@ -1608,7 +1614,8 @@ bool CloudDB::createUploadSession(int64_t userId, const std::string& id, int64_t
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
         Stmt q(c.h, "INSERT INTO upload_sessions(id, user_id, folder_id, name, mime, size, received, "
-                    "storage_key, wrapped_key, plain_size, enc_name, enc_mime) VALUES(?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)");
+                    "storage_key, wrapped_key, plain_size, enc_name, enc_mime, touched_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))");
         q.bind(1, id);
         q.bind(2, userId);
         q.bind(3, folderId);
@@ -1661,7 +1668,7 @@ bool CloudDB::setUploadReceived(int64_t userId, const std::string& id, int64_t r
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
-        Stmt q(c.h, "UPDATE upload_sessions SET received = ? WHERE id = ? AND user_id = ?");
+        Stmt q(c.h, "UPDATE upload_sessions SET received = ?, touched_at = CAST(strftime('%s','now') AS INTEGER) WHERE id = ? AND user_id = ?");
         q.bind(1, received);
         q.bind(2, id);
         q.bind(3, userId);
@@ -1671,6 +1678,25 @@ bool CloudDB::setUploadReceived(int64_t userId, const std::string& id, int64_t r
         utils::Logger::get_instance().error("setUploadReceived: " + std::string(e.what()));
         return false;
     }
+}
+
+std::vector<std::pair<int64_t, std::string>> CloudDB::takeStaleUploads(int64_t maxAgeSeconds) {
+    std::unique_lock lock(db_mutex_);
+    std::vector<std::pair<int64_t, std::string>> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "SELECT user_id, storage_key FROM upload_sessions "
+                    "WHERE touched_at < CAST(strftime('%s','now') AS INTEGER) - ?");
+        q.bind(1, maxAgeSeconds);
+        while (q.step()) out.emplace_back(q.colInt64(0), q.colText(1));
+        Stmt d(c.h, "DELETE FROM upload_sessions WHERE touched_at < CAST(strftime('%s','now') AS INTEGER) - ?");
+        d.bind(1, maxAgeSeconds);
+        d.exec();
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("takeStaleUploads: " + std::string(e.what()));
+        out.clear();
+    }
+    return out;
 }
 
 bool CloudDB::deleteUploadSession(int64_t userId, const std::string& id) {
@@ -1939,11 +1965,14 @@ bool CloudDB::hasQuotaRoom(int64_t userId, int64_t additionalBytes) {
     std::shared_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        // Finished files plus the bytes of uploads still in progress.
         Stmt q(c.h, "SELECT storage_quota_bytes, "
-                    "(SELECT COALESCE(SUM(size), 0) FROM files WHERE user_id = ?) "
+                    "(SELECT COALESCE(SUM(stored_size), 0) FROM files WHERE user_id = ?) + "
+                    "(SELECT COALESCE(SUM(received), 0) FROM upload_sessions WHERE user_id = ?) "
                     "FROM users WHERE id = ?");
         q.bind(1, userId);
         q.bind(2, userId);
+        q.bind(3, userId);
         if (!q.step()) return true;  // unknown user: let the route's own auth check reject it
         auto quota = q.colOptInt64(0);
         if (!quota.has_value()) return true;  // unlimited
