@@ -16,3 +16,6 @@ config.local.env
 # to config.env and edit locally; never commit it.
 config.env
 .built-version
+
+# deploy bundles built by package.sh
+*.zip
