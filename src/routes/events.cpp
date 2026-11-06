@@ -33,6 +33,11 @@ void sendTo(bool adminsOnly, int64_t userId, const std::string& type) {
 
 void notifyAdmins(const std::string& type) { sendTo(true, 0, type); }
 void notifyUser(int64_t userId, const std::string& type) { sendTo(false, userId, type); }
+void notifyAll(const std::string& type) {
+    const std::string msg = "{\"type\":\"" + type + "\"}";
+    std::lock_guard<std::mutex> lk(mx);
+    for (auto& [c, w] : conns) c->send_text(msg);
+}
 
 void registerEventRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db) {
     CROW_WEBSOCKET_ROUTE(app, "/api/events")

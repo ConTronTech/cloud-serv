@@ -781,3 +781,16 @@ button.avatar { border: 0; cursor: pointer; padding: 0; overflow: hidden; font: 
 .set-card h3 { line-height: 1.2; }
 
 .settings > .set-card.span-all { grid-column: 1 / -1; }   /* a card left alone on the last row takes the full width */
+
+/* Server update in progress: covers the app until the new version answers. */
+.update-overlay { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.6); padding: 16px; }
+.update-overlay.hidden { display: none; }
+.update-box { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.6rem 1.8rem;
+  max-width: 380px; text-align: center; box-shadow: var(--shadow); }
+.update-box h2 { margin: 0.8rem 0 0.4rem; font-size: 1.15rem; }
+.update-box p { margin: 0; opacity: 0.8; line-height: 1.4; }
+.update-spin { width: 34px; height: 34px; margin: 0 auto; border-radius: 50%; border: 3px solid var(--accent);
+  border-right-color: transparent; opacity: 0.6; animation: update-spin 0.9s linear infinite; }
+@keyframes update-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .update-spin { animation-duration: 3s; } }

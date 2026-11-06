@@ -21,3 +21,4 @@ config.env
 *.zip
 # browser test scratch (Playwright MCP)
 .playwright-mcp/
+.web-next/

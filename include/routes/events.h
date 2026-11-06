@@ -13,5 +13,6 @@ namespace routes {
 void registerEventRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db);
 void notifyAdmins(const std::string& type);                 // requests | invites | users
 void notifyUser(int64_t userId, const std::string& type);   // devices | ...
+void notifyAll(const std::string& type);                    // updating (server update started)
 
 } // namespace routes

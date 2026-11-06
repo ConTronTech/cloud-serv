@@ -2414,9 +2414,41 @@ function connectEvents() {
   ws.onclose = () => {
     evSock = null;
     if (!ME || !ME.user) return;                       // logged out: stay closed
+    health().then((h) => { if (h && h.updating) showUpdating(); });
     evTimer = setTimeout(connectEvents, evRetry);      // reconnect with backoff (1 s .. 30 s)
     evRetry = Math.min(evRetry * 2, 30000);
   };
+}
+// ---- Server updates: "please wait", then reload once the new version answers ----
+// BOOT_VERSION is what this page was loaded against. When an update starts (live
+// "updating" event) or the connection drops and health says so, cover the app and poll
+// /api/health; reload when a different version is up. A plain blip (same version, not
+// updating) just uncovers the app again.
+let BOOT_VERSION = null, updPoll = null;
+async function health() {
+  try { const r = await fetch("/api/health", { cache: "no-store" }); return r.ok ? await r.json() : null; }
+  catch { return null; }
+}
+health().then((h) => { if (h) { BOOT_VERSION = h.version || null; if (h.updating) showUpdating(); } });
+function showUpdating() {
+  $("update-overlay").classList.remove("hidden");
+  if (updPoll) return;
+  let down = false;
+  const tick = async () => {
+    const h = await health();
+    if (!h) { down = true; $("update-msg").textContent = "Restarting with the new version. This page refreshes by itself."; }
+    else if (!h.updating) {
+      if (BOOT_VERSION && h.version && h.version !== BOOT_VERSION) { location.reload(); return; }
+      if (!down || h.version === BOOT_VERSION) { hideUpdating(); return; }   // no new version after all
+    }
+    updPoll = setTimeout(tick, 2000);
+  };
+  updPoll = setTimeout(tick, 1500);
+}
+function hideUpdating() {
+  clearTimeout(updPoll); updPoll = null;
+  $("update-overlay").classList.add("hidden");
+  $("update-msg").textContent = "Please wait. The page refreshes by itself when the new version is ready.";
 }
 function disconnectEvents() {
   clearTimeout(evTimer); evTimer = null;
@@ -2430,6 +2462,7 @@ function catchUp() {
   if (LOCK_STATE === "pending") handleEvent("devices");
 }
 function handleEvent(t) {
+  if (t === "updating") { showUpdating(); return; }
   if (t === "requests") soon("req", () => { refreshAdminBadge(); if (adminOpen()) loadRequests(); });
   else if (t === "invites") soon("inv", () => { if (adminOpen()) loadInvites(); });
   else if (t === "users") soon("usr", () => { if (adminOpen()) loadUsers(); });

@@ -34,6 +34,8 @@
 #include <chrono>
 #include <mutex>
 #include <condition_variable>
+#include <cctype>
+#include <cstdio>
 
 // Routes Crow's own internal log messages through our logger, and drops the
 // benign EPIPE line ("Writing stopped premature") that fires whenever a client
@@ -146,10 +148,32 @@ int main(int argc, char* argv[]) {
         int sessionSeconds = config.get_int("env", "SESSION_SECONDS", 30 * 24 * 60 * 60);
 
         // 8. Routes
+        // Update awareness: `cloudctl update` stages the new web app in <install>/.web-next
+        // while it compiles. While that folder exists we report "updating" (and tell open
+        // tabs once), so the app can show "please wait" and reload when the new version is up.
+        const std::string webDirCfg = config.get("env", "WEB_DIR", "web");
+        const std::string stagedWeb = (std::filesystem::path(webDirCfg).lexically_normal().parent_path() / ".web-next").string();
+        std::string appVersion = "dev";
+        if (std::FILE* vf = std::fopen("VERSION", "r")) {
+            char vb[128] = {0};
+            if (std::fgets(vb, sizeof vb, vf)) { appVersion = vb; while (!appVersion.empty() && std::isspace((unsigned char)appVersion.back())) appVersion.pop_back(); }
+            std::fclose(vf);
+        }
+        auto updating = [stagedWeb]() { struct stat st{}; return ::stat(stagedWeb.c_str(), &st) == 0 && S_ISDIR(st.st_mode); };
         CROW_ROUTE(app, "/api/health")
-        ([]() {
-            nlohmann::json j = {{"status", "ok"}, {"service", "cloud-serv"}};
+        ([appVersion, updating]() {
+            nlohmann::json j = {{"status", "ok"}, {"service", "cloud-serv"}, {"version", appVersion}, {"updating", updating()}};
             return http::jsonSuccess(j.dump());
+        });
+        std::atomic<bool> watchStop{false};
+        std::thread updateWatch([&watchStop, updating]() {
+            bool was = updating();
+            while (!watchStop.load()) {
+                for (int i = 0; i < 20 && !watchStop.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                bool now = updating();
+                if (now && !was) routes::notifyAll("updating");
+                was = now;
+            }
         });
         // Max size of a single assembled file (chunked uploads can exceed the
         // per-request body limit; this caps the total). In MB to stay within int.
@@ -258,6 +282,8 @@ int main(int argc, char* argv[]) {
         //     even if run() threw (otherwise ~thread would std::terminate).
         utils::Logger::get_instance().info("Shutting down...");
         storage::stopTreeScanner();   // it references db + tree, which die at the end of this scope
+        watchStop.store(true);
+        if (updateWatch.joinable()) updateWatch.join();
         {
             std::lock_guard<std::mutex> lk(mtx);
             running.store(false);

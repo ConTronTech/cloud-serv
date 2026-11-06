@@ -1,7 +1,7 @@
 // cloud-serv service worker — caches the app shell so the PWA installs and the
 // UI loads offline. API responses are never cached (always fresh + auth-scoped).
 
-const CACHE = "cloud-serv-shell-v44";
+const CACHE = "cloud-serv-shell-v45";
 const SHELL = [
   "/",
   "/index.html",
