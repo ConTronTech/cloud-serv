@@ -131,7 +131,9 @@ function showApp(user) {
     checkPendingDevices();
   });
   setTimeout(connectEvents, 0);
-  loadFs(0); // land on Files
+  const start = routeNow() || "#/files/0";
+  history.replaceState({ v: start }, "", start);   // the login screen never stays in history
+  applyRoute(start);
 }
 
 // ---- auth ----
@@ -506,6 +508,7 @@ function updateSelectBar() {
 }
 
 async function loadFs(folderId) {
+  remember("#/files/" + folderId);
   currentFolder = folderId;
   resultsMode = false;
   setActiveNav("files");
@@ -815,6 +818,7 @@ function setSort(by) {
 function itemActions(kind, item) {
   if (kind === "folder") return [
     { label: "Open", fn: () => loadFs(item.id) },
+    { label: "Download (.zip)", fn: () => downloadFolder(item) },
     { label: item.starred ? "★ Unstar" : "☆ Star", fn: () => toggleStar("folder", item) },
     { label: "Rename", fn: () => renameFolder(item) },
     { label: "Move", fn: () => openMove("folder", item) },
@@ -1555,6 +1559,7 @@ function setActiveNav(nav) {
 function showFilesTab() { $("files-tab").classList.remove("hidden"); ["notes-tab", "settings-tab", "admin-tab"].forEach((t) => $(t).classList.add("hidden")); }
 
 function goNotes() {
+  remember("#/notes");
   setActiveNav("notes");
   $("files-tab").classList.add("hidden");
   $("settings-tab").classList.add("hidden");
@@ -2035,6 +2040,162 @@ async function decideStorage(r, bytes) {
   toast(`${r.email} now has ${fmtSize(bytes)}`);
 }
 
+// ======================= Download a folder as .zip =======================
+// Built in the browser (the only place encrypted files can be decrypted). Files are
+// stored uncompressed (fast; photos/video don't compress anyway). ZIP64 fields are
+// written when a size or offset passes 4 GB, so big folders still open everywhere.
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(bytes, crc = 0) { crc = ~crc >>> 0; for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8); return ~crc >>> 0; }
+function dosTime(d) {
+  const t = isNaN(d) ? new Date() : d;
+  return { time: (t.getHours() << 11) | (t.getMinutes() << 5) | (Math.floor(t.getSeconds() / 2)),
+           date: ((Math.max(1980, t.getFullYear()) - 1980) << 9) | ((t.getMonth() + 1) << 5) | t.getDate() };
+}
+const BIG = 0xFFFFFFFF;          // "see ZIP64 field" marker
+let ZIP64_AT = 0xFFFFFFFF;       // switch to ZIP64 at this size/offset (lowered only by tests)
+class ZipWriter {
+  constructor() { this.parts = []; this.offset = 0; this.central = []; }
+  _push(u8) { this.parts.push(u8); this.offset += u8.length; }
+  add(path, data, when, isDir) {
+    const name = te.encode(path + (isDir && !path.endsWith("/") ? "/" : ""));
+    const size = isDir ? 0 : data.length, crc = isDir ? 0 : crc32(data), { time, date } = dosTime(when);
+    const off = this.offset, z64 = size >= ZIP64_AT || off >= ZIP64_AT;
+    const ex = z64 ? new DataView(new ArrayBuffer(20)) : null;
+    if (ex) { ex.setUint16(0, 1, true); ex.setUint16(2, 16, true); ex.setBigUint64(4, BigInt(size), true); ex.setBigUint64(12, BigInt(size), true); }
+    const h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, z64 ? 45 : 20, true); h.setUint16(6, 0x0800, true);   // UTF-8 names
+    h.setUint16(8, 0, true); h.setUint16(10, time, true); h.setUint16(12, date, true); h.setUint32(14, crc, true);
+    h.setUint32(18, z64 ? BIG : size, true); h.setUint32(22, z64 ? BIG : size, true);
+    h.setUint16(26, name.length, true); h.setUint16(28, ex ? 20 : 0, true);
+    this._push(new Uint8Array(h.buffer)); this._push(name); if (ex) this._push(new Uint8Array(ex.buffer));
+    if (size) { this.parts.push(new Blob([data])); this.offset += size; }   // Blob lets the browser page big data out of memory
+    this.central.push({ name, size, crc, time, date, off, isDir });
+  }
+  finish() {
+    const cdStart = this.offset;
+    for (const e of this.central) {
+      const needSize = e.size >= ZIP64_AT, needOff = e.off >= ZIP64_AT;
+      const exLen = (needSize ? 16 : 0) + (needOff ? 8 : 0);
+      const ex = exLen ? new DataView(new ArrayBuffer(4 + exLen)) : null;
+      if (ex) { ex.setUint16(0, 1, true); ex.setUint16(2, exLen, true); let p = 4;
+        if (needSize) { ex.setBigUint64(p, BigInt(e.size), true); ex.setBigUint64(p + 8, BigInt(e.size), true); p += 16; }
+        if (needOff) ex.setBigUint64(p, BigInt(e.off), true); }
+      const c = new DataView(new ArrayBuffer(46));
+      c.setUint32(0, 0x02014b50, true); c.setUint16(4, 0x0300 | 45, true); c.setUint16(6, ex ? 45 : 20, true); c.setUint16(8, 0x0800, true);   // made-by = Unix so unzip keeps UTF-8 names
+      c.setUint16(10, 0, true); c.setUint16(12, e.time, true); c.setUint16(14, e.date, true); c.setUint32(16, e.crc, true);
+      c.setUint32(20, needSize ? BIG : e.size, true); c.setUint32(24, needSize ? BIG : e.size, true);
+      c.setUint16(28, e.name.length, true); c.setUint16(30, ex ? 4 + exLen : 0, true); c.setUint16(32, 0, true);
+      c.setUint16(34, 0, true); c.setUint16(36, 0, true); c.setUint32(38, e.isDir ? ((0o40755 << 16) | 0x10) >>> 0 : (0o100644 << 16) >>> 0, true); c.setUint32(42, needOff ? BIG : e.off, true);
+      this._push(new Uint8Array(c.buffer)); this._push(e.name); if (ex) this._push(new Uint8Array(ex.buffer));
+    }
+    const cdSize = this.offset - cdStart, n = this.central.length;
+    if (n >= 0xFFFF || cdStart >= ZIP64_AT || cdSize >= ZIP64_AT) {            // ZIP64 end records
+      const z = new DataView(new ArrayBuffer(56)), z64Off = this.offset;
+      z.setUint32(0, 0x06064b50, true); z.setBigUint64(4, 44n, true); z.setUint16(12, 45, true); z.setUint16(14, 45, true);
+      z.setUint32(16, 0, true); z.setUint32(20, 0, true); z.setBigUint64(24, BigInt(n), true); z.setBigUint64(32, BigInt(n), true);
+      z.setBigUint64(40, BigInt(cdSize), true); z.setBigUint64(48, BigInt(cdStart), true);
+      this._push(new Uint8Array(z.buffer));
+      const l = new DataView(new ArrayBuffer(20));
+      l.setUint32(0, 0x07064b50, true); l.setUint32(4, 0, true); l.setBigUint64(8, BigInt(z64Off), true); l.setUint32(16, 1, true);
+      this._push(new Uint8Array(l.buffer));
+    }
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, Math.min(n, 0xFFFF), true); end.setUint16(10, Math.min(n, 0xFFFF), true);
+    end.setUint32(12, cdSize >= ZIP64_AT ? BIG : cdSize, true); end.setUint32(16, cdStart >= ZIP64_AT ? BIG : cdStart, true);
+    this._push(new Uint8Array(end.buffer));
+    return new Blob(this.parts, { type: "application/zip" });
+  }
+}
+// Every file and subfolder under a folder, with paths relative to it.
+async function folderTree(folderId, prefix, out) {
+  const { ok, body } = await api("/api/fs?folder=" + folderId, { headers: authHeaders() });
+  if (!ok || !body) throw new Error("list failed");
+  const folders = body.folders || [], files = body.files || [];
+  await hydrateNames(folders, files);
+  for (const f of files) out.files.push({ item: f, path: prefix + dispName(f) });
+  for (const d of folders) {
+    const p = prefix + dispName(d) + "/";
+    out.dirs.push({ path: p, when: new Date(d.createdAt) });
+    await folderTree(d.id, p, out);
+  }
+  return out;
+}
+async function plainBytes(f) {
+  if (f.wrappedKey) return fetchPlaintext(f);                      // encrypted: decrypt here
+  const r = await fetch(API + "/api/files/" + f.id, { headers: authHeaders() });
+  if (!r.ok) throw new Error("download " + r.status);
+  return new Uint8Array(await r.arrayBuffer());
+}
+async function downloadFolder(folder) {
+  const name = dispName(folder) || "folder";
+  toast(`Preparing "${name}"…`);
+  let tree;
+  try { tree = await folderTree(folder.id, "", { files: [], dirs: [] }); }
+  catch { toast("Couldn't read the folder"); return; }
+  if (tree.files.some((x) => x.item.encName && x.item._name == null)) { toast("Unlock this device first: some files are encrypted"); return; }
+  const total = tree.files.reduce((a, x) => a + (x.item.size || 0), 0);
+  if (total > 3.5 * 1073741824 && !confirm(`This folder is ${fmtSize(total)}. Building a zip that big in the browser needs lots of memory and disk. Continue?`)) return;
+  const zip = new ZipWriter();
+  for (const d of tree.dirs) zip.add(d.path, null, d.when, true);
+  let done = 0, bytes = 0;
+  for (const x of tree.files) {
+    let data;
+    try { data = await plainBytes(x.item); }
+    catch { toast(`Couldn't download "${x.path}", stopped`); return; }
+    zip.add(x.path, data, new Date(x.item.createdAt), false);
+    done++; bytes += data.length;
+    toast(`Zipping "${name}": ${done} of ${tree.files.length} files · ${fmtSize(bytes)}`);
+  }
+  const blob = zip.finish();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = name + ".zip";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  toast(`Downloaded "${name}.zip" (${tree.files.length} files, ${fmtSize(blob.size)})`);
+}
+
+// ======================= Back / Forward between views =======================
+// Every view has an address (#/files/<id>, #/recent, #/starred, #/notes, #/settings, #/admin).
+// Moving between views adds a history entry, so the browser's Back/Forward flip between
+// them. Signing in REPLACES the entry, so Back never lands on the login screen; you only
+// see it after logging out or when the session has expired.
+let navRestoring = false;
+function routeNow() { const h = location.hash || ""; return h.startsWith("#/") ? h : ""; }
+function remember(route) {
+  if (navRestoring || !route || routeNow() === route) return;
+  const first = !routeNow();
+  history[first ? "replaceState" : "pushState"]({ v: route }, "", route);
+}
+async function applyRoute(route) {
+  navRestoring = true;
+  try {
+    const m = /^#\/files\/(\d+)$/.exec(route || "");
+    if (m) await loadFs(parseInt(m[1], 10));
+    else if (route === "#/recent") await loadView("recent");
+    else if (route === "#/starred") await loadView("starred");
+    else if (route === "#/notes") goNotes();
+    else if (route === "#/settings") goSettings();
+    else if (route === "#/admin" && isAdmin()) goAdmin();
+    else { await loadFs(0); history.replaceState({ v: "#/files/0" }, "", "#/files/0"); }
+  } finally { navRestoring = false; }
+}
+window.addEventListener("popstate", () => {
+  if (!ME || !ME.user || $("app-view").classList.contains("hidden")) return;   // signed out: stay on login
+  closePreview(); closeUserMenu(); closeCtx();
+  applyRoute(routeNow() || "#/files/0");
+});
+// The browser may restore a frozen copy of the page (Back after leaving the site):
+// re-check the session instead of trusting whatever screen the snapshot shows.
+window.addEventListener("pageshow", async (e) => {
+  if (!e.persisted) return;
+  const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
+  const signedIn = ok && body && body.user;
+  const showingApp = !$("app-view").classList.contains("hidden");
+  if (signedIn && !showingApp) { ME = body; restoreDEK(); showApp(body.user); }
+  else if (!signedIn && showingApp) { disconnectEvents(); ME = null; showAuth(); }
+  else if (signedIn) connectEvents();
+});
+
 // ======================= Live updates (WebSocket) =======================
 // One connection per tab to /api/events. The server sends tiny hints when something
 // changes; we refetch only what's on screen. No timers polling the server.
@@ -2185,6 +2346,7 @@ async function refreshAdminBadge() {
   $("avatar-dot").classList.toggle("hidden", n === 0);
 }
 function goAdmin() {
+  remember("#/admin");
   setActiveNav("admin");
   ["files-tab", "notes-tab", "settings-tab"].forEach((t) => $(t).classList.add("hidden"));
   $("admin-tab").classList.remove("hidden");
@@ -2302,6 +2464,7 @@ async function patchUser(u, patch, question) {
 // ---- Settings ----
 let ME = null;
 function goSettings() {
+  remember("#/settings");
   setActiveNav("settings");
   $("files-tab").classList.add("hidden"); $("notes-tab").classList.add("hidden"); $("admin-tab").classList.add("hidden");
   $("settings-tab").classList.remove("hidden");
@@ -2414,6 +2577,7 @@ async function createApiKey(e) {
 
 // Recent / Starred views (files-tab, results mode).
 async function loadView(kind) {
+  remember("#/" + kind);
   setActiveNav(kind);
   showFilesTab();
   closeSidebar();
