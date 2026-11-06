@@ -120,8 +120,14 @@ if [ "$BUILD" = 1 ]; then
     apt-get update -qq </dev/null
     apt-get install -y -qq --no-install-recommends g++ make libasio-dev libssl-dev libsqlite3-dev \
         libcurl4-openssl-dev ca-certificates python3 curl zip unzip </dev/null >/dev/null
+    # A new version always gets a clean build: zip files keep timestamps without a time
+    # zone, so make can wrongly think old object files are newer than updated sources.
+    if [ "$(cat "$SRC/VERSION" 2>/dev/null)" != "$(cat "$SRC/.built-version" 2>/dev/null)" ]; then
+        make -C "$SRC" clean </dev/null >/dev/null 2>&1 || true
+    fi
     say "building (this takes a few minutes on a small box)"
     make -C "$SRC" -j"$(nproc)" </dev/null >/dev/null
+    cat "$SRC/VERSION" > "$SRC/.built-version" 2>/dev/null || true
 fi
 [ -x "$SRC/cloud_serv" ] || die "no cloud_serv binary in $SRC (build failed?)"
 
