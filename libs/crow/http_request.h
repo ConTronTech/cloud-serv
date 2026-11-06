@@ -42,10 +42,13 @@ namespace crow // NOTE: Already documented in "crow/app.h"
         ci_map headers;
         std::string body;
         std::string remote_ip_address; ///< The IP address from which the request was sent.
-        unsigned char http_ver_major, http_ver_minor;
-        bool keep_alive,    ///< Whether or not the server should send a `connection: Keep-Alive` header to the client.
-          close_connection, ///< Whether or not the server should shut down the TCP connection once a response is sent.
-          upgrade;          ///< Whether or noth the server should change the HTTP connection to a different connection.
+        // cloud-serv patch: value-initialise these. Upstream leaves them uninitialised, and the
+        // default move-assignment (HTTPParser::clear) then reads garbage bools: undefined
+        // behaviour caught by UBSan ("load of value 115 ... not a valid value for type 'bool'").
+        unsigned char http_ver_major{}, http_ver_minor{};
+        bool keep_alive{},    ///< Whether or not the server should send a `connection: Keep-Alive` header to the client.
+          close_connection{}, ///< Whether or not the server should shut down the TCP connection once a response is sent.
+          upgrade{};          ///< Whether or noth the server should change the HTTP connection to a different connection.
 
         void* middleware_context{};
         void* middleware_container{};
