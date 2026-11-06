@@ -63,8 +63,8 @@ public:
     int  countUsersWithStatus(const std::string& status);
 
     // ---- Storage increase requests ----
-    struct StorageRequest { int64_t id = 0, user_id = 0, requested_bytes = 0; std::string email, display_name, message, status, created_at; };
-    int64_t createStorageRequest(int64_t userId, int64_t requestedBytes, const std::string& message); // replaces a pending one
+    struct StorageRequest { int64_t id = 0, user_id = 0, requested_bytes = 0, upload_bytes = 0; std::string email, display_name, message, status, created_at; };
+    int64_t createStorageRequest(int64_t userId, int64_t requestedBytes, int64_t uploadBytes, const std::string& message); // replaces a pending one
     std::vector<StorageRequest> listPendingStorageRequests();
     std::optional<StorageRequest> getStorageRequest(int64_t id);
     std::optional<StorageRequest> latestStorageRequest(int64_t userId);

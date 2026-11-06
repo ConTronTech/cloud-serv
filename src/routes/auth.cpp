@@ -302,6 +302,7 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
             if (!db.setDisplayName(*userId, name)) return http::jsonError(500, "could not save");
             out["displayName"] = name;
         }
+        notifyUser(*userId, "me");
         return http::jsonSuccess(out.dump());
     });
 
@@ -369,6 +370,7 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
 
         json info = {{"id", keyId}, {"name", name}, {"prefix", prefix}};
         // "key" is the only time the full secret is ever shown.
+        notifyUser(*userId, "me");
         return http::jsonSuccess(json{{"key", fullKey}, {"info", info}}.dump());
     });
 
@@ -389,6 +391,7 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         auto userId = security::authenticateSession(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
         if (!db.revokeApiKey(*userId, keyId)) return http::jsonError(404, "key not found");
+        notifyUser(*userId, "me");
         return http::jsonSuccess(R"({"ok":true})");
     });
 }

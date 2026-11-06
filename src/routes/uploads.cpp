@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 
+#include "routes/events.h"
 using json = nlohmann::json;
 
 namespace routes {
@@ -179,6 +180,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         db.deleteUploadSession(*userId, id); // keep the blob; it's now a real file
 
         json out = {{"id", fileId}, {"name", s->name}, {"mime", s->mime}, {"size", s->received}};
+        notifyUser(*userId, "files");
         return http::jsonSuccess(json{{"file", out}}.dump());
     });
 

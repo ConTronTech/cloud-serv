@@ -3,6 +3,7 @@
 #include "security/crypto.h"
 #include "security/sanitizer.h"
 #include "utils/logger.h"
+#include "routes/events.h"
 
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -217,6 +218,7 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
 
         json out = {{"id", id}, {"name", name}, {"mime", mime}, {"size", size},
                     {"folderId", folderId}, {"encName", encName}, {"encMime", encMime}};
+        notifyUser(*userId, "files");
         return http::jsonSuccess(out.dump());
     });
 
@@ -311,6 +313,7 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
 
         db.deleteFile(*userId, fileId);
         store.remove(*userId, meta->storage_key);
+        notifyUser(*userId, "files");
         return http::jsonSuccess(R"({"ok":true})");
     });
 }

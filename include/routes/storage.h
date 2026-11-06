@@ -7,7 +7,8 @@
 namespace routes {
 
 // Asking for more storage (session only):
-//   POST /api/storage-requests        {requestedBytes, message?}  -> {request}   (new total quota; replaces a pending one)
+//   POST /api/storage-requests        {uploadBytes, message?}  -> {request}   (size of the upload that didn't fit; the server
+//                                      asks for usage + upload, rounded up to 100 MB; replaces a pending one)
 //   GET  /api/storage-requests/mine   -> {request|null}
 // Admins (session + admin role):
 //   GET  /api/admin/storage-requests  -> {requests:[{id,email,displayName,usedBytes,quotaBytes,requestedBytes,message,createdAt}]}

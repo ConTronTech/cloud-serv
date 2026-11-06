@@ -271,6 +271,7 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
         // 0 = account was created through SSO and has no usable local password.
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN local_login INTEGER NOT NULL DEFAULT 1;", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN signup_ip TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE storage_requests ADD COLUMN upload_bytes INTEGER NOT NULL DEFAULT 0;", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN signup_note TEXT DEFAULT '';", nullptr, nullptr, nullptr);
 
         // Admin bootstrap: if this DB has no admin yet, promote the earliest
@@ -584,22 +585,23 @@ const char* kDeviceCols = "id, user_id, name, public_key, wrapped_dek, status, c
 } // namespace
 
 namespace {
-const char* kSrCols = "r.id, r.user_id, r.requested_bytes, COALESCE(u.email,''), COALESCE(u.display_name,''), r.message, r.status, r.created_at";
+const char* kSrCols = "r.id, r.user_id, r.requested_bytes, COALESCE(u.email,''), COALESCE(u.display_name,''), r.message, r.status, r.created_at, r.upload_bytes";
 CloudDB::StorageRequest readSr(Stmt& q) {
     CloudDB::StorageRequest r;
     r.id = q.colInt64(0); r.user_id = q.colInt64(1); r.requested_bytes = q.colInt64(2); r.email = q.colText(3);
     r.display_name = q.colText(4); r.message = q.colText(5); r.status = q.colText(6); r.created_at = q.colText(7);
+    r.upload_bytes = q.colInt64(8);
     return r;
 }
 } // namespace
 
-int64_t CloudDB::createStorageRequest(int64_t userId, int64_t requestedBytes, const std::string& message) {
+int64_t CloudDB::createStorageRequest(int64_t userId, int64_t requestedBytes, int64_t uploadBytes, const std::string& message) {
     std::unique_lock lock(db_mutex_);
     try {
         Conn c(dbPath_, SQLITE_OPEN_READWRITE);
         { Stmt d(c.h, "DELETE FROM storage_requests WHERE user_id = ? AND status = 'pending'"); d.bind(1, userId); d.exec(); }
-        Stmt q(c.h, "INSERT INTO storage_requests(user_id, requested_bytes, message) VALUES(?, ?, ?)");
-        q.bind(1, userId); q.bind(2, requestedBytes); q.bind(3, message);
+        Stmt q(c.h, "INSERT INTO storage_requests(user_id, requested_bytes, upload_bytes, message) VALUES(?, ?, ?, ?)");
+        q.bind(1, userId); q.bind(2, requestedBytes); q.bind(3, uploadBytes); q.bind(4, message);
         if (sqlite3_step(q.s) != SQLITE_DONE) return -1;
         return sqlite3_last_insert_rowid(c.h);
     } catch (const std::exception& e) {

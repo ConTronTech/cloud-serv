@@ -512,12 +512,14 @@ async function loadFs(folderId) {
   showFilesTab();
   closeSidebar();
   const si = $("search-input"); if (si) si.value = "";
+  const g = beginList("fs");
   const { ok, status, body } = await api("/api/fs?folder=" + folderId, { headers: authHeaders() });
   if (status === 401) { sessionExpired(); return; }
-  if (!ok || !body) { toast("Could not load folder."); return; }
-  curFolders = body.folders || [];
-  curFiles = body.files || [];
-  await hydrateNames(curFolders, curFiles, body.breadcrumbs || []);
+  if (!ok || !body) { if (!isStale("fs", g)) toast("Could not load folder."); return; }
+  const folders = body.folders || [], files = body.files || [];
+  await hydrateNames(folders, files, body.breadcrumbs || []);
+  if (isStale("fs", g)) return;          // a newer load started meanwhile
+  curFolders = folders; curFiles = files;
   renderBreadcrumbs($("breadcrumbs"), body.breadcrumbs || [], (id) => loadFs(id));
   renderFs();
   updateHome();
@@ -1924,9 +1926,9 @@ async function fitToQuota(items) {
       row.append(cb, nm, sz); frag.appendChild(row);
     });
     list.replaceChildren(frag);
-    const suggestGb = niceGb(USAGE.used + total + 64 * 1048576);
-    $("quota-ask-gb").value = String(Math.max(suggestGb, niceGb(USAGE.quota) + 0.5));
     $("quota-ask-msg").value = "";
+    $("quota-ask-what").textContent = `Asks an admin for room for this upload (${fmtSize(total)}). They'll see how much you tried to upload and decide.`;
+    $("quota-ask-send").disabled = false;
     $("quota-ask").classList.add("hidden");
     $("quota-ask-status").textContent = "";
     function refresh() {
@@ -1941,19 +1943,31 @@ async function fitToQuota(items) {
     const done = (v) => { m.classList.add("hidden"); resolve(v); };
     $("quota-go").onclick = () => done(items.filter((_, i) => !skip.has(i)));
     $("quota-cancel").onclick = () => done(null);
-    $("quota-more").onclick = () => { $("quota-ask").classList.toggle("hidden"); $("quota-ask-gb").focus(); };
+    $("quota-more").onclick = () => { $("quota-ask").classList.toggle("hidden"); $("quota-ask-msg").focus(); };
     $("quota-ask-send").onclick = async () => {
-      const gb = Number($("quota-ask-gb").value);
-      if (!isFinite(gb) || gb * 1073741824 <= USAGE.quota) { $("quota-ask-status").textContent = `Ask for more than your current ${fmtSize(USAGE.quota)}`; return; }
       const r = await api("/api/storage-requests", { method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ requestedBytes: Math.round(gb * 1073741824), message: $("quota-ask-msg").value.trim() }) });
+        body: JSON.stringify({ uploadBytes: total, message: $("quota-ask-msg").value.trim() }) });
       if (!r.ok) { $("quota-ask-status").textContent = prettyError(r.body) || "Couldn't send the request"; return; }
-      $("quota-ask-status").textContent = `Sent: asked for ${gb} GB. You'll see it here as soon as an admin decides. Upload what fits now, or cancel and try again later.`;
+      $("quota-ask-status").textContent = `Sent. You'll be told here the moment an admin decides. Upload what fits now, or cancel and try again after.`;
       $("quota-ask-send").disabled = true;
-      setTimeout(() => { $("quota-ask-send").disabled = false; }, 3000);
     };
     m.classList.remove("hidden");
   });
+}
+
+// Live: an admin changed my account (limit, role, suspension, removal).
+async function onAccountEvent() {
+  const before = USAGE.quota, wasAdmin = isAdmin();
+  const { ok, status, body } = await api("/api/auth/me", { headers: authHeaders() });
+  if (!ok) {
+    if (status === 401) { disconnectEvents(); ME = null; showAuth(); $("auth-error").textContent = "An admin changed your account. Please sign in again."; }
+    return;
+  }
+  ME = body; renderAvatar(); updateAdminNav();
+  await loadUsage();
+  if (USAGE.quota !== before) toast(USAGE.quota == null ? "Your storage is now unlimited" : `Your storage limit is now ${fmtSize(USAGE.quota)}`);
+  else if (wasAdmin !== isAdmin()) toast(isAdmin() ? "You're now an admin" : "You're no longer an admin");
+  if (!isAdmin() && adminOpen()) loadFs(currentFolder);
 }
 
 // Live: my storage request was decided.
@@ -1976,7 +1990,7 @@ async function loadStorageRequests() {
   for (const r of reqs) {
     const li = document.createElement("li"); li.className = "key-row";
     li.append(infoBlock(`${r.displayName || r.email} · ${r.email}`,
-      `uses ${fmtSize(r.usedBytes)} of ${r.quotaBytes == null ? "unlimited" : fmtSize(r.quotaBytes)} · asks for ${fmtSize(r.requestedBytes)} · ${fmtDate(r.createdAt)}`,
+      `tried to upload ${fmtSize(r.uploadBytes)} · uses ${fmtSize(r.usedBytes)} of ${r.quotaBytes == null ? "unlimited" : fmtSize(r.quotaBytes)} · needs a ${fmtSize(r.requestedBytes)} limit · ${fmtDate(r.createdAt)}`,
       r.message ? "“" + r.message + "”" : ""));
     li.append(rowBtn("Approve", "primary", () => decideStorage(r, r.requestedBytes)));
     li.append(rowBtn("Other amount", "ghost", () => {
@@ -2007,7 +2021,7 @@ async function decideStorage(r, bytes) {
 // changes; we refetch only what's on screen. No timers polling the server.
 let evSock = null, evRetry = 1000, evTimer = null;
 const evDebounce = {};
-function soon(key, fn) { clearTimeout(evDebounce[key]); evDebounce[key] = setTimeout(fn, 200); }
+function soon(key, fn, ms = 200) { clearTimeout(evDebounce[key]); evDebounce[key] = setTimeout(fn, ms); }
 function adminOpen() { return !$("admin-tab").classList.contains("hidden"); }
 function settingsOpen() { return !$("settings-tab").classList.contains("hidden"); }
 function connectEvents() {
@@ -2042,6 +2056,18 @@ function handleEvent(t) {
   else if (t === "users") soon("usr", () => { if (adminOpen()) loadUsers(); });
   else if (t === "storage") soon("sto", () => { refreshAdminBadge(); if (adminOpen()) loadStorageRequests(); });
   else if (t === "quota") soon("quo", onQuotaEvent);
+  else if (t === "files") soon("fil", () => {           // something changed in my files (any tab/device)
+    loadUsage();
+    if (!$("files-tab").classList.contains("hidden") && $("preview-modal").classList.contains("hidden")) refreshCurrentView();
+  }, 500);
+  else if (t === "notes") soon("not", () => {
+    if (!$("notes-tab").classList.contains("hidden") && $("note-editor").classList.contains("hidden")) loadNotes();
+  });
+  else if (t === "me") soon("me", async () => {        // name, picture, prefs, API keys
+    await refreshMe(); loadPrefs();
+    if (settingsOpen()) { const n = $("set-name"); if (document.activeElement !== n) n.value = (ME.user && ME.user.displayName) || ""; loadApiKeys(); }
+  });
+  else if (t === "account") soon("acc", onAccountEvent);  // an admin changed my account
   else if (t === "devices") soon("dev", async () => {
     if (LOCK_STATE === "pending") {
       const s = await tryDeviceUnlock(uidNow());

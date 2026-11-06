@@ -24,7 +24,7 @@ json reqJson(CloudDB& db, const CloudDB::StorageRequest& r) {
     auto u = db.findUserById(r.user_id);
     json quota = (u && u->storage_quota_bytes) ? json(*u->storage_quota_bytes) : json(nullptr);
     return {{"id", r.id}, {"email", r.email}, {"displayName", r.display_name}, {"usedBytes", db.usage(r.user_id).first},
-            {"quotaBytes", quota}, {"requestedBytes", r.requested_bytes}, {"message", r.message},
+            {"quotaBytes", quota}, {"requestedBytes", r.requested_bytes}, {"uploadBytes", r.upload_bytes}, {"message", r.message},
             {"status", r.status}, {"createdAt", r.created_at}};
 }
 
@@ -36,18 +36,23 @@ void registerStorageRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db
         auto uid = security::authenticateSession(req, db);
         if (!uid) return http::jsonError(401, "unauthorized");
         json b = json::parse(req.body, nullptr, false);
-        if (!b.is_object() || !b.contains("requestedBytes") || !b["requestedBytes"].is_number_integer())
-            return http::jsonError(400, "requestedBytes (integer) required");
-        const int64_t want = b["requestedBytes"].get<int64_t>();
+        if (!b.is_object() || !b.contains("uploadBytes") || !b["uploadBytes"].is_number_integer())
+            return http::jsonError(400, "uploadBytes (integer) required");
+        const int64_t upload = b["uploadBytes"].get<int64_t>();
         auto u = db.findUserById(*uid);
         if (!u) return http::jsonError(401, "unauthorized");
         if (!u->storage_quota_bytes) return http::jsonError(409, "your storage is already unlimited");
-        if (want <= *u->storage_quota_bytes || want > kMaxRequestBytes) return http::jsonError(400, "ask for more than your current limit");
+        if (upload <= 0 || upload > kMaxRequestBytes) return http::jsonError(400, "invalid upload size");
+        // The limit they'd need: what they use now + this upload, rounded up to the next 100 MB.
+        const int64_t step = 100LL * 1024 * 1024;
+        int64_t want = db.usage(*uid).first + upload;
+        if (want <= *u->storage_quota_bytes) return http::jsonError(409, "that upload already fits");   // check before rounding
+        want = ((want + step - 1) / step) * step;
         std::string msg;
         if (b.contains("message") && b["message"].is_string())
             for (unsigned char ch : b["message"].get<std::string>()) if (ch >= 0x20 && ch != 0x7f) msg += static_cast<char>(ch);
         if (msg.size() > 300) msg.resize(300);
-        int64_t id = db.createStorageRequest(*uid, want, msg);
+        int64_t id = db.createStorageRequest(*uid, want, upload, msg);
         if (id < 0) return http::jsonError(500, "could not save request");
         utils::Logger::get_instance().info("storage: user " + std::to_string(*uid) + " asked for " + std::to_string(want) + " bytes");
         notifyAdmins("storage");

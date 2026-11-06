@@ -126,6 +126,7 @@ void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
         if (!updated) return http::jsonError(404, "user not found");
         auto [bytes, count] = db.usage(updated->id);
         notifyAdmins("users");
+        notifyUser(targetId, "account");
         return http::jsonSuccess(updated->toAdminJson(bytes, count).dump());
     });
 
@@ -161,6 +162,7 @@ void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
         if (!storageRemoved)
             utils::Logger::get_instance().warn("admin remove: live storage dir for user " +
                                                std::to_string(targetId) + " could not be deleted");
+        notifyUser(targetId, "account");
         return http::jsonSuccess(json{{"removedUserId", targetId}, {"status", "removed"},
                                       {"storageRemoved", storageRemoved}}.dump());
     });
@@ -176,6 +178,7 @@ void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
                 return store.restoreBlobs(targetId, src, keys); },
             [&store, targetId](const std::vector<std::string>& keys) { store.removeBlobs(targetId, keys); });
         if (!r.ok) return http::jsonError(r.status, r.error);
+        notifyUser(targetId, "account");
         return http::jsonSuccess(json{{"restoredUserId", targetId}, {"status", "active"},
                                       {"folders", r.nFolders}, {"files", r.nFiles},
                                       {"notes", r.nNotes}}.dump());
@@ -230,6 +233,7 @@ void registerAdminRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db,
         if (!storageRemoved)
             utils::Logger::get_instance().warn("admin wipe: storage dir for user " +
                                                std::to_string(targetId) + " could not be deleted");
+        notifyUser(targetId, "account");
         return http::jsonSuccess(json{{"wiped", true}, {"storageRemoved", storageRemoved},
                                       {"backupRemoved", r.backupRemoved}}.dump());
     });

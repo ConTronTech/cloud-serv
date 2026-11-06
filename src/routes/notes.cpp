@@ -3,6 +3,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "routes/events.h"
 using json = nlohmann::json;
 
 namespace routes {
@@ -97,6 +98,7 @@ void registerNoteRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db) {
         if (id < 0) return http::jsonError(500, "could not create note");
         auto note = db.getNote(*userId, id);
         if (!note) return http::jsonError(500, "could not load note");
+        notifyUser(*userId, "notes");
         return http::jsonSuccess(json{{"note", note->toJson()}}.dump());
     });
 
@@ -122,6 +124,7 @@ void registerNoteRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db) {
             return http::jsonError(404, "not found");
         auto note = db.getNote(*userId, noteId);
         if (!note) return http::jsonError(404, "not found");
+        notifyUser(*userId, "notes");
         return http::jsonSuccess(json{{"note", note->toJson()}}.dump());
     });
 
@@ -131,6 +134,7 @@ void registerNoteRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
         if (!db.deleteNote(*userId, noteId)) return http::jsonError(404, "not found");
+        notifyUser(*userId, "notes");
         return http::jsonSuccess(R"({"ok":true})");
     });
 }

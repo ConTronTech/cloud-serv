@@ -3,6 +3,7 @@
 #include "security/request_auth.h"
 #include "core/config.h"
 #include "utils/logger.h"
+#include "routes/events.h"
 
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -57,6 +58,7 @@ void registerProfileRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db
         ::chmod(tmp.c_str(), S_IRUSR | S_IWUSR);
         fs::rename(tmp, avatarPath(*uid), ec);
         if (ec) return http::jsonError(500, "could not save picture");
+        notifyUser(*uid, "me");
         return http::jsonSuccess(json{{"avatarVersion", avatarVersion(*uid)}}.dump());
     });
 
@@ -84,6 +86,7 @@ void registerProfileRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db
         if (!uid) return http::jsonError(401, "unauthorized");
         std::error_code ec;
         fs::remove(avatarPath(*uid), ec);
+        notifyUser(*uid, "me");
         return http::jsonSuccess(R"({"ok":true})");
     });
 }

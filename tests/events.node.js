@@ -31,6 +31,20 @@ const post = (path, tok, body) => fetch(BASE + path, { method: "POST", headers: 
   ok(!user.got.includes("requests") && !user.got.includes("invites"), "normal user hears no admin events");
   ok(user.got.includes("devices"), "user hears their own 'devices'");
   ok(!admin.got.includes("devices"), "admin doesn't hear another user's devices");
+  // everything else that changes reaches the owner's other tabs/devices
+  const user2 = await open({ Cookie: "session=" + TU, Origin: "http://" + host });
+  user.got.length = 0; admin.got.length = 0;
+  const H = { authorization: "Bearer " + TU };
+  await fetch(BASE + "/api/files", { method: "POST", headers: { ...H, "X-Filename": "e.txt" }, body: "x" });
+  await fetch(BASE + "/api/folders", { method: "POST", headers: H, body: JSON.stringify({ parentId: 0, name: "d" }) });
+  await fetch(BASE + "/api/notes", { method: "POST", headers: H, body: JSON.stringify({ title: "t", body: "b" }) });
+  await fetch(BASE + "/api/auth/me/prefs", { method: "PATCH", headers: H, body: JSON.stringify({ displayName: "New" }) });
+  const uid = (await (await fetch(BASE + "/api/auth/me", { headers: H })).json()).user.id;
+  await fetch(BASE + "/api/admin/users/" + uid, { method: "PATCH", headers: { authorization: "Bearer " + TA }, body: JSON.stringify({ storageQuotaBytes: 5000000 }) });
+  await sleep(500);
+  for (const t of ["files", "notes", "me", "account"]) ok(user.got.includes(t) && user2.got.includes(t), `both of the user's tabs hear '${t}'`);
+  ok(!admin.got.includes("files") && !admin.got.includes("notes"), "admin doesn't hear the user's files/notes");
+  user2.ws.close();
   admin.ws.close(); user.ws.close();
   console.log(`\nRESULTS: ${PASS} passed, ${FAIL} failed`);
   process.exit(FAIL ? 1 : 0);

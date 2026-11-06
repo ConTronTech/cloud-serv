@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 
+#include "routes/events.h"
 using json = nlohmann::json;
 
 namespace routes {
@@ -103,6 +104,7 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
         int64_t id = db.createFolder(*userId, parentId, name, encName);
         if (id < 0) return http::jsonError(400, "could not create folder");
         auto f = db.getFolder(*userId, id);
+        notifyUser(*userId, "files");
         return http::jsonSuccess(json{{"folder", f ? f->toJson() : json(nullptr)}}.dump());
     });
 
@@ -133,6 +135,7 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
         if (body.contains("starred") && body["starred"].is_boolean())
             db.setFolderStarred(*userId, folderId, body["starred"].get<bool>());
         auto f = db.getFolder(*userId, folderId);
+        notifyUser(*userId, "files");
         return http::jsonSuccess(json{{"folder", f ? f->toJson() : json(nullptr)}}.dump());
     });
 
@@ -147,6 +150,7 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
         if (!db.deleteFolderRecursive(*userId, folderId, storageKeys))
             return http::jsonError(500, "delete failed");
         for (const auto& key : storageKeys) store.remove(*userId, key); // free the bytes
+        notifyUser(*userId, "files");
         return http::jsonSuccess(R"({"ok":true})");
     });
 
@@ -228,6 +232,7 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
         if (body.contains("starred") && body["starred"].is_boolean())
             db.setFileStarred(*userId, fileId, body["starred"].get<bool>());
         auto f = db.getFile(*userId, fileId);
+        notifyUser(*userId, "files");
         return http::jsonSuccess(json{{"file", f ? f->toJson() : json(nullptr)}}.dump());
     });
 }
