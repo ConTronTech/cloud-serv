@@ -272,4 +272,16 @@ void LoginThrottle::release(const std::string& key) {
     if (it != entries_.end() && it->second.pending > 0) it->second.pending--;
 }
 
+RateLimiter::Decision RateLimiter::check(const std::string& clientIp, bool isWrite, bool credentialed) {
+    if (!enabled_) return Decision::Allow;
+    if (!credentialed) return allowRequest(clientIp, isWrite) ? Decision::Allow
+           : (isBanned(clients_[clientIp]) ? Decision::Banned : Decision::Throttle);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    ClientBucket& bucket = clients_[clientIp + "|auth"];
+    refillTokens(bucket, isWrite ? write_refill_rate_ : read_refill_rate_);
+    if (bucket.tokens > 0) { bucket.tokens--; return Decision::Allow; }
+    return Decision::Throttle;   // no violation counted: never escalates to a ban
+}
+
 } // namespace security

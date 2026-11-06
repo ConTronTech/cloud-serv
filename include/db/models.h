@@ -109,6 +109,7 @@ struct UploadSession {
     int64_t plain_size = 0;      // plaintext size for display (0 = use received)
     std::string enc_name;        // E2E: display name encrypted under the DEK ("" = plaintext)
     std::string enc_mime;        // E2E: mime type encrypted under the DEK ("" = plaintext)
+    std::string kind;            // "" = one file, "tree-folder" = a folder streamed as tar
 };
 
 // The record of a removed account ("backup + temp remove"). The ACCOUNT ITSELF

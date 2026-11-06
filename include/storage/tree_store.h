@@ -58,6 +58,14 @@ public:
     int writeFile(const std::string& acct, const Rel& parent, const std::string& name,
                   const char* data, size_t size, bool autoRename, std::string& finalName) const;
 
+    // Folder uploads (a tar streamed in chunks): staging dir <acct>/.cloud-serv/extract/<key>/.
+    // extractRoot returns an fd of that dir (created when `create`), or -1.
+    int extractRoot(const std::string& acct, const std::string& key, bool create) const;
+    // Move the finished staging dir into the tree as `name` (numbered " (1)" etc. if taken).
+    int extractPlace(const std::string& acct, const std::string& key, const Rel& parent,
+                     const std::string& name, std::string& finalName) const;
+    void extractRemove(const std::string& acct, const std::string& key) const;
+
     // Verify a file can be served (every component walked with O_NOFOLLOW, final entry a
     // regular file) and return its absolute path + current size. Empty string if not.
     std::string servePath(const std::string& acct, const Rel& parent, const std::string& name,
@@ -70,6 +78,9 @@ public:
     struct Entry { int32_t parent = -1; std::string name; bool dir = false; int64_t size = 0; int64_t mtime = 0; };
     bool walk(const std::string& acct, std::vector<Entry>& out,
               std::vector<std::string>& skipped) const;
+    // Like walk(), but below `start` only (entries' parent -1 = `start` itself).
+    bool walkAt(const std::string& acct, const Rel& start, std::vector<Entry>& out,
+                std::vector<std::string>& skipped) const;
 
     // Remove .trash/<date>/ folders older than trashDays. Returns how many were purged.
     int purgeTrash(const std::string& acct) const;

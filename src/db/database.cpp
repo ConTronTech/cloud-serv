@@ -269,6 +269,8 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
         sqlite3_exec(c.h, "ALTER TABLE files ADD COLUMN stored_size INTEGER NOT NULL DEFAULT -1;", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "UPDATE files SET stored_size = size WHERE stored_size < 0;", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN touched_at INTEGER NOT NULL DEFAULT 0;", nullptr, nullptr, nullptr);
+        // '' = one file; 'tree-folder' = a whole folder streamed as a tar (real-folder accounts).
+        sqlite3_exec(c.h, "ALTER TABLE upload_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "UPDATE upload_sessions SET touched_at = CAST(strftime('%s','now') AS INTEGER) WHERE touched_at = 0;", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE notes ADD COLUMN enc_title TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE notes ADD COLUMN enc_body TEXT DEFAULT '';", nullptr, nullptr, nullptr);
@@ -1647,7 +1649,7 @@ std::optional<UploadSession> CloudDB::getUploadSession(int64_t userId, const std
     try {
         Conn c(dbPath_, SQLITE_OPEN_READONLY);
         Stmt q(c.h, "SELECT id, user_id, folder_id, name, mime, size, received, storage_key, created_at, "
-                    "wrapped_key, plain_size, enc_name, enc_mime FROM upload_sessions WHERE id = ? AND user_id = ?");
+                    "wrapped_key, plain_size, enc_name, enc_mime, kind FROM upload_sessions WHERE id = ? AND user_id = ?");
         q.bind(1, id);
         q.bind(2, userId);
         if (!q.step()) return std::nullopt;
@@ -1665,6 +1667,7 @@ std::optional<UploadSession> CloudDB::getUploadSession(int64_t userId, const std
         u.plain_size = q.colInt64(10);
         u.enc_name = q.colText(11);
         u.enc_mime = q.colText(12);
+        u.kind = q.colText(13);
         return u;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("getUploadSession: " + std::string(e.what()));
@@ -2615,6 +2618,71 @@ bool CloudDB::treeSync(int64_t userId, const std::vector<DiskEntry>& disk,
         return true;
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("treeSync: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::setUploadKind(int64_t userId, const std::string& id, const std::string& kind) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE upload_sessions SET kind = ? WHERE id = ? AND user_id = ?");
+        q.bind(1, kind); q.bind(2, id); q.bind(3, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setUploadKind: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool CloudDB::treeInsertSubtree(int64_t userId, int64_t parentId, const std::string& rootName, int64_t rootMtime,
+                                const std::vector<DiskEntry>& disk,
+                                const std::function<std::string(const std::string&)>& mimeFor,
+                                int64_t& rootId, TreeSyncStats& stats) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        if (sqlite3_exec(c.h, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) return false;
+        auto fail = [&](const std::string& what) {
+            sqlite3_exec(c.h, "ROLLBACK", nullptr, nullptr, nullptr);
+            utils::Logger::get_instance().error("treeInsertSubtree: " + what);
+            return false;
+        };
+        auto reset = [](Stmt& st) { sqlite3_reset(st.s); sqlite3_clear_bindings(st.s); };
+        Stmt insFolder(c.h, "INSERT INTO folders(user_id, parent_id, name, enc_name, created_at) "
+                            "VALUES(?, ?, ?, '', datetime(?, 'unixepoch'))");
+        Stmt insFile(c.h, "INSERT INTO files(user_id, folder_id, name, mime, size, storage_key, wrapped_key, "
+                          "enc_name, enc_mime, stored_size, created_at) "
+                          "VALUES(?, ?, ?, ?, ?, '-', '', '', '', ?, datetime(?, 'unixepoch'))");
+        insFolder.bind(1, userId); insFolder.bind(2, parentId); insFolder.bind(3, rootName); insFolder.bind(4, rootMtime);
+        if (sqlite3_step(insFolder.s) != SQLITE_DONE) return fail(sqlite3_errmsg(c.h));
+        reset(insFolder);
+        rootId = sqlite3_last_insert_rowid(c.h);
+        stats.foldersAdded++;
+        std::vector<int64_t> dirId(disk.size(), -1);
+        for (size_t i = 0; i < disk.size(); i++) {
+            const auto& e = disk[i];
+            const int64_t parent = e.parent < 0 ? rootId : dirId[static_cast<size_t>(e.parent)];
+            if (parent < 0) continue;
+            if (e.dir) {
+                insFolder.bind(1, userId); insFolder.bind(2, parent); insFolder.bind(3, e.name); insFolder.bind(4, e.mtime);
+                if (sqlite3_step(insFolder.s) != SQLITE_DONE) return fail(sqlite3_errmsg(c.h));
+                reset(insFolder);
+                dirId[i] = sqlite3_last_insert_rowid(c.h);
+                stats.foldersAdded++;
+            } else {
+                insFile.bind(1, userId); insFile.bind(2, parent); insFile.bind(3, e.name); insFile.bind(4, mimeFor(e.name));
+                insFile.bind(5, e.size); insFile.bind(6, e.size); insFile.bind(7, e.mtime);
+                if (sqlite3_step(insFile.s) != SQLITE_DONE) return fail(sqlite3_errmsg(c.h));
+                reset(insFile);
+                stats.filesAdded++;
+            }
+        }
+        if (sqlite3_exec(c.h, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) return fail("commit failed");
+        return true;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("treeInsertSubtree: " + std::string(e.what()));
         return false;
     }
 }

@@ -93,10 +93,19 @@ function initials(s) {
 // uploads, folders and renames of plain items; existing encrypted items stay encrypted
 // and still open, because every item is decrypted (or not) on its own.
 let ENCRYPT_FILES = false;
+// "tree" = this account's files are real folders on the server (no encryption; folders upload
+// as one archive). "blob" = the classic store.
+let STORAGE_MODE = "blob";
 async function loadPrefs() {
   const { ok, body } = await api("/api/auth/me", { headers: authHeaders() });
   if (ok && body && typeof body.encryptFiles === "boolean") ENCRYPT_FILES = body.encryptFiles;
-  const t = $("enc-toggle"); if (t) t.checked = ENCRYPT_FILES;
+  if (ok && body && typeof body.storageMode === "string") STORAGE_MODE = body.storageMode;
+  const t = $("enc-toggle");
+  if (t) {
+    t.checked = ENCRYPT_FILES;
+    t.disabled = STORAGE_MODE === "tree";
+    t.title = STORAGE_MODE === "tree" ? "This account stores real folders on the server, so encryption is off" : "";
+  }
 }
 async function setEncryptPref(on) {
   if (on && !DEK_RAW) { $("enc-toggle").checked = false; toast("Unlock encryption on this device first (banner at the top)"); return; }
@@ -1459,17 +1468,165 @@ async function ensureFolders(items) {
     const parts = dir.split("/");
     const name = parts[parts.length - 1];
     const parentId = pathToId.get(parts.slice(0, -1).join("/")) ?? currentFolder;
-    const { ok, body } = await api("/api/folders", {
-      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ parentId, ...(await namePayload(name)) }),
-    });
-    pathToId.set(dir, ok && body && body.folder ? body.folder.id : parentId);
+    let res;
+    for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS; attempt++) {
+      res = await api("/api/folders", {
+        method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ parentId, ...(await namePayload(name)) }),
+      });
+      if (res.status !== 429) break;
+      await sleep(Math.min(1000 * attempt, 5000));
+    }
+    // Never fall back to the parent folder: that would drop this folder's files in the wrong place.
+    if (!res.ok || !res.body || !res.body.folder) {
+      throw new Error(`Couldn't create folder "${dir}": ${prettyError(res.body) || "error " + res.status}. Nothing was uploaded.`);
+    }
+    pathToId.set(dir, res.body.folder.id);
   }
   return pathToId;
 }
 
-// Upload {file, path} items, preserving the folder tree.
+// ---- folder upload as one archive (real-folder accounts) ----
+// Each dropped folder becomes one uncompressed tar, built lazily from the File objects (no
+// file is read into memory), sent through the chunked upload. The server unpacks every
+// chunk as it arrives and moves the finished folder into place in one step: one request
+// per 5 MB instead of one per file and folder, and never a half-made folder.
+const TE = new TextEncoder();
+function tarOctal(n, len) { return n.toString(8).padStart(len - 1, "0") + "\0"; }
+function tarHeader(name, size, mtime, type) {
+  const h = new Uint8Array(512);
+  const put = (off, str) => { const b = TE.encode(str); h.set(b.subarray(0, Math.min(b.length, 512 - off)), off); };
+  put(0, name);                       // caller guarantees <= 100 bytes (else a pax path record)
+  put(100, type === "5" ? "0000755\0" : "0000644\0");
+  put(108, "0000000\0"); put(116, "0000000\0");
+  put(124, tarOctal(size, 12));
+  put(136, tarOctal(Math.max(0, Math.floor(mtime)), 12));
+  put(148, "        ");               // checksum placeholder
+  h[156] = type.charCodeAt(0);
+  put(257, "ustar\0"); put(263, "00");
+  let sum = 0; for (let i = 0; i < 512; i++) sum += h[i];
+  put(148, sum.toString(8).padStart(6, "0") + "\0 ");
+  return h;
+}
+function paxRecord(key, value) {
+  // "<len> key=value\n" where len counts itself.
+  const body = " " + key + "=" + value + "\n";
+  const bodyLen = TE.encode(body).length;
+  let len = bodyLen + 1;
+  while (String(len).length + bodyLen !== len) len = String(len).length + bodyLen;
+  return len + body;
+}
+const TAR_OCTAL_MAX = 8 ** 11 - 1;   // largest size an 11-digit octal field holds (~8 GB)
+function tarEntry(parts, rel, size, mtime, type, file) {
+  const nameBytes = TE.encode(rel).length;
+  if (nameBytes > 100 || size > TAR_OCTAL_MAX) {
+    let recs = "";
+    if (nameBytes > 100) recs += paxRecord("path", rel);
+    if (size > TAR_OCTAL_MAX) recs += paxRecord("size", String(size));
+    const data = TE.encode(recs);
+    parts.push(tarHeader("PaxHeader", data.length, mtime, "x"), data, new Uint8Array((512 - (data.length % 512)) % 512));
+  }
+  parts.push(tarHeader(nameBytes > 100 ? "long-name" : rel, size > TAR_OCTAL_MAX ? 0 : size, mtime, type));
+  if (file) { parts.push(file); parts.push(new Uint8Array((512 - (size % 512)) % 512)); }
+}
+// items under one top folder -> Blob (paths relative to that folder)
+function buildFolderTar(top, items) {
+  const parts = [];
+  let files = 0, bytes = 0;
+  const seenDirs = new Set();
+  const rel = (p) => p === top ? "" : p.slice(top.length + 1);
+  for (const it of items) {
+    const dirRel = rel(it.path);
+    if (it.dirOnly) {
+      if (dirRel && !seenDirs.has(dirRel)) { seenDirs.add(dirRel); tarEntry(parts, dirRel + "/", 0, Date.now() / 1000, "5"); }
+      continue;
+    }
+    const name = dirRel ? dirRel + "/" + it.file.name : it.file.name;
+    tarEntry(parts, name, it.file.size, (it.file.lastModified || Date.now()) / 1000, "0", it.file);
+    files++; bytes += it.file.size;
+  }
+  parts.push(new Uint8Array(1024));   // end of archive
+  return { blob: new Blob(parts, { type: "application/x-tar" }), files, bytes };
+}
+
+async function uploadFolderArchive(top, items, row, state) {
+  state.textContent = "Packing…";
+  const { blob, files } = buildFolderTar(top, items);
+  const total = blob.size;
+  const name = top.split("/").pop();
+  let initRes;
+  try {
+    initRes = await fetch(API + "/api/uploads/init", {
+      method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ kind: "tree-folder", name, mime: "application/x-tar", size: total, folderId: currentFolder }),
+    });
+  } catch { state.textContent = "Network error"; return false; }
+  if (initRes.status === 401) { sessionExpired(); return false; }
+  if (!initRes.ok) { let b = null; try { b = await initRes.json(); } catch {} state.textContent = prettyError(b) || "Upload failed"; return false; }
+  const { uploadId } = await initRes.json();
+  const abort = () => fetch(API + "/api/uploads/" + uploadId, { method: "DELETE", headers: authHeaders() }).catch(() => {});
+
+  let offset = 0;
+  while (offset < total) {
+    const chunk = blob.slice(offset, Math.min(offset + CHUNK_SIZE, total));
+    let done = false;
+    for (let attempt = 1; attempt <= UPLOAD_MAX_ATTEMPTS * 2; attempt++) {
+      let res;
+      try {
+        res = await fetch(API + "/api/uploads/" + uploadId, {
+          method: "PUT", headers: authHeaders({ "X-Offset": String(offset), "Content-Type": "application/octet-stream" }), body: chunk,
+        });
+      } catch { await sleep(1000 * attempt); continue; }   // flaky network: retry the same chunk
+      if (res.ok) { offset = (await res.json()).received; done = true; break; }
+      if (res.status === 429) { await sleep((Number(res.headers.get("Retry-After")) || 2) * 1000); continue; }
+      if (res.status === 409) { try { const j = await res.json(); if (typeof j.received === "number") { offset = j.received; done = true; break; } } catch {} }
+      if (res.status === 401) { sessionExpired(); return false; }
+      let b = null; try { b = await res.json(); } catch {}
+      state.textContent = prettyError(b) || `Failed (${res.status})`;
+      if (res.status !== 410) abort();
+      return false;
+    }
+    if (!done) { state.textContent = "Network error"; abort(); return false; }
+    state.textContent = `Uploading ${files} file${files === 1 ? "" : "s"}… ` + Math.floor((offset / total) * 100) + "%";
+  }
+  state.textContent = "Unpacking…";
+  const comp = await fetch(API + "/api/uploads/" + uploadId + "/complete", { method: "POST", headers: authHeaders() });
+  let b = null; try { b = await comp.json(); } catch {}
+  if (!comp.ok) { state.textContent = prettyError(b) || "Finalize failed"; return false; }
+  const placed = b && b.folder ? b.folder.name : name;
+  state.textContent = `Done: ${b ? b.files : files} files` + (placed !== name ? ` (saved as "${placed}")` : "") +
+                      (b && b.skipped ? `, ${b.skipped} skipped` : "");
+  return true;
+}
+
+async function uploadItemsAsArchives(items) {
+  // Loose files dropped next to folders go up the normal way; each top folder is one archive.
+  const loose = items.filter((it) => !it.dirOnly && !it.path);
+  const groups = new Map();
+  for (const it of items) {
+    if (!it.path) continue;
+    const top = it.path.split("/")[0];
+    if (!groups.has(top)) groups.set(top, []);
+    groups.get(top).push(it);
+  }
+  const box = $("uploads");
+  for (const [top, group] of groups) {
+    const row = document.createElement("div"); row.className = "upload-row";
+    const label = document.createElement("span"); label.textContent = top + "/";
+    const state = document.createElement("span"); state.textContent = "Queued…";
+    row.append(label, state); box.appendChild(row);
+    const ok = await uploadFolderArchive(top, group, row, state);
+    if (ok) setTimeout(() => row.remove(), 4000); else row.classList.add("err");
+    loadFs(currentFolder);
+  }
+  if (loose.length) await runUploads(loose.map((it) => ({ file: it.file, folderId: currentFolder, label: it.file.name })));
+}
+
+// Upload {file, path} items (plus {dirOnly, path} for every folder), preserving the tree.
 async function uploadItems(items) {
+  if (!items.length) { toast("Nothing to upload."); return; }
+  if (STORAGE_MODE === "tree") return uploadItemsAsArchives(items);
+  items = items.filter((it) => !it.dirOnly);
   if (!items.length) { toast("Nothing to upload."); return; }
   items = await fitToQuota(items.map((it) => ({ ...it, label: (it.path ? it.path + "/" : "") + it.file.name })));
   if (!items || !items.length) return;   // cancelled: no folders were created
@@ -1478,7 +1635,9 @@ async function uploadItems(items) {
   prep.className = "upload-row";
   prep.textContent = `Creating folders for ${items.length} file${items.length === 1 ? "" : "s"}…`;
   box.appendChild(prep);
-  const pathToId = await ensureFolders(items);
+  let pathToId;
+  try { pathToId = await ensureFolders(items); }
+  catch (e) { prep.remove(); toast(e.message); loadFs(currentFolder); return; }
   prep.remove();
   const jobs = items.map((it) => ({
     file: it.file,
@@ -1520,6 +1679,7 @@ async function collectEntry(entry, out, prefix = "") {
   } else if (entry.isDirectory) {
     const entries = await readAllEntries(entry.createReader());
     const sub = prefix ? prefix + "/" + entry.name : entry.name;
+    out.push({ dirOnly: true, path: sub });   // so empty folders survive the upload
     for (const e of entries) await collectEntry(e, out, sub);
   }
 }

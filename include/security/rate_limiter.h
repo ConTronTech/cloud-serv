@@ -45,6 +45,12 @@ public:
     // Check if request is allowed
     bool allowRequest(const std::string& clientIp, bool isWrite = false);
 
+    // Allow / slow down / banned. `credentialed` = the request carries a session or API key:
+    // it gets its own bucket and is only ever throttled, never banned, so a logged-in user
+    // doing a big upload is slowed down instead of locked out. Anonymous floods still get banned.
+    enum class Decision { Allow, Throttle, Banned };
+    Decision check(const std::string& clientIp, bool isWrite, bool credentialed);
+
     // Resolve real client IP from request headers
     // Returns X-Forwarded-For IP if from trusted proxy, otherwise direct IP
     std::string resolveClientIp(const std::string& directIp,

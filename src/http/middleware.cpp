@@ -63,10 +63,17 @@ void SecurityMiddleware::before_handle(crow::request& req, crow::response& res, 
                         req.method != crow::HTTPMethod::HEAD &&
                         req.method != crow::HTTPMethod::OPTIONS);
 
-        if (!rate_limiter->allowRequest(ctx.client_ip, isWrite)) {
+        // Credentials present = throttle, never ban (see RateLimiter::check). Validity is
+        // checked by the route as usual; a fake header only buys slowing down instead of a ban.
+        const std::string cookie = req.get_header_value("Cookie");
+        const bool credentialed = !req.get_header_value("Authorization").empty() ||
+                                  !req.get_header_value("X-API-Key").empty() ||
+                                  cookie.find("session=") != std::string::npos;
+        auto d = rate_limiter->check(ctx.client_ip, isWrite, credentialed);
+        if (d != security::RateLimiter::Decision::Allow) {
             res.code = 429;
             res.add_header("Content-Type", "application/json");
-            res.add_header("Retry-After", "60");
+            res.add_header("Retry-After", d == security::RateLimiter::Decision::Banned ? "60" : "2");
             res.write("{\"error\":\"too many requests\"}");
             res.end();
             return;

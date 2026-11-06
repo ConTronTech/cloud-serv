@@ -433,3 +433,41 @@ int TreeStore::purgeTrash(const std::string& acct) const {
     for (const auto& n : old) if (removeTree(t.fd, n) == 0) purged++;
     return purged;
 }
+
+// ---- folder uploads: staging + placement ----
+
+int TreeStore::extractRoot(const std::string& acct, const std::string& key, bool create) const {
+    if (!validKey(key)) { errno = EINVAL; return -1; }
+    Fd a(openAccount(acct)); if (!a.ok()) return -1;
+    Fd x(openDirAt(a.fd, Rel{kTempDir, "extract"}, true)); if (!x.ok()) return -1;
+    if (create && ::mkdirat(x.fd, key.c_str(), 0755) != 0 && errno != EEXIST) return -1;
+    return ::openat(x.fd, key.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+}
+
+int TreeStore::extractPlace(const std::string& acct, const std::string& key, const Rel& parent,
+                            const std::string& name, std::string& finalName) const {
+    if (!validKey(key) || !validUserName(name)) return EINVAL;
+    Fd a(openAccount(acct)); if (!a.ok()) return errno;
+    Fd x(openDirAt(a.fd, Rel{kTempDir, "extract"}, false)); if (!x.ok()) return errno;
+    Fd p(openDirAt(a.fd, parent, false)); if (!p.ok()) return errno;
+    std::string cand = name;
+    int e = renameNoReplace(x.fd, key, p.fd, cand);
+    for (int n = 1; e == EEXIST && n < 1000; n++) { cand = numbered(name, n); e = renameNoReplace(x.fd, key, p.fd, cand); }
+    if (e == 0) finalName = cand;
+    return e;
+}
+
+void TreeStore::extractRemove(const std::string& acct, const std::string& key) const {
+    if (!validKey(key)) return;
+    Fd a(openAccount(acct)); if (!a.ok()) return;
+    Fd x(openDirAt(a.fd, Rel{kTempDir, "extract"}, false)); if (!x.ok()) return;
+    removeTree(x.fd, key);
+}
+
+bool TreeStore::walkAt(const std::string& acct, const Rel& start, std::vector<Entry>& out,
+                       std::vector<std::string>& skipped) const {
+    Fd a(openAccount(acct)); if (!a.ok()) return false;
+    Fd d(openDirAt(a.fd, start, false)); if (!d.ok()) return false;
+    walkDir(d.fd, start, -1, out, skipped, static_cast<int>(start.size()));
+    return true;
+}

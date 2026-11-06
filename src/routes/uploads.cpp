@@ -8,6 +8,10 @@
 #include "routes/events.h"
 #include "storage/user_lock.h"
 #include "routes/tree_helpers.h"
+#include "storage/tar_extract.h"
+#include <ctime>
+#include <map>
+#include <memory>
 #include <mutex>
 using json = nlohmann::json;
 
@@ -49,6 +53,18 @@ int64_t intField(const json& j, const char* key, int64_t def) {
     return def;
 }
 
+// Folder uploads in flight: storage key -> the extractor fed by each chunk. In memory on
+// purpose (a restart mid-upload means "start the folder again"; the staging dir is cleaned).
+std::mutex g_tarMx;
+std::map<std::string, std::unique_ptr<TarStream>> g_tars;
+TarStream* tarFor(const std::string& key) {
+    std::lock_guard<std::mutex> lk(g_tarMx);
+    auto it = g_tars.find(key);
+    return it == g_tars.end() ? nullptr : it->second.get();
+}
+void tarDrop(const std::string& key) { std::lock_guard<std::mutex> lk(g_tarMx); g_tars.erase(key); }
+const char* kTreeFolder = "tree-folder";
+
 } // namespace
 
 void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
@@ -56,8 +72,13 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
 
     // Drop the partial bytes of an upload, wherever this account keeps them.
     auto dropPartial = [&db, &store, &tree](int64_t uid, const std::string& key) {
-        if (auto acct = tree::account(db, tree, uid)) tree.tempRemove(*acct, key);
-        else store.remove(uid, key);
+        if (auto acct = tree::account(db, tree, uid)) {
+            tarDrop(key);
+            tree.tempRemove(*acct, key);
+            tree.extractRemove(*acct, key);
+        } else {
+            store.remove(uid, key);
+        }
     };
 
     // ---- Init: create an upload session + empty blob ----
@@ -69,6 +90,8 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         json body = json::parse(req.body, nullptr, false);
         if (body.is_discarded() || !body.is_object()) return http::jsonError(400, "invalid json");
         auto acct = tree::account(db, tree, *userId);
+        const bool folderUpload = strField(body, "kind") == kTreeFolder;
+        if (folderUpload && !acct) return http::jsonError(400, "folder uploads as one archive need real-folder storage");
         if (acct) {
             if (!strField(body, "encName").empty() || !strField(body, "encMime").empty() ||
                 !strField(body, "wrappedKey").empty()) return tree::noEncryption();
@@ -120,7 +143,12 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         std::string storageKey = security::Crypto::randomHex(16);
         // Tree accounts: the key names a temp file in <acct>/.cloud-serv/uploads (same drive as
         // the tree, so finishing is a rename). Blob accounts: the key IS the final blob.
-        if (acct) {
+        if (acct && folderUpload) {
+            int fd = tree.extractRoot(*acct, storageKey, true);
+            if (fd < 0) return tree::fail(errno);
+            std::lock_guard<std::mutex> lk(g_tarMx);
+            g_tars[storageKey] = std::make_unique<TarStream>(fd);   // owns fd
+        } else if (acct) {
             if (int e = tree.tempCreate(*acct, storageKey)) return tree::fail(e);
         } else if (!store.write(*userId, storageKey, nullptr, 0)) {  // create empty blob
             return http::jsonError(500, "storage init failed");
@@ -130,6 +158,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
             dropPartial(*userId, storageKey);
             return http::jsonError(500, "could not create upload");
         }
+        if (folderUpload) db.setUploadKind(*userId, uploadId, kTreeFolder);
         return http::jsonSuccess(json{{"uploadId", uploadId}, {"received", 0}}.dump());
     });
 
@@ -175,7 +204,23 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         if (!db.hasQuotaRoom(*userId, static_cast<int64_t>(req.body.size())))
             return http::jsonError(413, "storage quota exceeded");
 
-        if (auto acct = tree::account(db, tree, *userId)) {
+        if (s->kind == kTreeFolder) {
+            auto acct = tree::account(db, tree, *userId);
+            TarStream* ts = tarFor(s->storage_key);
+            if (!acct || !ts) {   // the server restarted mid-upload: the extractor state is gone
+                tarDrop(s->storage_key);
+                if (acct) tree.extractRemove(*acct, s->storage_key);
+                db.deleteUploadSession(*userId, id);
+                return http::jsonError(410, "the folder upload was interrupted; start it again");
+            }
+            if (!ts->feed(req.body.data(), req.body.size())) {
+                const std::string why = ts->error();
+                tarDrop(s->storage_key);
+                tree.extractRemove(*acct, s->storage_key);
+                db.deleteUploadSession(*userId, id);
+                return http::jsonError(400, "folder upload rejected: " + why);
+            }
+        } else if (auto acct = tree::account(db, tree, *userId)) {
             if (int e = tree.tempAppend(*acct, s->storage_key, req.body.data(), req.body.size())) return tree::fail(e);
         } else if (!store.append(*userId, s->storage_key, req.body.data(), req.body.size())) {
             return http::jsonError(500, "storage write failed");
@@ -194,6 +239,41 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
         auto s = db.getUploadSession(*userId, id);
         if (!s) return http::jsonError(404, "not found");
+
+        if (s->kind == kTreeFolder) {
+            auto acct = tree::account(db, tree, *userId);
+            TarStream* ts = tarFor(s->storage_key);
+            auto cleanup = [&]() {
+                tarDrop(s->storage_key);
+                if (acct) tree.extractRemove(*acct, s->storage_key);
+                db.deleteUploadSession(*userId, id);
+            };
+            if (!acct || !ts) { cleanup(); return http::jsonError(410, "the folder upload was interrupted; start it again"); }
+            if (s->size > 0 && s->received != s->size) return http::jsonError(400, "incomplete upload");
+            if (!ts->finish()) { std::string why = ts->error(); cleanup(); return http::jsonError(400, "folder upload rejected: " + why); }
+            const int64_t nSkipped = ts->skipped;
+            tarDrop(s->storage_key);   // closes the staging fd before the rename
+            if (!db.folderExists(*userId, s->folder_id)) { cleanup(); return http::jsonError(409, "the destination folder was deleted"); }
+            auto rel = tree::folderRel(db, *userId, s->folder_id);
+            if (!rel) { cleanup(); return http::jsonError(409, "the destination folder was deleted"); }
+            std::string finalName;
+            if (int e = tree.extractPlace(*acct, s->storage_key, *rel, s->name, finalName)) { cleanup(); return tree::fail(e); }
+            db.deleteUploadSession(*userId, id);
+
+            // Index just the new folder (a full rescan would walk the whole account).
+            TreeStore::Rel where = *rel; where.push_back(finalName);
+            std::vector<TreeStore::Entry> found; std::vector<std::string> skippedNames;
+            tree.walkAt(*acct, where, found, skippedNames);
+            std::vector<CloudDB::DiskEntry> disk; disk.reserve(found.size());
+            for (auto& e : found) disk.push_back(CloudDB::DiskEntry{e.parent, std::move(e.name), e.dir, e.size, e.mtime});
+            CloudDB::TreeSyncStats st; int64_t rootId = 0;
+            if (!db.treeInsertSubtree(*userId, s->folder_id, finalName, static_cast<int64_t>(std::time(nullptr)),
+                                      disk, TreeStore::mimeFor, rootId, st))
+                return http::jsonError(500, "the folder is on disk but indexing failed; a rescan will pick it up");
+            notifyUser(*userId, "files");
+            return http::jsonSuccess(json{{"folder", {{"id", rootId}, {"name", finalName}, {"parentId", s->folder_id}}},
+                                          {"files", st.filesAdded}, {"folders", st.foldersAdded}, {"skipped", nSkipped}}.dump());
+        }
 
         if (auto acct = tree::account(db, tree, *userId)) {
             if (tree.tempSize(*acct, s->storage_key) != s->received) return http::jsonError(409, "size mismatch");

@@ -40,6 +40,7 @@ PROJECT_SOURCES = src/main.cpp \
                   src/storage/file_store.cpp \
                   src/storage/tree_store.cpp \
                   src/storage/tree_scan.cpp \
+                  src/storage/tar_extract.cpp \
                   src/utils/logger.cpp \
                   src/utils/string_utils.cpp
 

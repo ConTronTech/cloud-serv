@@ -212,6 +212,13 @@ public:
     // Rows still on disk keep their ids and stars. mimeFor names new files' types.
     // Memory stays ~O(entries) small structs: folders matched by (parent id, name),
     // files by a sort-merge against the database's own sorted rows.
+    // Index a freshly placed folder (e.g. an extracted folder upload): a new row `rootName`
+    // under parentId, then everything in `disk` below it. Faster than a full rescan.
+    bool treeInsertSubtree(int64_t userId, int64_t parentId, const std::string& rootName, int64_t rootMtime,
+                           const std::vector<DiskEntry>& disk,
+                           const std::function<std::string(const std::string&)>& mimeFor,
+                           int64_t& rootId, TreeSyncStats& stats);
+    bool setUploadKind(int64_t userId, const std::string& id, const std::string& kind);
     bool treeSync(int64_t userId, const std::vector<DiskEntry>& disk,
                   const std::function<std::string(const std::string&)>& mimeFor, TreeSyncStats& stats);
     // Admins who can actually act: role admin AND status active. A suspended or
