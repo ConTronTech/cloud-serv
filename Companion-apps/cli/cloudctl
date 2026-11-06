@@ -142,7 +142,7 @@ cmd_backup() {
     dest="${dest:-$(dirname "$DATA_DIR")/cloud-serv-backups}"
     ts="$(date +%Y%m%d-%H%M%S)"; out="$dest/cloud-serv-$ts.tar.gz"
     install -d -m 0700 "$dest"
-    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+    tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"; trap - RETURN' RETURN
     say "copying the database (safe while running: SQLite online backup)"
     python3 -I - "$(cfg DB_PATH)" "$tmp/cloud.db" <<'EOF'
 import sqlite3, sys
@@ -152,16 +152,25 @@ EOF
     cp "$CONFIG" "$tmp/config.env"
     echo "$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo dev) $ts" > "$tmp/BACKUP_INFO"
     say "packing files, avatars, account backups and TLS into $out"
-    tar -czf "$out" -C "$tmp" cloud.db config.env BACKUP_INFO \
+    # The data dir is live (log, WAL, uploads in progress), so GNU tar may report "file changed
+    # as we read it" (exit 1). The database itself was copied consistently above; only exit >= 2
+    # (a real error) fails the backup.
+    local rc=0
+    tar -czf "$out" --warning=no-file-changed -C "$tmp" cloud.db config.env BACKUP_INFO \
         -C "$DATA_DIR" --exclude=cloud.db --exclude='cloud.db-*' --exclude=recovery.tmp \
-        --exclude=./lost+found .   # DATA_DIR may be a disk's mount root (Proxmox mp): lost+found isn't ours
+        --exclude=./lost+found . || rc=$?   # DATA_DIR may be a disk's mount root (Proxmox mp): lost+found isn't ours
     chmod 0600 "$out"
+    [ "$rc" -le 1 ] || { rm -f "$out"; die "backup failed (tar exit $rc)"; }
     say "done: $out ($(du -h "$out" | cut -f1)). It holds your config secrets and any unencrypted files: keep it private."
     if [ "$keep" -gt 0 ]; then
         # Only our own timestamped files; newest first; never the one just written.
         local old; old="$(ls -1t "$dest"/cloud-serv-[0-9]*-[0-9]*.tar.gz 2>/dev/null | tail -n +$((keep + 1)))"
-        [ -n "$old" ] && { printf '%s\n' "$old" | xargs -r rm -f --; say "pruned $(printf '%s\n' "$old" | wc -l) old backup(s), keeping $keep"; }
+        if [ -n "$old" ]; then
+            printf '%s\n' "$old" | xargs -r rm -f --
+            say "pruned $(printf '%s\n' "$old" | wc -l) old backup(s), keeping $keep"
+        fi
     fi
+    return 0
 }
 
 cmd_restore() {
@@ -189,7 +198,7 @@ cmd_restore() {
 cmd_update() {
     need_root update; local zip="${1:-}"
     [ -f "$zip" ] || die "update <cloud-serv-deploy.zip>  (built with package.sh)"
-    local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+    local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"; trap - RETURN' RETURN
     unzip -q "$zip" -d "$tmp"; [ -x "$tmp/cloud-serv/deploy.sh" ] || die "no cloud-serv/deploy.sh in $zip"
     say "safety copy of the database first"
     python3 -I - "$(cfg DB_PATH)" "$DATA_DIR/backups/pre-update-$(date +%Y%m%d-%H%M%S).db" <<'EOF'
