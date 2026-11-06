@@ -729,3 +729,18 @@ button.avatar { border: 0; cursor: pointer; padding: 0; overflow: hidden; font: 
 .quota-actions .btn { width: auto; }
 .quota-actions .grow { flex: 1; }
 .storage-chip.near-full { border-color: rgba(255, 90, 106, 0.6); color: #ffb3bb; }
+
+/* ===== Settings / Admin: use the width, never overflow ===== */
+.settings { max-width: none; width: 100%;
+  display: grid; gap: 1rem; align-items: start;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr)); }
+.settings > .settings-h { grid-column: 1 / -1; margin-bottom: 0; }
+.settings > .set-card { margin-bottom: 0; min-width: 0; }
+#admin-tab > .set-card:last-child { grid-column: 1 / -1; }        /* Users list gets the full width */
+.key-row { flex-wrap: wrap; min-width: 0; }
+.key-row .key-info { flex: 1 1 240px; min-width: 0; }
+.key-row .key-sub { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.35; }
+.key-row .key-name { overflow-wrap: anywhere; }
+.key-row > .btn { flex: 0 0 auto; }
+.set-row { flex-wrap: wrap; }
+.set-row .grow { flex: 1 1 220px; }

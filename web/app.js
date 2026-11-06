@@ -1897,12 +1897,14 @@ function storedSize(bytes) {   // what a file will take on the server (encryptio
 }
 function niceGb(bytes) { return Math.ceil(bytes / 1073741824 * 10) / 10; }
 
+let quotaDialogRecalc = null;   // set while the "Not enough space" dialog is open
+
 // Before a batch starts: if it won't fit, let the person skip files, ask for more, or cancel.
 // Resolves to the items to upload, or null (cancelled). Nothing is created on the server first.
 async function fitToQuota(items) {
   await loadUsage();
   if (USAGE.quota == null) return items;                       // unlimited
-  const free = Math.max(0, USAGE.quota - USAGE.used);
+  let free = Math.max(0, USAGE.quota - USAGE.used);
   const sizes = items.map((it) => storedSize(it.file.size));
   const total = sizes.reduce((a, b) => a + b, 0);
   if (total <= free) return items;
@@ -1940,7 +1942,22 @@ async function fitToQuota(items) {
       $("quota-go").textContent = n === 0 ? "Nothing to upload" : fits ? `Upload ${n} file${n === 1 ? "" : "s"}, skip ${skip.size}` : "Still too big: skip more";
     }
     refresh();
-    const done = (v) => { m.classList.add("hidden"); resolve(v); };
+    // Live: if the limit changes while this is open (e.g. the request was approved),
+    // recompute; when everything fits now, drop the suggested skips and say so.
+    quotaDialogRecalc = () => {
+      free = USAGE.quota == null ? Infinity : Math.max(0, USAGE.quota - USAGE.used);
+      $("quota-sub").textContent = USAGE.quota == null
+        ? `Your storage is now unlimited, so all ${fmtSize(total)} fits.`
+        : `This upload needs ${fmtSize(total)}, and you have ${fmtSize(free)} free of your ${fmtSize(USAGE.quota)} limit.`;
+      if (total <= free) {
+        skip.clear();
+        list.querySelectorAll("input").forEach((cb) => { cb.checked = false; });
+        $("quota-title").textContent = "Your limit was raised: everything fits now";
+        $("quota-ask").classList.add("hidden");
+      }
+      refresh();
+    };
+    const done = (v) => { quotaDialogRecalc = null; m.classList.add("hidden"); resolve(v); };
     $("quota-go").onclick = () => done(items.filter((_, i) => !skip.has(i)));
     $("quota-cancel").onclick = () => done(null);
     $("quota-more").onclick = () => { $("quota-ask").classList.toggle("hidden"); $("quota-ask-msg").focus(); };
@@ -1965,6 +1982,7 @@ async function onAccountEvent() {
   }
   ME = body; renderAvatar(); updateAdminNav();
   await loadUsage();
+  if (quotaDialogRecalc) quotaDialogRecalc();
   if (USAGE.quota !== before) toast(USAGE.quota == null ? "Your storage is now unlimited" : `Your storage limit is now ${fmtSize(USAGE.quota)}`);
   else if (wasAdmin !== isAdmin()) toast(isAdmin() ? "You're now an admin" : "You're no longer an admin");
   if (!isAdmin() && adminOpen()) loadFs(currentFolder);
@@ -1973,6 +1991,7 @@ async function onAccountEvent() {
 // Live: my storage request was decided.
 async function onQuotaEvent() {
   await loadUsage();
+  if (quotaDialogRecalc) quotaDialogRecalc();
   const { ok, body } = await api("/api/storage-requests/mine", { headers: authHeaders() });
   const r = ok && body && body.request;
   if (!r) return;
