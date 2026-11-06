@@ -736,7 +736,7 @@ button.avatar { border: 0; cursor: pointer; padding: 0; overflow: hidden; font: 
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 560px), 1fr)); }
 .settings > .settings-h { grid-column: 1 / -1; margin-bottom: 0; }
 .settings > .set-card { margin-bottom: 0; min-width: 0; }
-#admin-tab > .set-card:last-child { grid-column: 1 / -1; }        /* Users list gets the full width */
+#admin-tab > .set-card:last-child, .settings > .set-card.full-row { grid-column: 1 / -1; }   /* Invite codes + Users get full rows */
 .key-row { flex-wrap: wrap; min-width: 0; }
 .key-row .key-info { flex: 1 1 240px; min-width: 0; }
 .key-row .key-sub { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.35; }
@@ -744,3 +744,28 @@ button.avatar { border: 0; cursor: pointer; padding: 0; overflow: hidden; font: 
 .key-row > .btn { flex: 0 0 auto; }
 .set-row { flex-wrap: wrap; }
 .set-row .grow { flex: 1 1 220px; }
+
+/* ===== Alignment pass: equal card heights, inputs and buttons on one line ===== */
+.settings { align-items: stretch; }                     /* cards in the same row share a height */
+.settings > .set-card { display: flex; flex-direction: column; }
+
+:root { --ctl-h: 42px; }
+.set-row { align-items: flex-end; gap: 0.6rem; margin: 0.2rem 0 0; }
+.set-row .field { margin-bottom: 0; }
+.set-row input, .set-row select, .set-grid input,
+.lock-form input, .quota-ask input { height: var(--ctl-h); box-sizing: border-box; padding-top: 0; padding-bottom: 0; }
+.set-row .btn, .set-grid .set-actions .btn, .lock-form .btn, .quota-ask .btn { height: var(--ctl-h); padding: 0 1rem; display: inline-flex; align-items: center; justify-content: center; }
+.set-grid { gap: 0.8rem 0.8rem; }
+.set-grid .field { margin-bottom: 0; }
+.set-grid .set-actions { margin: 0.2rem 0 0; }
+.set-status:empty { display: none; }
+.set-status { margin: 0.6rem 0 0; }
+.set-facts { margin-bottom: 0.9rem; }
+.key-list { margin-top: 0.7rem; }
+.key-list:empty { display: none; }
+.key-row { align-items: center; }
+.key-row .btn { height: 34px; padding: 0 0.85rem; display: inline-flex; align-items: center; }
+.set-card > .set-actions { margin: 0.7rem 0 0; }
+.set-card h3 { line-height: 1.2; }
+
+.settings > .set-card.span-all { grid-column: 1 / -1; }   /* a card left alone on the last row takes the full width */

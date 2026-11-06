@@ -2098,6 +2098,19 @@ function handleEvent(t) {
   });
 }
 
+// A half-width card left alone on its row stretches to the full width (no hole beside it).
+// Cards that always take a full row (.full-row, and the Admin page's Users list) don't count.
+function balanceCards(tabId) {
+  const tab = $(tabId); if (!tab || tab.classList.contains("hidden")) return;
+  const cards = [...tab.querySelectorAll(":scope > .set-card")];
+  cards.forEach((c) => c.classList.remove("span-all"));
+  const isFull = (c) => c.classList.contains("full-row") || (tabId === "admin-tab" && c === cards[cards.length - 1]);
+  const half = cards.filter((c) => !c.classList.contains("hidden") && !isFull(c));
+  const cols = getComputedStyle(tab).gridTemplateColumns.split(" ").length;
+  if (cols > 1 && half.length % cols === 1) half[half.length - 1].classList.add("span-all");
+}
+window.addEventListener("resize", () => { balanceCards("settings-tab"); balanceCards("admin-tab"); });
+
 // ======================= Avatar / user menu =======================
 function avatarLabel() { const u = (ME && ME.user) || {}; return u.displayName || u.email || ""; }
 function renderAvatar() {
@@ -2177,6 +2190,7 @@ function goAdmin() {
   $("admin-tab").classList.remove("hidden");
   closeSidebar(); closeUserMenu();
   loadRequests(); loadInvites(); loadUsers(); loadStorageRequests();
+  balanceCards("admin-tab");
   startAdminLive();
 }
 function rowBtn(label, cls, fn) {
@@ -2308,8 +2322,9 @@ async function loadSettings() {
   if (typeof body.encryptFiles === "boolean") { ENCRYPT_FILES = body.encryptFiles; $("enc-toggle").checked = ENCRYPT_FILES; }
   updateLockBanner();
   loadApiKeys();
-  loadIdentities();
+  loadIdentities().then(() => balanceCards("settings-tab"));
   loadDevices();
+  balanceCards("settings-tab");
 }
 
 async function saveDisplayName(e) {
