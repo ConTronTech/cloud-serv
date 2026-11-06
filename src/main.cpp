@@ -6,6 +6,8 @@
 #include "http/middleware.h"
 #include "cli/admin_cli.h"
 #include "routes/admin.h"
+#include "storage/tree_store.h"
+#include "storage/tree_scan.h"
 #include "routes/auth.h"
 #include "routes/oidc.h"
 #include "routes/devices.h"
@@ -131,6 +133,15 @@ int main(int argc, char* argv[]) {
         CloudDB db(db_path);
         FileStore store(storage_dir);
 
+        // Real-folder ("tree") storage, see docs/REAL_FOLDERS.md. Empty TREE_ROOT = off.
+        std::string treeRoot = config.get("env", "TREE_ROOT", "");
+        TreeStore tree(treeRoot, config.get_int("env", "TRASH_DAYS", 30));
+        if (tree.enabled()) {
+            utils::Logger::get_instance().info("Real-folder storage: TREE_ROOT=" + treeRoot +
+                                               ", TRASH_DAYS=" + std::to_string(tree.trashDays()));
+            storage::startTreeScanner(db, tree, config.get_int("env", "TREE_SCAN_MINUTES", 15));
+        }
+
         int sessionSeconds = config.get_int("env", "SESSION_SECONDS", 30 * 24 * 60 * 60);
 
         // 8. Routes
@@ -150,10 +161,10 @@ int main(int argc, char* argv[]) {
         routes::registerProfileRoutes(app, db);
         routes::registerEventRoutes(app, db);
         routes::registerStorageRoutes(app, db);
-        routes::registerFileRoutes(app, db, store);
-        routes::registerFsRoutes(app, db, store);
+        routes::registerFileRoutes(app, db, store, tree);
+        routes::registerFsRoutes(app, db, store, tree);
         routes::registerNoteRoutes(app, db);
-        routes::registerUploadRoutes(app, db, store, maxFileBytes);
+        routes::registerUploadRoutes(app, db, store, tree, maxFileBytes);
         std::string backupDir = config.get("env", "BACKUP_DIR", "data/backups");
         routes::registerAdminRoutes(app, db, store, backupDir);
         routes::registerSignupAdminRoutes(app, db);

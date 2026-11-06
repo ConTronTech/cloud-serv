@@ -151,6 +151,7 @@ bool FileStore::restoreBlobs(int64_t userId, const std::string& srcDir,
     std::vector<fs::path> placed;   // only what THIS call created, for rollback
     auto rollback = [&]() { for (const auto& p : placed) { std::error_code e; fs::remove(p, e); } };
     for (const auto& key : keys) {
+        if (key == "-") continue;   // real-folder file: lives in the tree, there is no blob to restore
         if (!isSafeKey(key)) { rollback(); return false; }
         const fs::path src = fs::path(srcDir) / key;
         const fs::path dst = fs::path(userDir(userId)) / key;

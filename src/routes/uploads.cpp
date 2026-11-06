@@ -7,6 +7,7 @@
 
 #include "routes/events.h"
 #include "storage/user_lock.h"
+#include "routes/tree_helpers.h"
 #include <mutex>
 using json = nlohmann::json;
 
@@ -51,16 +52,28 @@ int64_t intField(const json& j, const char* key, int64_t def) {
 } // namespace
 
 void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
-                          CloudDB& db, FileStore& store, int64_t maxFileBytes) {
+                          CloudDB& db, FileStore& store, TreeStore& tree, int64_t maxFileBytes) {
+
+    // Drop the partial bytes of an upload, wherever this account keeps them.
+    auto dropPartial = [&db, &store, &tree](int64_t uid, const std::string& key) {
+        if (auto acct = tree::account(db, tree, uid)) tree.tempRemove(*acct, key);
+        else store.remove(uid, key);
+    };
 
     // ---- Init: create an upload session + empty blob ----
     CROW_ROUTE(app, "/api/uploads/init").methods(crow::HTTPMethod::POST)
-    ([&db, &store, maxFileBytes](const crow::request& req) {
+    ([&db, &store, &tree, maxFileBytes, dropPartial](const crow::request& req) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
         json body = json::parse(req.body, nullptr, false);
         if (body.is_discarded() || !body.is_object()) return http::jsonError(400, "invalid json");
+        auto acct = tree::account(db, tree, *userId);
+        if (acct) {
+            if (!strField(body, "encName").empty() || !strField(body, "encMime").empty() ||
+                !strField(body, "wrappedKey").empty()) return tree::noEncryption();
+            if (!TreeStore::validUserName(strField(body, "name"))) return http::jsonError(400, "invalid filename");
+        }
 
         // E2E: an encrypted name (opaque) means we store the plaintext name blank.
         std::string encName = strField(body, "encName");
@@ -85,7 +98,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         }
 
         // Half-finished uploads count against quota, so drop any left idle for a day.
-        for (auto& [uid, key] : db.takeStaleUploads(24 * 3600)) store.remove(uid, key);
+        for (auto& [uid, key] : db.takeStaleUploads(24 * 3600)) dropPartial(uid, key);
 
         std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
         int64_t size = intField(body, "size", 0);
@@ -105,11 +118,16 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
 
         std::string uploadId = security::Crypto::randomHex(16);
         std::string storageKey = security::Crypto::randomHex(16);
-        if (!store.write(*userId, storageKey, nullptr, 0))  // create empty blob
+        // Tree accounts: the key names a temp file in <acct>/.cloud-serv/uploads (same drive as
+        // the tree, so finishing is a rename). Blob accounts: the key IS the final blob.
+        if (acct) {
+            if (int e = tree.tempCreate(*acct, storageKey)) return tree::fail(e);
+        } else if (!store.write(*userId, storageKey, nullptr, 0)) {  // create empty blob
             return http::jsonError(500, "storage init failed");
+        }
         if (!db.createUploadSession(*userId, uploadId, folderId, name, mime, size, storageKey,
                                     wrappedKey, plainSize, encName, encMime)) {
-            store.remove(*userId, storageKey);
+            dropPartial(*userId, storageKey);
             return http::jsonError(500, "could not create upload");
         }
         return http::jsonSuccess(json{{"uploadId", uploadId}, {"received", 0}}.dump());
@@ -128,7 +146,7 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
 
     // ---- Append a chunk (raw body, X-Offset header) ----
     CROW_ROUTE(app, "/api/uploads/<string>").methods(crow::HTTPMethod::PUT)
-    ([&db, &store, maxFileBytes](const crow::request& req, const std::string& id) {
+    ([&db, &store, &tree, maxFileBytes](const crow::request& req, const std::string& id) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
@@ -157,8 +175,11 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
         if (!db.hasQuotaRoom(*userId, static_cast<int64_t>(req.body.size())))
             return http::jsonError(413, "storage quota exceeded");
 
-        if (!store.append(*userId, s->storage_key, req.body.data(), req.body.size()))
+        if (auto acct = tree::account(db, tree, *userId)) {
+            if (int e = tree.tempAppend(*acct, s->storage_key, req.body.data(), req.body.size())) return tree::fail(e);
+        } else if (!store.append(*userId, s->storage_key, req.body.data(), req.body.size())) {
             return http::jsonError(500, "storage write failed");
+        }
         db.setUploadReceived(*userId, id, newReceived);
 
         return http::jsonSuccess(json{{"received", newReceived}}.dump());
@@ -166,13 +187,30 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
 
     // ---- Complete: turn the blob into a real file ----
     CROW_ROUTE(app, "/api/uploads/<string>/complete").methods(crow::HTTPMethod::POST)
-    ([&db, &store](const crow::request& req, const std::string& id) {
+    ([&db, &store, &tree](const crow::request& req, const std::string& id) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
         std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
         auto s = db.getUploadSession(*userId, id);
         if (!s) return http::jsonError(404, "not found");
+
+        if (auto acct = tree::account(db, tree, *userId)) {
+            if (tree.tempSize(*acct, s->storage_key) != s->received) return http::jsonError(409, "size mismatch");
+            if (s->size > 0 && s->received != s->size) return http::jsonError(400, "incomplete upload");
+            if (!db.folderExists(*userId, s->folder_id)) return http::jsonError(409, "the destination folder was deleted");
+            auto rel = tree::folderRel(db, *userId, s->folder_id);
+            if (!rel) return http::jsonError(409, "the destination folder was deleted");
+            std::string finalName;
+            if (int e = tree.tempPlace(*acct, s->storage_key, *rel, s->name, true, finalName)) return tree::fail(e);
+            int64_t fileId = db.addFile(*userId, s->folder_id, finalName, s->mime, s->received, "-",
+                                        "", "", "", s->received);
+            db.deleteUploadSession(*userId, id);
+            if (fileId < 0) return http::jsonError(500, "could not record file (it is on disk; a rescan will index it)");
+            notifyUser(*userId, "files");
+            return http::jsonSuccess(json{{"file", {{"id", fileId}, {"name", finalName}, {"mime", s->mime},
+                                                    {"size", s->received}}}}.dump());
+        }
 
         // Sanity: on-disk size should match what we recorded.
         int64_t onDisk = store.sizeOf(*userId, s->storage_key);
@@ -195,13 +233,13 @@ void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
 
     // ---- Abort: discard the partial blob + session ----
     CROW_ROUTE(app, "/api/uploads/<string>").methods(crow::HTTPMethod::DELETE)
-    ([&db, &store](const crow::request& req, const std::string& id) {
+    ([&db, dropPartial](const crow::request& req, const std::string& id) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
         std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
         auto s = db.getUploadSession(*userId, id);
         if (!s) return http::jsonError(404, "not found");
-        store.remove(*userId, s->storage_key);
+        dropPartial(*userId, s->storage_key);
         db.deleteUploadSession(*userId, id);
         return http::jsonSuccess(R"({"ok":true})");
     });

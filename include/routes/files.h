@@ -4,6 +4,7 @@
 #include "http/middleware.h"
 #include "db/database.h"
 #include "storage/file_store.h"
+#include "storage/tree_store.h"
 
 namespace routes {
 
@@ -13,6 +14,6 @@ namespace routes {
 //   GET    /api/files/<id>     streams the blob (Content-Disposition: attachment)
 //   DELETE /api/files/<id>                                                 -> {ok}
 void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
-                        CloudDB& db, FileStore& store);
+                        CloudDB& db, FileStore& store, TreeStore& tree);
 
 } // namespace routes

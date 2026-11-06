@@ -5,6 +5,8 @@
 #include "security/crypto.h"
 #include "security/e2e_keys.h"
 #include "utils/logger.h"
+#include "storage/tree_store.h"
+#include "storage/tree_scan.h"
 
 #include <openssl/crypto.h>
 #include <fcntl.h>
@@ -29,6 +31,8 @@ void usage(std::FILE* to) {
         "\n"
         "usage:\n"
         "  cloud_serv admin create-admin --email <email> [options]\n"
+        "  cloud_serv admin set-tree --email <email> --dir <name> [--config <file>]\n"
+        "  cloud_serv admin rescan   --email <email> [--config <file>]\n"
         "\n"
         "create-admin creates a fully working ADMIN account, including its end-to-end\n"
         "encryption keys, so you can then sign in from the web UI with that email and\n"
@@ -45,7 +49,16 @@ void usage(std::FILE* to) {
         "                               instead of printing it. Refuses to overwrite.\n"
         "\n"
         "The recovery key is the ONLY way back into the account's data if the password is\n"
-        "forgotten. It is shown once and cannot be recovered afterwards.\n",
+        "forgotten. It is shown once and cannot be recovered afterwards.\n"
+        "\n"
+        "set-tree switches an account to real-folder storage: its files live as a normal\n"
+        "folder tree at <TREE_ROOT>/<name>/ (docs/REAL_FOLDERS.md). The account must have\n"
+        "no files yet and encryption is turned off for it. Files already in that folder are\n"
+        "indexed straight away.\n"
+        "\n"
+        "rescan indexes a real-folder account's tree now and prints what changed. Prefer\n"
+        "`kill -HUP <server pid>` (cloudctl rescan) while the server runs; this command is\n"
+        "for a stopped server, e.g. right after moving a big tree in.\n",
         to);
 }
 
@@ -229,6 +242,81 @@ int createAdmin(int argc, char** argv) {
 
 } // namespace
 
+// Shared by set-tree / rescan: parse --email/--dir/--config, load config, open the DB.
+struct TreeArgs { std::string email, dir, configPath = "config.env"; };
+int parseTreeArgs(int argc, char** argv, TreeArgs& a, bool needDir) {
+    for (int i = 0; i < argc; ++i) {
+        const std::string o = argv[i];
+        auto next = [&](std::string& dst) { if (i + 1 >= argc) return false; dst = argv[++i]; return true; };
+        if (o == "--email") { if (!next(a.email)) return 2; }
+        else if (o == "--dir" && needDir) { if (!next(a.dir)) return 2; }
+        else if (o == "--config") { if (!next(a.configPath)) return 2; }
+        else { std::fprintf(stderr, "error: unknown option '%s'\n", o.c_str()); return 2; }
+    }
+    if (a.email.empty() || (needDir && a.dir.empty())) { usage(stderr); return 2; }
+    a.email = lowered(a.email);
+    utils::Logger::get_instance().init(utils::LogLevel::ERROR);
+    try { core::Config::get_instance().load(a.configPath); }
+    catch (const std::exception& e) { return fail("cannot read config '" + a.configPath + "': " + e.what()); }
+    return 0;
+}
+
+int printScan(const storage::TreeScanResult& r) {
+    if (!r.ok) return fail("scan failed (see the server log / is the account folder readable?)");
+    const auto& s = r.stats;
+    std::printf("scan done in %.1f s: +%lld folders, +%lld files, %lld updated, -%lld folders, -%lld files; trash purged %d\n",
+                r.seconds, (long long)s.foldersAdded, (long long)s.filesAdded, (long long)s.filesUpdated,
+                (long long)s.foldersRemoved, (long long)s.filesRemoved, r.trashPurged);
+    if (!r.skipped.empty()) {
+        std::printf("%zu entries were NOT indexed (they stay on disk untouched):\n", r.skipped.size());
+        size_t shown = 0;
+        for (const auto& k : r.skipped) { if (shown++ == 50) { std::printf("  ...\n"); break; } std::printf("  %s\n", k.c_str()); }
+    }
+    return 0;
+}
+
+int setTree(int argc, char** argv) {
+    TreeArgs a;
+    if (int rc = parseTreeArgs(argc, argv, a, true)) return rc;
+    auto& cfg = core::Config::get_instance();
+    TreeStore tree(cfg.get("env", "TREE_ROOT", ""), cfg.get_int("env", "TRASH_DAYS", 30));
+    if (!tree.enabled()) return fail("TREE_ROOT is not set in the config");
+    if (!TreeStore::validAccountDir(a.dir)) return fail("--dir must be letters, digits, - _ . (not starting with '.')");
+    try {
+        CloudDB db(cfg.get("env", "DB_PATH", "data/cloud.db"));
+        auto u = db.findUserByEmail(a.email);
+        if (!u) return fail("no account with that email");
+        if (auto cur = db.treeDir(u->id)) {
+            if (*cur == a.dir) { std::printf("'%s' already uses real folders at %s/%s\n", a.email.c_str(), tree.root().c_str(), cur->c_str()); return 0; }
+            return fail("account already uses real folders at '" + *cur + "'");
+        }
+        for (const auto& [uid, dir] : db.treeAccounts())
+            if (dir == a.dir) return fail("another account already uses '" + a.dir + "'");
+        if (db.usage(u->id).second > 0)
+            return fail("the account already has files in normal storage; real folders are for empty accounts");
+        if (!tree.ensureAccount(a.dir)) return fail("cannot create or open " + tree.root() + "/" + a.dir);
+        if (!db.setTreeMode(u->id, a.dir)) return fail("could not update the account");
+        std::printf("'%s' now uses real folders at %s/%s (encryption off).\n", a.email.c_str(), tree.root().c_str(), a.dir.c_str());
+        return printScan(storage::scanTreeAccount(db, tree, u->id, a.dir));
+    } catch (const std::exception& e) { return fail(e.what()); }
+}
+
+int rescan(int argc, char** argv) {
+    TreeArgs a;
+    if (int rc = parseTreeArgs(argc, argv, a, false)) return rc;
+    auto& cfg = core::Config::get_instance();
+    TreeStore tree(cfg.get("env", "TREE_ROOT", ""), cfg.get_int("env", "TRASH_DAYS", 30));
+    if (!tree.enabled()) return fail("TREE_ROOT is not set in the config");
+    try {
+        CloudDB db(cfg.get("env", "DB_PATH", "data/cloud.db"));
+        auto u = db.findUserByEmail(a.email);
+        if (!u) return fail("no account with that email");
+        auto dir = db.treeDir(u->id);
+        if (!dir) return fail("that account does not use real folders");
+        return printScan(storage::scanTreeAccount(db, tree, u->id, *dir));
+    } catch (const std::exception& e) { return fail(e.what()); }
+}
+
 int runAdminCli(int argc, char** argv) {
     // argv[0] == "admin"
     if (argc < 2 || std::string(argv[1]) == "help" || std::string(argv[1]) == "--help" ||
@@ -238,6 +326,8 @@ int runAdminCli(int argc, char** argv) {
     }
     const std::string cmd = argv[1];
     if (cmd == "create-admin") return createAdmin(argc - 2, argv + 2);
+    if (cmd == "set-tree") return setTree(argc - 2, argv + 2);
+    if (cmd == "rescan") return rescan(argc - 2, argv + 2);
     std::fprintf(stderr, "error: unknown admin command '%s'\n", cmd.c_str());
     usage(stderr);
     return 2;

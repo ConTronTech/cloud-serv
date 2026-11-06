@@ -5,6 +5,7 @@
 #include "http/middleware.h"
 #include "db/database.h"
 #include "storage/file_store.h"
+#include "storage/tree_store.h"
 
 namespace routes {
 
@@ -17,6 +18,6 @@ namespace routes {
 //
 // maxFileBytes caps the total size of a single assembled file.
 void registerUploadRoutes(crow::App<http::SecurityMiddleware>& app,
-                          CloudDB& db, FileStore& store, int64_t maxFileBytes);
+                          CloudDB& db, FileStore& store, TreeStore& tree, int64_t maxFileBytes);
 
 } // namespace routes

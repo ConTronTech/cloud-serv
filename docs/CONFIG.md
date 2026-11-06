@@ -21,6 +21,9 @@ All settings live in one `KEY=VALUE` file: `/etc/cloud-serv/config.env` for a se
 |---|---|---|
 | `DB_PATH` | `data/cloud.db` | SQLite database: accounts, file list, notes, settings. |
 | `STORAGE_DIR` | `data/storage` | File contents, one private folder per account, random file names on disk. |
+| `TREE_ROOT` | empty (off) | Real-folder storage root. An account switched with `cloudctl tree <email> <dir>` keeps its files as a normal folder tree at `TREE_ROOT/<dir>/` (names readable on disk, no end-to-end encryption). See [REAL_FOLDERS.md](REAL_FOLDERS.md). |
+| `TRASH_DAYS` | `30` | Real folders: deleted items wait in `<dir>/.trash/<YYYY-MM-DD>/` this long. `0` = delete straight away. |
+| `TREE_SCAN_MINUTES` | `15` | Real folders: how often files added/changed/removed outside the app are picked up (also at startup and on `cloudctl rescan`). |
 | `AVATAR_DIR` | `data/avatars` | Profile pictures. |
 | `BACKUP_DIR` | `data/backups` | Where an admin "Remove account" puts that account's data so it can be restored. |
 | `MAX_BODY_SIZE` | `268435456` (256 MB) | Largest single request. Bigger files are uploaded in chunks automatically. |

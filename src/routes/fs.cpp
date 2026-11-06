@@ -3,8 +3,12 @@
 
 #include <nlohmann/json.hpp>
 #include <string>
+#include <algorithm>
 
 #include "routes/events.h"
+#include "routes/tree_helpers.h"
+#include "storage/user_lock.h"
+#include <mutex>
 using json = nlohmann::json;
 
 namespace routes {
@@ -47,7 +51,7 @@ int64_t intField(const json& j, const char* key, int64_t def) {
 
 } // namespace
 
-void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, FileStore& store) {
+void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, FileStore& store, TreeStore& tree) {
 
     // ---- List a directory ----
     CROW_ROUTE(app, "/api/fs").methods(crow::HTTPMethod::GET)
@@ -84,12 +88,29 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
 
     // ---- Create folder ----
     CROW_ROUTE(app, "/api/folders").methods(crow::HTTPMethod::POST)
-    ([&db](const crow::request& req) {
+    ([&db, &tree](const crow::request& req) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
         json body = json::parse(req.body, nullptr, false);
         if (body.is_discarded() || !body.is_object()) return http::jsonError(400, "invalid json");
+
+        if (auto acct = tree::account(db, tree, *userId)) {
+            if (!strField(body, "encName").empty()) return tree::noEncryption();
+            std::string name = strField(body, "name");
+            if (!validName(name) || !TreeStore::validUserName(name)) return http::jsonError(400, "invalid folder name");
+            int64_t parentId = intField(body, "parentId", 0);
+            std::lock_guard<std::mutex> lk(storage::userLock(*userId));
+            if (!db.folderExists(*userId, parentId)) return http::jsonError(400, "folder not found");
+            auto rel = tree::folderRel(db, *userId, parentId);
+            if (!rel) return http::jsonError(400, "folder not found");
+            if (int e = tree.makeDir(*acct, *rel, name)) return tree::fail(e);
+            int64_t id = db.createFolder(*userId, parentId, name);
+            if (id < 0) return http::jsonError(500, "could not record folder (it is on disk; a rescan will index it)");
+            auto f = db.getFolder(*userId, id);
+            notifyUser(*userId, "files");
+            return http::jsonSuccess(json{{"folder", f ? f->toJson() : json(nullptr)}}.dump());
+        }
         // E2E: an encrypted folder name (opaque) means we store the plaintext blank.
         std::string encName = strField(body, "encName");
         std::string name;
@@ -111,12 +132,53 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
 
     // ---- Rename / move folder ----
     CROW_ROUTE(app, "/api/folders/<int>").methods(crow::HTTPMethod::PATCH)
-    ([&db](const crow::request& req, int folderId) {
+    ([&db, &tree](const crow::request& req, int folderId) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
         json body = json::parse(req.body, nullptr, false);
         if (body.is_discarded() || !body.is_object()) return http::jsonError(400, "invalid json");
+
+        if (auto acct = tree::account(db, tree, *userId)) {
+            if (body.contains("encName")) return tree::noEncryption();
+            std::lock_guard<std::mutex> lk(storage::userLock(*userId));
+            auto cur = db.getFolder(*userId, folderId);
+            if (!cur) return http::jsonError(404, "not found");
+            std::string newName = cur->name;
+            if (body.contains("name")) {
+                newName = strField(body, "name");
+                if (!validName(newName) || !TreeStore::validUserName(newName)) return http::jsonError(400, "invalid folder name");
+            }
+            int64_t newParent = cur->parent_id;
+            if (body.contains("parentId")) {
+                newParent = intField(body, "parentId", 0);
+                if (newParent == folderId || !db.folderExists(*userId, newParent)) return http::jsonError(400, "invalid move");
+            }
+            if (newName != cur->name || newParent != cur->parent_id) {
+                auto from = tree::folderRel(db, *userId, cur->parent_id);
+                auto to = tree::folderRel(db, *userId, newParent);
+                if (!from || !to) return http::jsonError(400, "invalid move");
+                // Moving a folder inside its own subtree: the target path runs through it.
+                TreeStore::Rel self = *from; self.push_back(cur->name);
+                if (to->size() >= self.size() && std::equal(self.begin(), self.end(), to->begin()))
+                    return http::jsonError(400, "invalid move");
+                if (int e = tree.rename(*acct, *from, cur->name, *to, newName)) return tree::fail(e);
+                bool okDb = true;
+                if (newName != cur->name) okDb = db.renameFolder(*userId, folderId, newName);
+                if (okDb && newParent != cur->parent_id) okDb = db.moveFolder(*userId, folderId, newParent);
+                if (!okDb) {
+                    tree.rename(*acct, *to, newName, *from, cur->name);   // put the disk back
+                    db.renameFolder(*userId, folderId, cur->name);
+                    return http::jsonError(400, "invalid move");
+                }
+            }
+            if (body.contains("starred") && body["starred"].is_boolean())
+                db.setFolderStarred(*userId, folderId, body["starred"].get<bool>());
+            auto f = db.getFolder(*userId, folderId);
+            notifyUser(*userId, "files");
+            return http::jsonSuccess(json{{"folder", f ? f->toJson() : json(nullptr)}}.dump());
+        }
+
         if (!db.getFolder(*userId, folderId)) return http::jsonError(404, "not found");
 
         if (body.contains("encName")) {
@@ -142,9 +204,25 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
 
     // ---- Delete folder (recursive) ----
     CROW_ROUTE(app, "/api/folders/<int>").methods(crow::HTTPMethod::DELETE)
-    ([&db, &store](const crow::request& req, int folderId) {
+    ([&db, &store, &tree](const crow::request& req, int folderId) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
+
+        if (auto acct = tree::account(db, tree, *userId)) {
+            std::lock_guard<std::mutex> lk(storage::userLock(*userId));
+            auto cur = db.getFolder(*userId, folderId);
+            if (!cur) return http::jsonError(404, "not found");
+            auto rel = tree::folderRel(db, *userId, cur->parent_id);
+            if (!rel) return http::jsonError(409, "folder chain is broken; rescan first");
+            // The whole folder goes into .trash in one rename (or is removed when TRASH_DAYS=0).
+            if (int e = tree.trash(*acct, *rel, cur->name); e && e != ENOENT) return tree::fail(e);
+            std::vector<std::string> ignored;
+            if (!db.deleteFolderRecursive(*userId, folderId, ignored))
+                return http::jsonError(500, "removed on disk but the index update failed; a rescan will fix it");
+            notifyUser(*userId, "files");
+            return http::jsonSuccess(R"({"ok":true})");
+        }
+
         if (!db.getFolder(*userId, folderId)) return http::jsonError(404, "not found");
 
         std::vector<std::string> storageKeys;
@@ -208,12 +286,49 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
 
     // ---- Rename / move file ----
     CROW_ROUTE(app, "/api/files/<int>").methods(crow::HTTPMethod::PATCH)
-    ([&db](const crow::request& req, int fileId) {
+    ([&db, &tree](const crow::request& req, int fileId) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
         json body = json::parse(req.body, nullptr, false);
         if (body.is_discarded() || !body.is_object()) return http::jsonError(400, "invalid json");
+
+        if (auto acct = tree::account(db, tree, *userId)) {
+            if (body.contains("encName")) return tree::noEncryption();
+            std::lock_guard<std::mutex> lk(storage::userLock(*userId));
+            auto cur = db.getFile(*userId, fileId);
+            if (!cur) return http::jsonError(404, "not found");
+            std::string newName = cur->name;
+            if (body.contains("name")) {
+                newName = strField(body, "name");
+                if (!validName(newName) || !TreeStore::validUserName(newName)) return http::jsonError(400, "invalid filename");
+            }
+            int64_t newFolder = cur->folder_id;
+            if (body.contains("folderId")) {
+                newFolder = intField(body, "folderId", 0);
+                if (!db.folderExists(*userId, newFolder)) return http::jsonError(400, "folder not found");
+            }
+            if (newName != cur->name || newFolder != cur->folder_id) {
+                auto from = tree::folderRel(db, *userId, cur->folder_id);
+                auto to = tree::folderRel(db, *userId, newFolder);
+                if (!from || !to) return http::jsonError(400, "folder not found");
+                if (int e = tree.rename(*acct, *from, cur->name, *to, newName)) return tree::fail(e);
+                bool okDb = true;
+                if (newName != cur->name) okDb = db.renameFile(*userId, fileId, newName);
+                if (okDb && newFolder != cur->folder_id) okDb = db.moveFile(*userId, fileId, newFolder);
+                if (!okDb) {
+                    tree.rename(*acct, *to, newName, *from, cur->name);
+                    db.renameFile(*userId, fileId, cur->name);
+                    return http::jsonError(500, "could not update the index");
+                }
+            }
+            if (body.contains("starred") && body["starred"].is_boolean())
+                db.setFileStarred(*userId, fileId, body["starred"].get<bool>());
+            auto f = db.getFile(*userId, fileId);
+            notifyUser(*userId, "files");
+            return http::jsonSuccess(json{{"file", f ? f->toJson() : json(nullptr)}}.dump());
+        }
+
         if (!db.getFile(*userId, fileId)) return http::jsonError(404, "not found");
 
         if (body.contains("encName")) {

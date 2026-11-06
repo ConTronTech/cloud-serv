@@ -38,6 +38,8 @@ PROJECT_SOURCES = src/main.cpp \
                   src/security/sanitizer.cpp \
                   src/security/tls.cpp \
                   src/storage/file_store.cpp \
+                  src/storage/tree_store.cpp \
+                  src/storage/tree_scan.cpp \
                   src/utils/logger.cpp \
                   src/utils/string_utils.cpp
 

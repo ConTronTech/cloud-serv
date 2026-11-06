@@ -189,6 +189,27 @@ public:
     bool setPasswordAndKeys(int64_t userId, const std::string& pwHash,
                             const std::string& kdfSalt, const std::string& wrappedDek);
     bool setEncryptFiles(int64_t userId, bool on);
+
+    // ---- Real-folder ("tree") storage, see docs/REAL_FOLDERS.md ----
+    // The account's dir under TREE_ROOT when it uses tree storage, else nullopt.
+    std::optional<std::string> treeDir(int64_t userId);
+    // Switch an account to tree storage (also forces encrypt_files off).
+    bool setTreeMode(int64_t userId, const std::string& dir);
+    // Every tree account: (user id, dir).
+    std::vector<std::pair<int64_t, std::string>> treeAccounts();
+    // One entry found on disk by the scanner.
+    struct DiskEntry {
+        std::vector<std::string> parent;   // folder path, root-first
+        std::string name, mime;
+        bool dir = false;
+        int64_t size = 0, mtime = 0;
+    };
+    struct TreeSyncStats { int64_t foldersAdded = 0, filesAdded = 0, filesUpdated = 0,
+                                   foldersRemoved = 0, filesRemoved = 0;
+                           bool changed() const { return foldersAdded || filesAdded || filesUpdated || foldersRemoved || filesRemoved; } };
+    // Make the account's folder/file rows match `disk` exactly, in one transaction.
+    // Rows still on disk keep their ids and stars.
+    bool treeSync(int64_t userId, const std::vector<DiskEntry>& disk, TreeSyncStats& stats);
     // Admins who can actually act: role admin AND status active. A suspended or
     // removed admin does not count, so "last admin" guards can't be satisfied by
     // an account that is locked out.

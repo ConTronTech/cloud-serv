@@ -5,6 +5,7 @@
 #include "utils/logger.h"
 #include "routes/events.h"
 #include "storage/user_lock.h"
+#include "routes/tree_helpers.h"
 #include <mutex>
 
 #include <nlohmann/json.hpp>
@@ -154,15 +155,44 @@ std::string readSlice(const std::string& path, int64_t start, int64_t len) {
 } // namespace
 
 void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
-                        CloudDB& db, FileStore& store) {
+                        CloudDB& db, FileStore& store, TreeStore& tree) {
 
     // ---- Upload (raw body) ----
     // The web/mobile client sends the file bytes as the request body with an
     // X-Filename header. Simple and streamable-friendly; no multipart parsing.
     CROW_ROUTE(app, "/api/files").methods(crow::HTTPMethod::POST)
-    ([&db, &store](const crow::request& req) {
+    ([&db, &store, &tree](const crow::request& req) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
+
+        // Real-folder account: bytes go straight into the folder tree under their own name.
+        if (auto acct = tree::account(db, tree, *userId)) {
+            if (!req.get_header_value("X-Enc-Name").empty() || !req.get_header_value("X-Enc-Mime").empty() ||
+                !req.get_header_value("X-Wrapped-Key").empty()) return tree::noEncryption();
+            std::string name = urlDecode(req.get_header_value("X-Filename"));
+            if (name.empty()) return http::jsonError(400, "missing X-Filename header");
+            if (!isValidDisplayName(name) || !TreeStore::validUserName(name)) return http::jsonError(400, "invalid filename");
+            int64_t folderId = 0;
+            std::string folderHdr = req.get_header_value("X-Folder");
+            if (!folderHdr.empty()) { try { folderId = std::stoll(folderHdr); } catch (...) { folderId = 0; } }
+            std::string mime = req.get_header_value("Content-Type");
+            if (mime.empty() || mime.size() > 255 || hasAnyControlChar(mime)) mime = TreeStore::mimeFor(name);
+
+            std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
+            if (!db.folderExists(*userId, folderId)) return http::jsonError(400, "folder not found");
+            auto rel = tree::folderRel(db, *userId, folderId);
+            if (!rel) return http::jsonError(400, "folder not found");
+            const int64_t size = static_cast<int64_t>(req.body.size());
+            if (!db.hasQuotaRoom(*userId, size)) return http::jsonError(413, "storage quota exceeded");
+            std::string finalName;
+            if (int e = tree.writeFile(*acct, *rel, name, req.body.data(), req.body.size(), true, finalName))
+                return tree::fail(e);
+            int64_t id = db.addFile(*userId, folderId, finalName, mime, size, "-", "", "", "", size);
+            if (id < 0) return http::jsonError(500, "could not record file (it is on disk; a rescan will index it)");
+            notifyUser(*userId, "files");
+            return http::jsonSuccess(json{{"id", id}, {"name", finalName}, {"mime", mime}, {"size", size},
+                                          {"folderId", folderId}, {"encName", ""}, {"encMime", ""}}.dump());
+        }
 
         // E2E: the filename may be encrypted (X-Enc-Name). When present we store
         // the plaintext name blank and keep only the opaque blob; otherwise the
@@ -242,16 +272,25 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
 
     // ---- Download (streamed from disk) ----
     CROW_ROUTE(app, "/api/files/<int>").methods(crow::HTTPMethod::GET)
-    ([&db, &store](const crow::request& req, int fileId) {
+    ([&db, &store, &tree](const crow::request& req, int fileId) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
         auto meta = db.getFile(*userId, fileId);
         if (!meta) return http::jsonError(404, "not found");
 
+        std::string path;
+        if (auto acct = tree::account(db, tree, *userId)) {
+            // Walked component by component with O_NOFOLLOW; empty if anything is off.
+            auto rel = tree::folderRel(db, *userId, meta->folder_id);
+            if (rel) path = tree.servePath(*acct, *rel, meta->name);
+            if (path.empty()) return http::jsonError(404, "not found");
+        } else {
+            path = store.pathFor(*userId, meta->storage_key);
+        }
         crow::response res;
-        // Path is internal + opaque, so the "unsafe" (no re-sanitize) variant is fine.
-        res.set_static_file_info_unsafe(store.pathFor(*userId, meta->storage_key), meta->mime);
+        // Path is internal (opaque key, or a tree path verified above), so the "unsafe" variant is fine.
+        res.set_static_file_info_unsafe(path, meta->mime);
         if (res.code == 404) return http::jsonError(404, "not found");
 
         std::string safeName = security::Sanitizer::safeDispositionName(meta->name);
@@ -265,15 +304,23 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
     // <video>/<audio>/<img> point their src here; auth comes from the session
     // cookie (they can't send Authorization). Supports HTTP Range for seeking.
     CROW_ROUTE(app, "/api/files/<int>/content").methods(crow::HTTPMethod::GET)
-    ([&db, &store](const crow::request& req, int fileId) {
+    ([&db, &store, &tree](const crow::request& req, int fileId) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
 
         auto meta = db.getFile(*userId, fileId);
         if (!meta) return http::jsonError(404, "not found");
 
-        const std::string path = store.pathFor(*userId, meta->storage_key);
-        const int64_t size = meta->size;
+        std::string path;
+        int64_t size = meta->size;
+        if (auto acct = tree::account(db, tree, *userId)) {
+            // Real size from disk: the file may have changed since the last scan.
+            auto rel = tree::folderRel(db, *userId, meta->folder_id);
+            if (rel) path = tree.servePath(*acct, *rel, meta->name, &size);
+            if (path.empty()) return http::jsonError(404, "not found");
+        } else {
+            path = store.pathFor(*userId, meta->storage_key);
+        }
 
         std::string rangeHeader = req.get_header_value("Range");
         if (rangeHeader.empty()) {
@@ -310,9 +357,22 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
 
     // ---- Delete ----
     CROW_ROUTE(app, "/api/files/<int>").methods(crow::HTTPMethod::DELETE)
-    ([&db, &store](const crow::request& req, int fileId) {
+    ([&db, &store, &tree](const crow::request& req, int fileId) {
         auto userId = security::authenticateRequest(req, db);
         if (!userId) return http::jsonError(401, "unauthorized");
+
+        if (auto acct = tree::account(db, tree, *userId)) {
+            std::lock_guard<std::mutex> userLk(storage::userLock(*userId));
+            auto meta = db.getFile(*userId, fileId);
+            if (!meta) return http::jsonError(404, "not found");
+            auto rel = tree::folderRel(db, *userId, meta->folder_id);
+            if (!rel) return http::jsonError(409, "folder chain is broken; rescan first");
+            // Into .trash (or gone, if TRASH_DAYS=0). Already missing on disk = just drop the row.
+            if (int e = tree.trash(*acct, *rel, meta->name); e && e != ENOENT) return tree::fail(e);
+            db.deleteFile(*userId, fileId);
+            notifyUser(*userId, "files");
+            return http::jsonSuccess(R"({"ok":true})");
+        }
 
         auto meta = db.getFile(*userId, fileId);
         if (!meta) return http::jsonError(404, "not found");

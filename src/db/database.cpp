@@ -10,6 +10,8 @@
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <map>
+#include <functional>
 #include <sys/stat.h>
 
 // This layer uses the sqlite3 C API directly (libsqlite3). A fresh connection is
@@ -278,6 +280,9 @@ CloudDB::CloudDB(const std::string& dbPath) : dbPath_(dbPath) {
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN signup_ip TEXT DEFAULT '';", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE storage_requests ADD COLUMN upload_bytes INTEGER NOT NULL DEFAULT 0;", nullptr, nullptr, nullptr);
         sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN signup_note TEXT DEFAULT '';", nullptr, nullptr, nullptr);
+        // Real-folder storage: 'blob' (hex keys under STORAGE_DIR) or 'tree' (TREE_ROOT/<tree_dir>/...).
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN storage_mode TEXT NOT NULL DEFAULT 'blob';", nullptr, nullptr, nullptr);
+        sqlite3_exec(c.h, "ALTER TABLE users ADD COLUMN tree_dir TEXT NOT NULL DEFAULT '';", nullptr, nullptr, nullptr);
 
         // Admin bootstrap: if this DB has no admin yet, promote the earliest
         // (lowest-id) account. Runs every startup but is a no-op once an admin
@@ -2260,6 +2265,8 @@ CloudDB::LifecycleResult CloudDB::restoreUser(
             if (!row.is_object() || !row.contains("storage_key") || !row["storage_key"].is_string())
                 return fail(500, "backup contains a malformed file record");
             const std::string key = row["storage_key"].get<std::string>();
+            // "-" = real-folder file: it lives in the account's tree, not in the bundle.
+            if (key == "-") continue;
             if (!safeBlobKey(key)) return fail(500, "backup contains an unsafe storage key");
             if (!fs::is_regular_file(fs::path(backupDir) / "storage" / key, ec))
                 return fail(500, "backup is incomplete: a stored file is missing from it");
@@ -2407,5 +2414,199 @@ std::optional<RemovedUser> CloudDB::getRemovalFor(int64_t userId) {
     } catch (const std::exception& e) {
         utils::Logger::get_instance().error("getRemovalFor: " + std::string(e.what()));
         return std::nullopt;
+    }
+}
+
+// ==== Real-folder ("tree") storage ====
+
+std::optional<std::string> CloudDB::treeDir(int64_t userId) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT storage_mode, tree_dir FROM users WHERE id = ?");
+        q.bind(1, userId);
+        if (!q.step()) return std::nullopt;
+        if (q.colText(0) != "tree" || q.colText(1).empty()) return std::nullopt;
+        return q.colText(1);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("treeDir: " + std::string(e.what()));
+        return std::nullopt;
+    }
+}
+
+bool CloudDB::setTreeMode(int64_t userId, const std::string& dir) {
+    std::unique_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        Stmt q(c.h, "UPDATE users SET storage_mode = 'tree', tree_dir = ?, encrypt_files = 0 WHERE id = ?");
+        q.bind(1, dir);
+        q.bind(2, userId);
+        q.exec();
+        return sqlite3_changes(c.h) > 0;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("setTreeMode: " + std::string(e.what()));
+        return false;
+    }
+}
+
+std::vector<std::pair<int64_t, std::string>> CloudDB::treeAccounts() {
+    std::shared_lock lock(db_mutex_);
+    std::vector<std::pair<int64_t, std::string>> out;
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id, tree_dir FROM users WHERE storage_mode = 'tree' AND tree_dir <> '' AND status <> 'removed'");
+        while (q.step()) out.emplace_back(q.colInt64(0), q.colText(1));
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("treeAccounts: " + std::string(e.what()));
+    }
+    return out;
+}
+
+bool CloudDB::treeSync(int64_t userId, const std::vector<DiskEntry>& disk, TreeSyncStats& stats) {
+    std::unique_lock lock(db_mutex_);
+    auto joinPath = [](const std::vector<std::string>& parent, const std::string& name) {
+        std::string p;
+        for (const auto& c : parent) { p += c; p += '/'; }
+        return p + name;
+    };
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READWRITE);
+        if (sqlite3_exec(c.h, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK) return false;
+        auto fail = [&](const std::string& what) {
+            sqlite3_exec(c.h, "ROLLBACK", nullptr, nullptr, nullptr);
+            utils::Logger::get_instance().error("treeSync: " + what);
+            return false;
+        };
+
+        // Current folders -> full path. Parents may be listed after children, so resolve lazily.
+        struct Row { int64_t parent; std::string name; };
+        std::map<int64_t, Row> folders;
+        {
+            Stmt q(c.h, "SELECT id, parent_id, name FROM folders WHERE user_id = ?");
+            q.bind(1, userId);
+            while (q.step()) folders[q.colInt64(0)] = Row{q.colInt64(1), q.colText(2)};
+        }
+        std::map<int64_t, std::string> pathOf;   // folder id -> "a/b/c"
+        std::function<std::string(int64_t, int)> resolve = [&](int64_t id, int depth) -> std::string {
+            if (id == 0) return "";
+            auto hit = pathOf.find(id);
+            if (hit != pathOf.end()) return hit->second;
+            auto it = folders.find(id);
+            if (it == folders.end() || depth > 256) return std::string("\x01orphan/") + std::to_string(id);
+            std::string pp = resolve(it->second.parent, depth + 1);
+            std::string p = pp.empty() ? it->second.name : pp + "/" + it->second.name;
+            pathOf[id] = p;
+            return p;
+        };
+        std::map<std::string, int64_t> folderByPath;   // first row wins; extra rows count as stale
+        std::set<int64_t> staleFolders;
+        for (const auto& [id, row] : folders) {
+            std::string p = resolve(id, 0);
+            if (!folderByPath.emplace(p, id).second) staleFolders.insert(id);
+        }
+
+        struct FRow { int64_t id; int64_t size; int64_t stored; };
+        std::map<std::string, FRow> fileByPath;
+        std::vector<int64_t> staleFiles;
+        {
+            Stmt q(c.h, "SELECT id, folder_id, name, size, stored_size FROM files WHERE user_id = ?");
+            q.bind(1, userId);
+            while (q.step()) {
+                int64_t fid = q.colInt64(1);
+                std::string fp = fid == 0 ? "" : resolve(fid, 0);
+                std::string p = fp.empty() ? q.colText(2) : fp + "/" + q.colText(2);
+                if (!fileByPath.emplace(p, FRow{q.colInt64(0), q.colInt64(3), q.colInt64(4)}).second)
+                    staleFiles.push_back(q.colInt64(0));
+            }
+        }
+
+        Stmt insFolder(c.h, "INSERT INTO folders(user_id, parent_id, name, enc_name, created_at) "
+                            "VALUES(?, ?, ?, '', datetime(?, 'unixepoch'))");
+        Stmt insFile(c.h, "INSERT INTO files(user_id, folder_id, name, mime, size, storage_key, wrapped_key, "
+                          "enc_name, enc_mime, stored_size, created_at) "
+                          "VALUES(?, ?, ?, ?, ?, '-', '', '', '', ?, datetime(?, 'unixepoch'))");
+        Stmt updFile(c.h, "UPDATE files SET size = ?, stored_size = ? WHERE id = ? AND user_id = ?");
+        auto reset = [](Stmt& s) { sqlite3_reset(s.s); sqlite3_clear_bindings(s.s); };
+
+        std::set<std::string> seenFolders, seenFiles;
+        // The walk lists every folder before anything inside it.
+        for (const auto& e : disk) {
+            if (!e.dir) continue;
+            std::string p = joinPath(e.parent, e.name);
+            seenFolders.insert(p);
+            if (folderByPath.count(p)) continue;
+            std::string pp = joinPath(std::vector<std::string>(e.parent.begin(), e.parent.end()), "");
+            if (!pp.empty()) pp.pop_back();
+            int64_t parentId = 0;
+            if (!pp.empty()) {
+                auto it = folderByPath.find(pp);
+                if (it == folderByPath.end()) continue;   // parent wasn't indexable; skip subtree
+                parentId = it->second;
+            }
+            insFolder.bind(1, userId); insFolder.bind(2, parentId); insFolder.bind(3, e.name); insFolder.bind(4, e.mtime);
+            if (sqlite3_step(insFolder.s) != SQLITE_DONE) return fail(std::string("insert folder: ") + sqlite3_errmsg(c.h));
+            folderByPath[p] = sqlite3_last_insert_rowid(c.h);
+            reset(insFolder);
+            stats.foldersAdded++;
+        }
+        for (const auto& e : disk) {
+            if (e.dir) continue;
+            std::string p = joinPath(e.parent, e.name);
+            int64_t parentId = 0;
+            if (!e.parent.empty()) {
+                std::string pp = joinPath(e.parent, ""); pp.pop_back();
+                auto it = folderByPath.find(pp);
+                if (it == folderByPath.end()) continue;
+                parentId = it->second;
+            }
+            seenFiles.insert(p);
+            auto it = fileByPath.find(p);
+            if (it != fileByPath.end()) {
+                if (it->second.size != e.size || it->second.stored != e.size) {
+                    updFile.bind(1, e.size); updFile.bind(2, e.size); updFile.bind(3, it->second.id); updFile.bind(4, userId);
+                    if (sqlite3_step(updFile.s) != SQLITE_DONE) return fail(std::string("update file: ") + sqlite3_errmsg(c.h));
+                    reset(updFile);
+                    stats.filesUpdated++;
+                }
+                continue;
+            }
+            insFile.bind(1, userId); insFile.bind(2, parentId); insFile.bind(3, e.name);
+            insFile.bind(4, e.mime.empty() ? std::string("application/octet-stream") : e.mime);
+            insFile.bind(5, e.size); insFile.bind(6, e.size); insFile.bind(7, e.mtime);
+            if (sqlite3_step(insFile.s) != SQLITE_DONE) return fail(std::string("insert file: ") + sqlite3_errmsg(c.h));
+            reset(insFile);
+            stats.filesAdded++;
+        }
+
+        // Rows whose path no longer exists on disk.
+        Stmt delFile(c.h, "DELETE FROM files WHERE id = ? AND user_id = ?");
+        auto dropFile = [&](int64_t id) {
+            delFile.bind(1, id); delFile.bind(2, userId);
+            sqlite3_step(delFile.s); reset(delFile);
+            stats.filesRemoved++;
+        };
+        for (const auto& [p, row] : fileByPath) if (!seenFiles.count(p)) dropFile(row.id);
+        for (int64_t id : staleFiles) dropFile(id);
+        Stmt delFolder(c.h, "DELETE FROM folders WHERE id = ? AND user_id = ?");
+        for (const auto& [p, id] : folderByPath) {
+            if (seenFolders.count(p) || staleFolders.count(id)) continue;
+            delFolder.bind(1, id); delFolder.bind(2, userId); sqlite3_step(delFolder.s); reset(delFolder);
+            stats.foldersRemoved++;
+        }
+        for (int64_t id : staleFolders) {
+            delFolder.bind(1, id); delFolder.bind(2, userId); sqlite3_step(delFolder.s); reset(delFolder);
+            stats.foldersRemoved++;
+        }
+        // Files left pointing at a folder that is gone (stale duplicate folders).
+        {
+            Stmt q(c.h, "DELETE FROM files WHERE user_id = ? AND folder_id <> 0 AND folder_id NOT IN (SELECT id FROM folders WHERE user_id = ?)");
+            q.bind(1, userId); q.bind(2, userId); q.exec();
+            stats.filesRemoved += sqlite3_changes(c.h);
+        }
+        if (sqlite3_exec(c.h, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) return fail("commit failed");
+        return true;
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("treeSync: " + std::string(e.what()));
+        return false;
     }
 }

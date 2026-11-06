@@ -38,6 +38,8 @@ $(c '1;35' cloudctl) - manage cloud-serv ($INSTALL_DIR)
   url                 addresses to open it on (LAN + Tailscale)
   users               list accounts: role, status, quota, usage
   admin <email>       create an admin account (prints a recovery key file path)
+  tree <email> <dir>  switch an (empty) account to real folders at TREE_ROOT/<dir> (encryption off)
+  rescan [email]      re-index real-folder accounts now (running server: instant; stopped: needs email)
   backup [dir]        full backup: database, files, avatars, config, TLS (default $DATA_DIR/../cloud-serv-backups)
   restore <file>      restore a backup made by 'backup' (keeps the old data aside)
   update <zip>        install a new deploy zip from package.sh (auto-backs up the database first)
@@ -107,6 +109,23 @@ cmd_admin() {
     runuser -u "$SVC_USER" -- "$BIN" admin create-admin --email "$email" --config "$CONFIG" --recovery-key-file "$DATA_DIR/recovery.tmp" | sed "s|$DATA_DIR/recovery.tmp|$rec|"
     mv "$DATA_DIR/recovery.tmp" "$rec"; chown root:root "$rec"; chmod 0600 "$rec"
     warn "RECOVERY KEY saved to $rec: store it somewhere safe, then delete that file"
+}
+
+cmd_tree() {
+    need_root tree; local email="${1:-}" dir="${2:-}"
+    [ -n "$email" ] && [ -n "$dir" ] || die "usage: cloudctl tree <email> <dir>"
+    grep -qE '^TREE_ROOT=.+' "$CONFIG" || die "set TREE_ROOT in $CONFIG first (cloudctl config edit)"
+    runuser -u "$SVC_USER" -- "$BIN" admin set-tree --email "$email" --dir "$dir" --config "$CONFIG"
+}
+
+cmd_rescan() {
+    need_root rescan
+    if [ "$(systemctl is-active "$SERVICE" 2>/dev/null)" = active ]; then
+        systemctl kill -s HUP --kill-whom=main "$SERVICE" && say "rescan requested: results in 'cloudctl logs' (tree scan ...)"
+    else
+        [ -n "${1:-}" ] || die "the server is stopped: cloudctl rescan <email>"
+        runuser -u "$SVC_USER" -- "$BIN" admin rescan --email "$1" --config "$CONFIG"
+    fi
 }
 
 cmd_backup() {
@@ -258,7 +277,7 @@ menu() {
 case "${1:-}" in
     "") menu ;;
     help|-h|--help) cmd_help ;;
-    status|logs|url|users|admin|backup|restore|update|config|cert|doctor) c="$1"; shift; "cmd_$c" "$@" ;;
+    status|logs|url|users|admin|tree|rescan|backup|restore|update|config|cert|doctor) c="$1"; shift; "cmd_$c" "$@" ;;
     start|stop|restart) need_root "$1"; systemctl "$1" "$SERVICE"; [ "$1" = stop ] || { sleep 2; health && say "running" || warn "not answering yet: cloudctl logs"; } ;;
     version) cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo dev ;;
     *) die "unknown command '$1' (cloudctl help)" ;;

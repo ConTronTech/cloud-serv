@@ -267,7 +267,9 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
             {"salt", user->kdf_salt}, {"wrappedDek", user->wrapped_dek},
             {"wrappedDekRecovery", user->wrapped_dek_recovery},
             {"avatarVersion", avatarVersion(*userId)},
-            {"encryptFiles", db.getEncryptFiles(*userId).value_or(encDefault)}
+            {"encryptFiles", db.getEncryptFiles(*userId).value_or(encDefault)},
+            // "tree" = files live as real folders on disk (encryption can't be turned on).
+            {"storageMode", db.treeDir(*userId) ? "tree" : "blob"}
         }.dump());
     });
 
@@ -295,6 +297,9 @@ void registerAuthRoutes(crow::App<http::SecurityMiddleware>& app,
         json out = json::object();
         if (hasEnc) {
             const bool on = body["encryptFiles"].get<bool>();
+            // Real-folder accounts keep readable names on disk, so encryption stays off.
+            if (on && db.treeDir(*userId))
+                return http::jsonError(409, "end-to-end encryption is not available for real-folder accounts");
             if (!db.setEncryptFiles(*userId, on)) return http::jsonError(500, "could not save");
             out["encryptFiles"] = on;
         }
