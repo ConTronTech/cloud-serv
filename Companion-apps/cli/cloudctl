@@ -153,7 +153,8 @@ EOF
     echo "$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo dev) $ts" > "$tmp/BACKUP_INFO"
     say "packing files, avatars, account backups and TLS into $out"
     tar -czf "$out" -C "$tmp" cloud.db config.env BACKUP_INFO \
-        -C "$DATA_DIR" --exclude=cloud.db --exclude='cloud.db-*' --exclude=recovery.tmp .
+        -C "$DATA_DIR" --exclude=cloud.db --exclude='cloud.db-*' --exclude=recovery.tmp \
+        --exclude=./lost+found .   # DATA_DIR may be a disk's mount root (Proxmox mp): lost+found isn't ours
     chmod 0600 "$out"
     say "done: $out ($(du -h "$out" | cut -f1)). It holds your config secrets and any unencrypted files: keep it private."
     if [ "$keep" -gt 0 ]; then
