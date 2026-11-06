@@ -19,3 +19,5 @@ config.env
 
 # deploy bundles built by package.sh
 *.zip
+# browser test scratch (Playwright MCP)
+.playwright-mcp/

@@ -215,7 +215,8 @@ void registerFsRoutes(crow::App<http::SecurityMiddleware>& app, CloudDB& db, Fil
             auto rel = tree::folderRel(db, *userId, cur->parent_id);
             if (!rel) return http::jsonError(409, "folder chain is broken; rescan first");
             // The whole folder goes into .trash in one rename (or is removed when TRASH_DAYS=0).
-            if (int e = tree.trash(*acct, *rel, cur->name); e && e != ENOENT) return tree::fail(e);
+            auto [bytes, nfiles] = db.folderTotals(*userId, folderId);
+            if (int e = tree.trash(*acct, *rel, cur->name, bytes, nfiles); e && e != ENOENT) return tree::fail(e);
             std::vector<std::string> ignored;
             if (!db.deleteFolderRecursive(*userId, folderId, ignored))
                 return http::jsonError(500, "removed on disk but the index update failed; a rescan will fix it");

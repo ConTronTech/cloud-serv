@@ -72,6 +72,7 @@
         <button id="nav-files" class="side-item active" type="button">Files</button>
         <button id="nav-recent" class="side-item" type="button">Recent</button>
         <button id="nav-starred" class="side-item" type="button">Starred</button>
+        <button id="nav-trash" class="side-item hidden" type="button">Trash</button>
         <div class="side-divider"></div>
         <button id="nav-notes" class="side-item" type="button">Notes</button>
       </nav>
@@ -281,6 +282,18 @@
       </div>
 
       <!-- ===== Notes tab ===== -->
+      <div id="trash-tab" class="hidden">
+        <section>
+          <div class="files-head">
+            <h2>Trash</h2>
+            <button id="trash-empty" class="btn ghost small" type="button">Empty trash</button>
+          </div>
+          <p id="trash-info" class="muted"></p>
+          <ul id="trash-list" class="note-list"></ul>
+          <p id="trash-none" class="muted empty hidden">The trash is empty.</p>
+        </section>
+      </div>
+
       <div id="notes-tab" class="hidden">
         <section id="notes-list-view">
           <div class="files-head">

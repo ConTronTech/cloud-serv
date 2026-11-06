@@ -43,7 +43,27 @@ public:
     int rename(const std::string& acct, const Rel& fromParent, const std::string& fromName,
                const Rel& toParent, const std::string& toName) const;
     // Delete = move into .trash/<YYYY-MM-DD>/<parent path>/<name> (or unlink when trashDays==0).
-    int trash(const std::string& acct, const Rel& parent, const std::string& name) const;
+    // Each delete is recorded in .trash/<date>/.cloud-serv-trash.jsonl (what, from where, size,
+    // file count, when), which is how the Trash view tells deleted items from the folders that
+    // only mirror their old location.
+    int trash(const std::string& acct, const Rel& parent, const std::string& name,
+              int64_t size = 0, int64_t files = 0) const;
+
+    struct TrashItem {
+        std::string date;      // YYYY-MM-DD folder it sits in (purged trashDays after this)
+        int index = 0;         // line in that day's record
+        std::string trashRel;  // path under .trash/<date>/
+        std::string origRel;   // where it was deleted from (account-relative, incl. its name)
+        bool dir = false;
+        int64_t size = 0, files = 0, at = 0;
+    };
+    // Everything still in the trash (restored / deleted-forever items are gone from disk and skipped).
+    std::vector<TrashItem> listTrash(const std::string& acct) const;
+    // Put an item back at its original path, recreating missing parent folders. A name clash
+    // gets " (1)" etc. parentOut/nameOut = where it actually landed.
+    int trashRestore(const std::string& acct, const TrashItem& it, Rel& parentOut, std::string& nameOut) const;
+    int trashDelete(const std::string& acct, const TrashItem& it) const;   // permanent
+    int trashEmpty(const std::string& acct) const;                         // permanent, everything
 
     // Upload temp space (<acct>/.cloud-serv/uploads/<key>), same filesystem as the tree.
     int tempCreate(const std::string& acct, const std::string& key) const;

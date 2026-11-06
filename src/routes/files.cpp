@@ -368,7 +368,7 @@ void registerFileRoutes(crow::App<http::SecurityMiddleware>& app,
             auto rel = tree::folderRel(db, *userId, meta->folder_id);
             if (!rel) return http::jsonError(409, "folder chain is broken; rescan first");
             // Into .trash (or gone, if TRASH_DAYS=0). Already missing on disk = just drop the row.
-            if (int e = tree.trash(*acct, *rel, meta->name); e && e != ENOENT) return tree::fail(e);
+            if (int e = tree.trash(*acct, *rel, meta->name, meta->size, 1); e && e != ENOENT) return tree::fail(e);
             db.deleteFile(*userId, fileId);
             notifyUser(*userId, "files");
             return http::jsonSuccess(R"({"ok":true})");

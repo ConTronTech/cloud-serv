@@ -221,6 +221,10 @@ public:
                            const std::function<std::string(const std::string&)>& mimeFor,
                            int64_t& rootId, TreeSyncStats& stats);
     bool setUploadKind(int64_t userId, const std::string& id, const std::string& kind);
+    // Total bytes + file count under a folder (any depth): shown for folders in the Trash.
+    std::pair<int64_t, int64_t> folderTotals(int64_t userId, int64_t folderId);
+    // Child folder of `parentId` with this exact name, if any.
+    std::optional<int64_t> childFolder(int64_t userId, int64_t parentId, const std::string& name);
     bool treeSync(int64_t userId, const std::vector<DiskEntry>& disk,
                   const std::function<std::string(const std::string&)>& mimeFor, TreeSyncStats& stats);
     // Admins who can actually act: role admin AND status active. A suspended or

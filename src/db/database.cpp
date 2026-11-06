@@ -2711,3 +2711,33 @@ bool CloudDB::treeInsertSubtree(int64_t userId, int64_t parentId, const std::str
         return false;
     }
 }
+
+std::pair<int64_t, int64_t> CloudDB::folderTotals(int64_t userId, int64_t folderId) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "WITH RECURSIVE sub(id) AS ("
+                    "  SELECT id FROM folders WHERE id = ?1 AND user_id = ?2"
+                    "  UNION ALL"
+                    "  SELECT f.id FROM sub CROSS JOIN folders f ON f.user_id = ?2 AND f.parent_id = sub.id"
+                    ") SELECT COALESCE(SUM(stored_size), 0), COUNT(*) FROM files WHERE user_id = ?2 AND folder_id IN (SELECT id FROM sub)");
+        q.bind(1, folderId); q.bind(2, userId);
+        if (q.step()) return {q.colInt64(0), q.colInt64(1)};
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("folderTotals: " + std::string(e.what()));
+    }
+    return {0, 0};
+}
+
+std::optional<int64_t> CloudDB::childFolder(int64_t userId, int64_t parentId, const std::string& name) {
+    std::shared_lock lock(db_mutex_);
+    try {
+        Conn c(dbPath_, SQLITE_OPEN_READONLY);
+        Stmt q(c.h, "SELECT id FROM folders WHERE user_id = ? AND parent_id = ? AND name = ? ORDER BY id LIMIT 1");
+        q.bind(1, userId); q.bind(2, parentId); q.bind(3, name);
+        if (q.step()) return q.colInt64(0);
+    } catch (const std::exception& e) {
+        utils::Logger::get_instance().error("childFolder: " + std::string(e.what()));
+    }
+    return std::nullopt;
+}

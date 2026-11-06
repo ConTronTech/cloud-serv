@@ -8,6 +8,7 @@
 #include "routes/admin.h"
 #include "storage/tree_store.h"
 #include "storage/tree_scan.h"
+#include "routes/trash.h"
 #include "routes/auth.h"
 #include "routes/oidc.h"
 #include "routes/devices.h"
@@ -165,6 +166,7 @@ int main(int argc, char* argv[]) {
         routes::registerFsRoutes(app, db, store, tree);
         routes::registerNoteRoutes(app, db);
         routes::registerUploadRoutes(app, db, store, tree, maxFileBytes);
+        routes::registerTrashRoutes(app, db, tree);
         std::string backupDir = config.get("env", "BACKUP_DIR", "data/backups");
         routes::registerAdminRoutes(app, db, store, backupDir);
         routes::registerSignupAdminRoutes(app, db);

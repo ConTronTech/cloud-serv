@@ -106,6 +106,7 @@ async function loadPrefs() {
     t.disabled = STORAGE_MODE === "tree";
     t.title = STORAGE_MODE === "tree" ? "This account stores real folders on the server, so encryption is off" : "";
   }
+  const nt = $("nav-trash"); if (nt) nt.classList.toggle("hidden", STORAGE_MODE !== "tree");
 }
 async function setEncryptPref(on) {
   if (on && !DEK_RAW) { $("enc-toggle").checked = false; toast("Unlock encryption on this device first (banner at the top)"); return; }
@@ -1748,11 +1749,11 @@ let editingNoteId = null;
 
 // ---- sidebar navigation ----
 function setActiveNav(nav) {
-  ["files", "recent", "starred", "notes", "settings", "admin"].forEach((n) => {
+  ["files", "recent", "starred", "trash", "notes", "settings", "admin"].forEach((n) => {
     const el = $("nav-" + n); if (el) el.classList.toggle("active", n === nav);
   });
 }
-function showFilesTab() { $("files-tab").classList.remove("hidden"); ["notes-tab", "settings-tab", "admin-tab"].forEach((t) => $(t).classList.add("hidden")); }
+function showFilesTab() { $("files-tab").classList.remove("hidden"); ["notes-tab", "settings-tab", "admin-tab", "trash-tab"].forEach((t) => $(t).classList.add("hidden")); }
 
 function goNotes() {
   remember("#/notes");
@@ -1760,6 +1761,7 @@ function goNotes() {
   $("files-tab").classList.add("hidden");
   $("settings-tab").classList.add("hidden");
   $("admin-tab").classList.add("hidden");
+  $("trash-tab").classList.add("hidden");
   $("notes-tab").classList.remove("hidden");
   showNotesList(); loadNotes();
   closeSidebar();
@@ -2369,6 +2371,7 @@ async function applyRoute(route) {
     if (m) await loadFs(parseInt(m[1], 10));
     else if (route === "#/recent") await loadView("recent");
     else if (route === "#/starred") await loadView("starred");
+    else if (route === "#/trash") await goTrash();   // the server says if this account has no trash
     else if (route === "#/notes") goNotes();
     else if (route === "#/settings") goSettings();
     else if (route === "#/admin" && isAdmin()) goAdmin();
@@ -2432,8 +2435,10 @@ function handleEvent(t) {
   else if (t === "users") soon("usr", () => { if (adminOpen()) loadUsers(); });
   else if (t === "storage") soon("sto", () => { refreshAdminBadge(); if (adminOpen()) loadStorageRequests(); });
   else if (t === "quota") soon("quo", onQuotaEvent);
+  else if (t === "trash") soon("tra", () => { if (trashOpen()) loadTrash(); });
   else if (t === "files") soon("fil", () => {           // something changed in my files (any tab/device)
     loadUsage();
+    if (trashOpen()) loadTrash();
     if (!$("files-tab").classList.contains("hidden") && $("preview-modal").classList.contains("hidden")) refreshCurrentView();
   }, 500);
   else if (t === "notes") soon("not", () => {
@@ -2544,7 +2549,7 @@ async function refreshAdminBadge() {
 function goAdmin() {
   remember("#/admin");
   setActiveNav("admin");
-  ["files-tab", "notes-tab", "settings-tab"].forEach((t) => $(t).classList.add("hidden"));
+  ["files-tab", "notes-tab", "settings-tab", "trash-tab"].forEach((t) => $(t).classList.add("hidden"));
   $("admin-tab").classList.remove("hidden");
   closeSidebar(); closeUserMenu();
   loadRequests(); loadInvites(); loadUsers(); loadStorageRequests();
@@ -2663,6 +2668,7 @@ function goSettings() {
   remember("#/settings");
   setActiveNav("settings");
   $("files-tab").classList.add("hidden"); $("notes-tab").classList.add("hidden"); $("admin-tab").classList.add("hidden");
+  $("trash-tab").classList.add("hidden");
   $("settings-tab").classList.remove("hidden");
   closeSidebar(); closeUserMenu();
   loadSettings();
@@ -2772,6 +2778,86 @@ async function createApiKey(e) {
 }
 
 // Recent / Starred views (files-tab, results mode).
+// ---- Trash (real-folder accounts): deleted items wait TRASH_DAYS before they're gone ----
+function trashOpen() { const t = $("trash-tab"); return t && !t.classList.contains("hidden"); }
+async function goTrash() {
+  remember("#/trash");
+  setActiveNav("trash");
+  ["files-tab", "notes-tab", "settings-tab", "admin-tab"].forEach((t) => $(t).classList.add("hidden"));
+  $("trash-tab").classList.remove("hidden");
+  closeSidebar(); closeUserMenu();
+  await loadTrash();
+}
+function fmtWhen(epoch) {
+  if (!epoch) return "";
+  const d = new Date(epoch * 1000);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " +
+         d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+async function loadTrash() {
+  const { ok, status, body } = await api("/api/trash", { headers: authHeaders() });
+  if (status === 401) { sessionExpired(); return; }
+  const list = $("trash-list"); list.innerHTML = "";
+  if (!ok || !body) { $("trash-info").textContent = prettyError(body) || "Couldn't load the trash."; return; }
+  const items = body.items || [];
+  $("trash-none").classList.toggle("hidden", items.length > 0);
+  $("trash-empty").disabled = !items.length;
+  $("trash-info").textContent = items.length
+    ? `${items.length} item${items.length === 1 ? "" : "s"} · ${fmtSize(body.bytes || 0)} · deleted items are removed for good after ${body.trashDays} days`
+    : "";
+  for (const it of items) {
+    const li = document.createElement("li");
+    li.className = "note-item trash-item";
+    const main = document.createElement("div"); main.className = "trash-main";
+    const name = document.createElement("div"); name.className = "trash-name";
+    name.textContent = (it.dir ? "📁 " : "📄 ") + it.name;          // textContent: names are user data
+    const meta = document.createElement("div"); meta.className = "muted trash-meta";
+    meta.textContent = [
+      "from " + (it.from ? it.from + "/" : "Home"),
+      it.dir ? `${it.files} file${it.files === 1 ? "" : "s"}, ${fmtSize(it.size)}` : fmtSize(it.size),
+      "deleted " + fmtWhen(it.deletedAt),
+      it.purgeOn ? "gone on " + it.purgeOn : "",
+    ].filter(Boolean).join(" · ");
+    main.append(name, meta);
+    const acts = document.createElement("div"); acts.className = "trash-acts";
+    const restore = document.createElement("button");
+    restore.type = "button"; restore.className = "btn primary small"; restore.textContent = "Restore";
+    restore.addEventListener("click", () => restoreTrash(it, restore));
+    const del = document.createElement("button");
+    del.type = "button"; del.className = "btn ghost small"; del.textContent = "Delete forever";
+    del.addEventListener("click", () => deleteTrash(it, del));
+    acts.append(restore, del);
+    li.append(main, acts);
+    list.appendChild(li);
+  }
+}
+async function restoreTrash(it, btn) {
+  btn.disabled = true; btn.textContent = "Restoring…";
+  const { ok, body } = await api("/api/trash/restore", {
+    method: "POST", headers: authHeaders({ "Content-Type": "application/json" }), body: JSON.stringify({ id: it.id }),
+  });
+  if (!ok) { toast(prettyError(body) || "Couldn't restore"); btn.disabled = false; btn.textContent = "Restore"; return; }
+  const r = body.restored || {};
+  toast(`Restored to ${r.path || it.name}` + (r.name && r.name !== it.name ? ` (saved as "${r.name}")` : ""));
+  loadTrash();
+}
+async function deleteTrash(it, btn) {
+  const what = it.dir ? `the folder "${it.name}" and its ${it.files} file${it.files === 1 ? "" : "s"}` : `"${it.name}"`;
+  if (!confirm(`Delete ${what} for good?\n\nThis can't be undone.`)) return;
+  btn.disabled = true;
+  const { ok, body } = await api("/api/trash/item?id=" + encodeURIComponent(it.id), { method: "DELETE", headers: authHeaders() });
+  if (!ok) { toast(prettyError(body) || "Couldn't delete"); btn.disabled = false; return; }
+  loadTrash();
+}
+async function emptyTrash() {
+  const n = $("trash-list").children.length;
+  if (!n || !confirm(`Delete all ${n} item${n === 1 ? "" : "s"} in the trash for good?\n\nThis can't be undone.`)) return;
+  $("trash-empty").disabled = true;
+  const { ok, body } = await api("/api/trash", { method: "DELETE", headers: authHeaders() });
+  if (!ok) toast(prettyError(body) || "Couldn't empty the trash");
+  loadTrash();
+}
+
 async function loadView(kind) {
   remember("#/" + kind);
   setActiveNav(kind);
@@ -2972,6 +3058,8 @@ async function boot() {
   $("nav-files").addEventListener("click", () => loadFs(0));
   $("nav-recent").addEventListener("click", () => loadView("recent"));
   $("nav-starred").addEventListener("click", () => loadView("starred"));
+  $("nav-trash").addEventListener("click", () => goTrash());
+  $("trash-empty").addEventListener("click", () => emptyTrash());
   $("nav-notes").addEventListener("click", goNotes);
   $("nav-settings").addEventListener("click", goSettings);
   $("nav-admin").addEventListener("click", goAdmin);

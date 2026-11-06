@@ -2,10 +2,15 @@
 #include "utils/logger.h"
 #include "security/crypto.h"
 
+#include <nlohmann/json.hpp>
+#include <fstream>
+#include <sstream>
+
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <cctype>
+#include <algorithm>
 #include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
@@ -257,7 +262,10 @@ int TreeStore::rename(const std::string& acct, const Rel& fromParent, const std:
     return renameNoReplace(from.fd, fromName, to.fd, toName);
 }
 
-int TreeStore::trash(const std::string& acct, const Rel& parent, const std::string& name) const {
+namespace { const char* kTrashLog = ".cloud-serv-trash.jsonl"; }
+
+int TreeStore::trash(const std::string& acct, const Rel& parent, const std::string& name,
+                     int64_t size, int64_t files) const {
     if (!validUserName(name)) return EINVAL;
     Fd a(openAccount(acct)); if (!a.ok()) return errno;
     Fd p(openDirAt(a.fd, parent, false)); if (!p.ok()) return errno;
@@ -268,9 +276,117 @@ int TreeStore::trash(const std::string& acct, const Rel& parent, const std::stri
     Rel where{kTrashDir, today()};
     where.insert(where.end(), parent.begin(), parent.end());
     Fd t(openDirAt(a.fd, where, true)); if (!t.ok()) return errno;
-    int e = renameNoReplace(p.fd, name, t.fd, name);
-    for (int n = 1; e == EEXIST && n < 1000; n++) e = renameNoReplace(p.fd, name, t.fd, numbered(name, n));
-    return e;
+    std::string placed = name;
+    int e = renameNoReplace(p.fd, name, t.fd, placed);
+    for (int n = 1; e == EEXIST && n < 1000; n++) { placed = numbered(name, n); e = renameNoReplace(p.fd, name, t.fd, placed); }
+    if (e) return e;
+
+    // Record it (append-only; a failure here only hides the item from the Trash view).
+    Fd day(openDirAt(a.fd, Rel{kTrashDir, today()}, false));
+    if (day.ok()) {
+        nlohmann::json j = {{"t", joinRel(parent, placed)}, {"o", joinRel(parent, name)}, {"d", S_ISDIR(st.st_mode)},
+                            {"s", size > 0 ? size : (S_ISDIR(st.st_mode) ? 0 : static_cast<int64_t>(st.st_size))},
+                            {"n", files > 0 ? files : (S_ISDIR(st.st_mode) ? 0 : 1)},
+                            {"at", static_cast<int64_t>(std::time(nullptr))}};
+        const std::string line = j.dump() + "\n";
+        Fd log(::openat(day.fd, kTrashLog, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600));
+        if (log.ok()) writeAll(log.fd, line.data(), line.size());
+    }
+    return 0;
+}
+
+namespace {
+bool isDayDir(const std::string& n) {
+    return n.size() == 10 && n[4] == '-' && n[7] == '-' &&
+           std::all_of(n.begin(), n.end(), [](char c) { return (c >= '0' && c <= '9') || c == '-'; });
+}
+TreeStore::Rel splitRel(const std::string& s) {
+    TreeStore::Rel r; std::string cur;
+    for (char c : s) { if (c == '/') { if (!cur.empty()) r.push_back(cur); cur.clear(); } else cur += c; }
+    if (!cur.empty()) r.push_back(cur);
+    return r;
+}
+} // namespace
+
+std::vector<TreeStore::TrashItem> TreeStore::listTrash(const std::string& acct) const {
+    std::vector<TrashItem> out;
+    Fd a(openAccount(acct)); if (!a.ok()) return out;
+    Fd t(::openat(a.fd, kTrashDir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)); if (!t.ok()) return out;
+    int d = ::dup(t.fd); DIR* dir = d >= 0 ? ::fdopendir(d) : nullptr;
+    if (!dir) { if (d >= 0) ::close(d); return out; }
+    std::vector<std::string> days;
+    while (struct dirent* ent = ::readdir(dir)) if (isDayDir(ent->d_name)) days.push_back(ent->d_name);
+    ::closedir(dir);
+    std::sort(days.begin(), days.end());
+    for (const auto& day : days) {
+        Fd dd(::openat(t.fd, day.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)); if (!dd.ok()) continue;
+        Fd lf(::openat(dd.fd, kTrashLog, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)); if (!lf.ok()) continue;
+        std::string text; char buf[65536]; ssize_t r;
+        while ((r = ::read(lf.fd, buf, sizeof buf)) > 0) text.append(buf, static_cast<size_t>(r));
+        std::istringstream in(text); std::string line; int idx = -1;
+        while (std::getline(in, line)) {
+            idx++;
+            auto j = nlohmann::json::parse(line, nullptr, false);
+            if (j.is_discarded() || !j.is_object() || !j.contains("t") || !j.contains("o")) continue;
+            TrashItem it;
+            it.date = day; it.index = idx;
+            it.trashRel = j.value("t", ""); it.origRel = j.value("o", "");
+            it.dir = j.value("d", false); it.size = j.value("s", int64_t(0)); it.files = j.value("n", int64_t(0));
+            it.at = j.value("at", int64_t(0));
+            Rel tr = splitRel(it.trashRel);
+            if (tr.empty() || splitRel(it.origRel).empty()) continue;
+            // Still there? (restored or deleted-forever items are simply gone)
+            std::string leaf = tr.back(); tr.pop_back();
+            Fd parent(openDirAt(dd.fd, tr, false)); if (!parent.ok()) continue;
+            struct stat st{};
+            if (::fstatat(parent.fd, leaf.c_str(), &st, AT_SYMLINK_NOFOLLOW) != 0) continue;
+            if (S_ISDIR(st.st_mode) != it.dir) continue;
+            out.push_back(std::move(it));
+        }
+    }
+    return out;
+}
+
+int TreeStore::trashRestore(const std::string& acct, const TrashItem& it, Rel& parentOut, std::string& nameOut) const {
+    if (!isDayDir(it.date)) return EINVAL;
+    Rel tr = splitRel(it.trashRel), orig = splitRel(it.origRel);
+    if (tr.empty() || orig.empty()) return EINVAL;
+    for (const auto& c : orig) if (!validUserName(c)) return EINVAL;
+    Fd a(openAccount(acct)); if (!a.ok()) return errno;
+    Rel srcParent{kTrashDir, it.date}; srcParent.insert(srcParent.end(), tr.begin(), tr.end() - 1);
+    Fd src(openDirAt(a.fd, srcParent, false)); if (!src.ok()) return errno;
+    const std::string want = orig.back();
+    Rel dstParent(orig.begin(), orig.end() - 1);
+    Fd dst(openDirAt(a.fd, dstParent, true)); if (!dst.ok()) return errno;   // recreate missing parents
+    std::string cand = want;
+    int e = renameNoReplace(src.fd, tr.back(), dst.fd, cand);
+    for (int n = 1; e == EEXIST && n < 1000; n++) { cand = numbered(want, n); e = renameNoReplace(src.fd, tr.back(), dst.fd, cand); }
+    if (e) return e;
+    parentOut = dstParent; nameOut = cand;
+    return 0;
+}
+
+int TreeStore::trashDelete(const std::string& acct, const TrashItem& it) const {
+    if (!isDayDir(it.date)) return EINVAL;
+    Rel tr = splitRel(it.trashRel); if (tr.empty()) return EINVAL;
+    Fd a(openAccount(acct)); if (!a.ok()) return errno;
+    Rel parent{kTrashDir, it.date}; parent.insert(parent.end(), tr.begin(), tr.end() - 1);
+    Fd p(openDirAt(a.fd, parent, false)); if (!p.ok()) return errno;
+    return removeTree(p.fd, tr.back());
+}
+
+int TreeStore::trashEmpty(const std::string& acct) const {
+    Fd a(openAccount(acct)); if (!a.ok()) return errno;
+    Fd t(::openat(a.fd, kTrashDir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (!t.ok()) return errno == ENOENT ? 0 : errno;
+    int d = ::dup(t.fd); DIR* dir = d >= 0 ? ::fdopendir(d) : nullptr;
+    if (!dir) { if (d >= 0) ::close(d); return errno; }
+    std::vector<std::string> days;
+    while (struct dirent* ent = ::readdir(dir)) if (isDayDir(ent->d_name)) days.push_back(ent->d_name);
+    ::closedir(dir);
+    int err = 0;
+    for (const auto& day : days) if (int e = removeTree(t.fd, day)) err = e;
+    return err;
 }
 
 int TreeStore::ensureTempDir(int acctFd) const {
