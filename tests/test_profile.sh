@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Profile pictures: only real images, size cap, session-only, served safely.
 source "$(dirname "$0")/lib.sh"
-EXTRA_CONFIG="AVATAR_DIR=\$TESTDIR/avatars"
 start_server 8131 || exit 1
-sed -i "s|^AVATAR_DIR=.*|AVATAR_DIR=$TESTDIR/avatars|" "$TESTDIR/config.env"
 B="http://$API"
 T=$(tok_of "$(curl -s "$B/api/auth/register" -d '{"email":"pic@e.cc","password":"supersecret","inviteCode":"test-invite"}')")
 python3 -c "import sys; open(sys.argv[1],'wb').write(b'\xff\xd8\xff\xe0' + b'JFIF' + b'\x00'*2000)" "$TESTDIR/a.jpg"

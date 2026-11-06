@@ -5,9 +5,11 @@ later) for web + Android + Linux, run on the user's own PC and later reached ove
 Backend is C++/Crow + SQLite; the web client is a dependency-free vanilla-JS PWA served
 same-origin.
 
-**Zero-knowledge means:** the server never sees the password, the data key, file contents,
-or filenames. Forgotten password **and** lost recovery key = permanent data loss — this is
-inherent to the design, not a bug.
+**Zero-knowledge where it's on:** the server never sees the password or the data key, and
+never sees notes, or files when the account has *Encrypt my files* on (names included). Files
+uploaded with it off (the default since November 2026) are stored as normal files so ordinary
+backups can read them. For encrypted data, forgotten password **and** lost recovery key =
+permanent loss: inherent to the design, not a bug.
 
 ---
 
@@ -28,7 +30,23 @@ inherent to the design, not a bug.
   by the DEK. Encrypt on upload, decrypt on download/preview/thumbnail. Ciphertext on disk.
 - **E2E Phase 2b — filenames** — file & folder names encrypted under the DEK; the server
   stores only opaque blobs and browses by structure alone.
-- **Tests + CI** — 109 assertions (unit crypto, curl integration, and a real-API
+- **November 2026:**
+  - **Encryption and sign-in:**
+    - optional file encryption (per account, `FILES_ENCRYPT_DEFAULT`);
+    - trusted devices (unlock without password, 6-digit approval);
+    - OIDC / authentik sign-in with account linking.
+  - **Sign-up:** one-time invite codes, admin-approved sign-up requests.
+  - **Profile:** profile pictures and display names; password change that signs out other devices.
+  - **Live updates:** WebSocket push across all devices, with no polling.
+  - **Storage:** storage requests sized from the upload that didn't fit; quota on real bytes, race-safe.
+  - **Client:**
+    - right-click menus, preview card;
+    - Back/Forward routing;
+    - folder download as zip (ZIP64, decrypts in the browser).
+  - **Setup tools:** `deploy.sh` installer with wizard + systemd sandbox, `package.sh`, `cloudctl`, `cloud` CLI.
+  - **Full docs set.**
+  - **Security work:** sanitizer, fuzz and race testing (see SECURITY.md).
+- **Tests + CI** — now 766 checks; originally 109 assertions (unit crypto, curl integration, and a real-API
   zero-knowledge end-to-end test proving no plaintext contents on disk and no plaintext name
   in the database). GitHub Actions builds + runs on push/PR.
 
@@ -38,6 +56,14 @@ folder structure (which folder holds which items). Names and contents are opaque
 ---
 
 ## Next
+### Two-factor sign-in
+TOTP (authenticator app) + one-time backup codes for password logins. SSO users already get
+their provider's 2FA.
+
+### Library module
+Read-only browsing and streaming of the existing media library (hundreds of GB) without
+copying it into cloud-serv storage.
+
 
 ### Phase 3 — client-side search / sort / categories  *(needed, not just nice-to-have)*
 Because names are now opaque, the server can no longer search or sort by name for E2E items.

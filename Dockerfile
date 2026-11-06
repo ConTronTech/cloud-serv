@@ -3,6 +3,7 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # libasio-dev: Crow's networking. libssl-dev: password hashing / SHA-256 / CSPRNG.
+# libcurl: sign-in with authentik (OIDC token exchange).
 RUN apt-get update && apt-get install -y \
     build-essential \
     g++ \
@@ -10,6 +11,8 @@ RUN apt-get update && apt-get install -y \
     libasio-dev \
     libssl-dev \
     libsqlite3-dev \
+    libcurl4-openssl-dev \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

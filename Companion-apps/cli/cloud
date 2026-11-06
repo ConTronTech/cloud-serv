@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+"""cloud: command-line client for cloud-serv. Uses an API key (Settings > API keys).
+
+  cloud login [url]               save the server address + API key (asked for, hidden)
+  cloud ls [-l] [path]            list a folder            cloud tree [path]
+  cloud put [-r] <local...> [dest] upload files (or folders with -r) into folder dest
+  cloud get [-r] <path> [local]   download a file (or a folder with -r)
+  cloud mkdir <path>              make folders (parents too)
+  cloud mv <path> <new>           rename / move   (new = new name, or an existing folder)
+  cloud rm [-r] [-y] <path>       delete (folders need -r; asks first unless -y)
+  cloud star|unstar <path>        cloud search <text>     cloud recent     cloud starred
+  cloud usage                     storage used / quota
+  cloud logout                    forget the saved key
+
+Paths look like /Photos/2026/img.jpg ("/" is your Home). Files you encrypted in the
+browser show as [encrypted #id]: the server can't read them and neither can this tool
+(only your browser holds the key), so they can be listed, moved and deleted, not downloaded.
+Settings: ~/.config/cloud-serv/cli.json, or CLOUD_URL + CLOUD_KEY in the environment.
+"""
+import getpass, json, os, socket, ssl, sys, time, urllib.parse, urllib.request, urllib.error
+from pathlib import Path
+
+CONF_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "cloud-serv"
+CONF = CONF_DIR / "cli.json"
+PIN = CONF_DIR / "server-cert.pem"
+DIRECT_MAX = 8 * 1024 * 1024        # bigger files go up in chunks (resumable)
+CHUNK = 16 * 1024 * 1024
+
+
+class Fail(Exception):
+    pass
+
+
+def human(n):
+    n = float(n or 0)
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or u == "TB":
+            return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
+        n /= 1024
+
+
+def load_conf():
+    url, key = os.environ.get("CLOUD_URL"), os.environ.get("CLOUD_KEY")
+    if CONF.exists():
+        c = json.loads(CONF.read_text())
+        url, key = url or c.get("url"), key or c.get("key")
+    if not url or not key:
+        raise Fail("not logged in: run `cloud login`")
+    return url.rstrip("/"), key
+
+
+def ctx_for(url):
+    if not url.startswith("https"):
+        return None
+    if PIN.exists():   # a self-signed server: trust exactly the certificate saved at login
+        c = ssl.create_default_context(cafile=str(PIN))
+        c.check_hostname = False
+        return c
+    return ssl.create_default_context()
+
+
+class Api:
+    def __init__(self, url=None, key=None):
+        self.url, self.key = (url, key) if url else load_conf()
+        self.ctx = ctx_for(self.url)
+
+    def raw(self, method, path, body=None, headers=None, stream=False):
+        h = {"X-API-Key": self.key, "User-Agent": "cloud-cli"}
+        h.update(headers or {})
+        req = urllib.request.Request(self.url + path, data=body, method=method, headers=h)
+        for attempt in range(6):
+            try:
+                r = urllib.request.urlopen(req, context=self.ctx, timeout=120)
+                return r if stream else (r.status, r.read())
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < 5:      # rate limited: back off and retry
+                    time.sleep(2 ** attempt)
+                    continue
+                return e.code, e.read()
+            except ssl.SSLCertVerificationError:
+                raise Fail("the server's certificate isn't trusted: run `cloud login` again to pin it")
+            except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
+                if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                    raise Fail("the server's certificate doesn't match the one you trusted at login. If you "
+                               "renewed or regenerated it, run `cloud login` again; if not, someone may be "
+                               "intercepting the connection: don't continue")
+                if attempt < 2:
+                    time.sleep(1)
+                    continue
+                raise Fail(f"can't reach {self.url}: {getattr(e, 'reason', e)}")
+
+    def call(self, method, path, data=None, headers=None, ok=(200,)):
+        body = json.dumps(data).encode() if isinstance(data, (dict, list)) else data
+        code, out = self.raw(method, path, body, headers)
+        try:
+            j = json.loads(out or b"{}")
+        except ValueError:
+            j = {}
+        if code not in ok:
+            msg = j.get("error") or out[:200].decode(errors="replace")
+            if code == 401:
+                msg = "the API key was refused (revoked or wrong): run `cloud login`"
+            elif code == 413 and "quota" in str(msg):
+                msg = "storage quota exceeded: ask an admin for more space (the web app has a button for it)"
+            raise Fail(f"{msg} (HTTP {code})")
+        return j
+
+    # ---- paths -> ids ----
+    def listing(self, folder_id):
+        return self.call("GET", f"/api/fs?folder={folder_id}")
+
+    def resolve(self, path, want=None):
+        """-> ("folder"|"file", item-dict or {"id":0} for Home)"""
+        parts = [p for p in path.strip().split("/") if p not in ("", ".")]
+        cur = {"id": 0, "name": "/"}
+        kind = "folder"
+        for i, part in enumerate(parts):
+            if kind != "folder":
+                raise Fail(f"{'/'.join(parts[:i])} is a file, not a folder")
+            ls = self.listing(cur["id"])
+            enc = part.startswith("#") and part[1:].isdigit()   # "#12" picks an item by id
+            match = lambda it: (str(it["id"]) == part[1:]) if enc else it.get("name") == part
+            folders = [f for f in ls.get("folders", []) if match(f)]
+            files = [f for f in ls.get("files", []) if match(f)]
+            last = i == len(parts) - 1
+            if folders and (not last or want != "file"):
+                cur, kind = folders[0], "folder"
+            elif files and (not last or want != "folder"):
+                cur, kind = files[0], "file"
+            else:
+                raise Fail(f"not found: /{'/'.join(parts[:i + 1])}")
+        return kind, cur
+
+
+def label(it):
+    return it.get("name") or f"[encrypted #{it['id']}]"
+
+
+def bar(done, total, start, name):
+    if not sys.stderr.isatty():
+        return
+    pct = done / total if total else 1
+    rate = done / max(time.time() - start, 1e-3)
+    sys.stderr.write(f"\r  {name[:40]:40} {'#' * int(pct * 24):24}{'.' * (24 - int(pct * 24))} "
+                     f"{pct * 100:5.1f}% {human(done)}/{human(total)} {human(rate)}/s ")
+    sys.stderr.flush()
+    if done >= total:
+        sys.stderr.write("\n")
+
+
+# ---- commands ----------------------------------------------------------------------
+def c_login(args):
+    url = args[0] if args else input("server address (e.g. https://cloud.tailnet.ts.net:8443): ").strip()
+    if "://" not in url:
+        url = "https://" + url
+    url = url.rstrip("/")
+    CONF_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONF_DIR, 0o700)
+    if url.startswith("https"):
+        u = urllib.parse.urlparse(url)
+        try:
+            urllib.request.urlopen(url + "/api/health", context=ssl.create_default_context(), timeout=10)
+            PIN.unlink(missing_ok=True)
+        except urllib.error.URLError as e:
+            if not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                raise Fail(f"can't reach {url}: {e.reason}")
+            pem = ssl.get_server_certificate((u.hostname, u.port or 443))
+            der = ssl.PEM_cert_to_DER_cert(pem)
+            import hashlib
+            fp = hashlib.sha256(der).hexdigest().upper()
+            print("The server uses its own (self-signed) certificate. Its SHA-256 fingerprint is:")
+            print("  " + ":".join(fp[i:i + 2] for i in range(0, len(fp), 2)))
+            print("Check it matches on the server:  openssl x509 -in /var/lib/cloud-serv/tls/server.crt -noout -fingerprint -sha256")
+            if input("Trust this certificate? [y/N]: ").strip().lower() != "y":
+                raise Fail("not trusted; nothing saved")
+            PIN.write_text(pem)
+            os.chmod(PIN, 0o600)
+    key = getpass.getpass("API key (make one in the web app: Settings > API keys): ").strip()
+    if not key.startswith("csk_"):
+        raise Fail("that doesn't look like an API key (they start with csk_)")
+    u = Api(url, key).call("GET", "/api/usage")
+    CONF.write_text(json.dumps({"url": url, "key": key}))
+    os.chmod(CONF, 0o600)
+    print(f"logged in to {url}: {u['files']} files, {human(u['used'])} used")
+
+
+def c_logout(args):
+    for p in (CONF, PIN):
+        p.unlink(missing_ok=True)
+    print("forgotten. Revoke the key in the web app too if you won't use it again.")
+
+
+def c_ls(args):
+    long = "-l" in args
+    args = [a for a in args if a != "-l"]
+    api = Api()
+    kind, it = api.resolve(args[0] if args else "/")
+    if kind == "file":
+        items = {"folders": [], "files": [it]}
+    else:
+        items = api.listing(it["id"])
+    for f in items.get("folders", []):
+        print(f"{'':>10}  {f.get('createdAt', '')[:16]:16}  {label(f)}/" if long else f"{label(f)}/")
+    for f in items.get("files", []):
+        star = "*" if f.get("starred") else " "
+        print(f"{human(f.get('size')):>10}  {(f.get('updatedAt') or f.get('createdAt') or '')[:16]:16} {star}{label(f)}"
+              if long else label(f))
+
+
+def c_tree(args):
+    api = Api()
+    kind, root = api.resolve(args[0] if args else "/", "folder")
+    if kind != "folder":
+        raise Fail("tree needs a folder")
+    tot = [0, 0]
+
+    def walk(fid, pre):
+        ls = api.listing(fid)
+        items = [(label(f) + "/", f, True) for f in ls.get("folders", [])] + \
+                [(f"{label(f)}  ({human(f.get('size'))})", f, False) for f in ls.get("files", [])]
+        for i, (name, f, isdir) in enumerate(items):
+            last = i == len(items) - 1
+            print(pre + ("└── " if last else "├── ") + name)
+            if isdir:
+                walk(f["id"], pre + ("    " if last else "│   "))
+            else:
+                tot[0] += 1
+                tot[1] += f.get("size") or 0
+    print(args[0] if args else "/")
+    walk(root["id"], "")
+    print(f"\n{tot[0]} files, {human(tot[1])}")
+
+
+def ensure_folder(api, parent_id, name):
+    for f in api.listing(parent_id).get("folders", []):
+        if f.get("name") == name:
+            return f["id"]
+    return api.call("POST", "/api/folders", {"parentId": parent_id, "name": name})["folder"]["id"]
+
+
+def upload_file(api, local, folder_id):
+    size = local.stat().st_size
+    name = local.name
+    start = time.time()
+    if size <= DIRECT_MAX:
+        data = local.read_bytes()
+        api.call("POST", "/api/files", data, {"X-Filename": urllib.parse.quote(name), "X-Folder": str(folder_id),
+                                              "Content-Type": "application/octet-stream"})
+        bar(size, size, start, name)
+        return size
+    up = api.call("POST", "/api/uploads/init", {"name": name, "size": size, "folderId": folder_id})["uploadId"]
+    try:
+        with open(local, "rb") as fh:
+            off = 0
+            while off < size:
+                fh.seek(off)
+                chunk = fh.read(CHUNK)
+                code, out = api.raw("PUT", f"/api/uploads/{up}", chunk, {"X-Offset": str(off)})
+                if code == 409:      # server has a different amount: resume from there
+                    off = json.loads(out).get("received", off)
+                    continue
+                if code != 200:
+                    raise Fail(f"{name}: {json.loads(out or b'{}').get('error', out[:100])} (HTTP {code})")
+                off += len(chunk)
+                bar(off, size, start, name)
+        api.call("POST", f"/api/uploads/{up}/complete")
+    except BaseException:
+        api.raw("DELETE", f"/api/uploads/{up}")   # don't leave a half upload holding quota
+        raise
+    return size
+
+
+def c_put(args):
+    rec = "-r" in args
+    args = [a for a in args if a != "-r"]
+    if not args:
+        raise Fail("put [-r] <local...> [remote-folder]")
+    api = Api()
+    dest = "/"
+    if len(args) > 1 and not Path(args[-1]).exists():
+        dest = args.pop()
+    kind, d = api.resolve(dest, "folder")
+    if kind != "folder":
+        raise Fail(f"{dest} is a file")
+    n = total = 0
+    for a in args:
+        p = Path(a)
+        if p.is_dir():
+            if not rec:
+                raise Fail(f"{a} is a folder: use put -r")
+            base = ensure_folder(api, d["id"], p.name)
+            ids = {p: base}
+            for root, dirs, files in os.walk(p):
+                rp = Path(root)
+                dirs.sort()
+                for dn in dirs:
+                    ids[rp / dn] = ensure_folder(api, ids[rp], dn)
+                for fn in sorted(files):
+                    total += upload_file(api, rp / fn, ids[rp])
+                    n += 1
+        elif p.is_file():
+            total += upload_file(api, p, d["id"])
+            n += 1
+        else:
+            raise Fail(f"no such file: {a}")
+    print(f"uploaded {n} file(s), {human(total)}")
+
+
+def download_file(api, f, dest):
+    if not f.get("name") or f.get("wrappedKey"):
+        print(f"  skipped {label(f)}: encrypted in the browser, only the web app can open it", file=sys.stderr)
+        return 0
+    r = api.raw("GET", f"/api/files/{f['id']}", stream=True)
+    if isinstance(r, tuple):
+        raise Fail(f"download failed (HTTP {r[0]})")
+    size = int(r.headers.get("Content-Length") or f.get("size") or 0)
+    tmp = dest.with_name(dest.name + ".part")
+    start, done = time.time(), 0
+    with open(tmp, "wb") as out:
+        while True:
+            b = r.read(1 << 20)
+            if not b:
+                break
+            out.write(b)
+            done += len(b)
+            bar(done, size, start, f["name"])
+    tmp.replace(dest)
+    return done
+
+
+def c_get(args):
+    rec = "-r" in args
+    args = [a for a in args if a != "-r"]
+    if not args:
+        raise Fail("get [-r] <remote> [local]")
+    api = Api()
+    kind, it = api.resolve(args[0])
+    target = Path(args[1]) if len(args) > 1 else Path(".")
+    if kind == "file":
+        dest = target / it["name"] if target.is_dir() else target
+        n = download_file(api, it, dest)
+        print(f"saved {dest} ({human(n)})" if n else "nothing saved")
+        return
+    if not rec:
+        raise Fail(f"{args[0]} is a folder: use get -r")
+    root = target / (it.get("name") or "Home")
+    cnt = tot = 0
+
+    def walk(fid, here):
+        nonlocal cnt, tot
+        here.mkdir(parents=True, exist_ok=True)
+        ls = api.listing(fid)
+        for f in ls.get("files", []):
+            if f.get("name"):
+                got = download_file(api, f, here / f["name"])
+                cnt += 1 if got or f.get("size") == 0 else 0
+                tot += got
+            else:
+                print(f"  skipped {label(f)} (encrypted)", file=sys.stderr)
+        for d in ls.get("folders", []):
+            walk(d["id"], here / (d.get("name") or f"encrypted-{d['id']}"))
+    walk(it["id"], root)
+    print(f"saved {cnt} file(s), {human(tot)} into {root}")
+
+
+def c_mkdir(args):
+    if not args:
+        raise Fail("mkdir <path>")
+    api = Api()
+    fid = 0
+    for part in [p for p in args[0].split("/") if p]:
+        fid = ensure_folder(api, fid, part)
+    print(f"ok: {args[0]}")
+
+
+def c_mv(args):
+    if len(args) != 2:
+        raise Fail("mv <path> <new-name | existing-folder>")
+    api = Api()
+    kind, it = api.resolve(args[0])
+    url = f"/api/{'folders' if kind == 'folder' else 'files'}/{it['id']}"
+    try:
+        dk, d = api.resolve(args[1], "folder")
+    except Fail:
+        dk = None
+    if dk == "folder":
+        api.call("PATCH", url, {"parentId" if kind == "folder" else "folderId": d["id"]})
+        print(f"moved into {args[1]}")
+        return
+    new = args[1].rstrip("/")
+    if "/" in new:      # move + rename: parent must exist
+        parent, name = new.rsplit("/", 1)
+        pk, p = api.resolve(parent or "/", "folder")
+        api.call("PATCH", url, {"parentId" if kind == "folder" else "folderId": p["id"]})
+        new = name
+    api.call("PATCH", url, {"name": new})
+    print(f"renamed to {new}")
+
+
+def c_rm(args):
+    rec, yes = "-r" in args, "-y" in args
+    args = [a for a in args if a not in ("-r", "-y")]
+    if not args:
+        raise Fail("rm [-r] [-y] <path>")
+    api = Api()
+    for a in args:
+        kind, it = api.resolve(a)
+        if kind == "folder":
+            if it["id"] == 0:
+                raise Fail("refusing to delete Home")
+            if not rec:
+                raise Fail(f"{a} is a folder: use rm -r (deletes everything inside)")
+            if not yes and input(f"delete folder {a} and everything in it? [y/N]: ").strip().lower() != "y":
+                print("kept")
+                continue
+        api.call("DELETE", f"/api/{'folders' if kind == 'folder' else 'files'}/{it['id']}")
+        print(f"deleted {a}")
+
+
+def c_star(args, on=True):
+    api = Api()
+    for a in args:
+        kind, it = api.resolve(a)
+        api.call("PATCH", f"/api/{'folders' if kind == 'folder' else 'files'}/{it['id']}", {"starred": on})
+        print(("starred " if on else "unstarred ") + a)
+
+
+def show_files(j):
+    for f in j.get("folders", []):
+        print(f"{'':>10}  {label(f)}/  (folder #{f['id']})")
+    for f in j.get("files", []):
+        print(f"{human(f.get('size')):>10}  {label(f)}  (#{f['id']})")
+
+
+def c_usage(args):
+    u = Api().call("GET", "/api/usage")
+    q = u.get("quota")
+    print(f"{human(u['used'])} used by {u['files']} files" + (f" of {human(q)} ({u['used'] * 100 / q:.1f}%)" if q else " (no limit)"))
+
+
+CMDS = {
+    "login": c_login, "logout": c_logout, "ls": c_ls, "tree": c_tree, "put": c_put, "get": c_get,
+    "mkdir": c_mkdir, "mv": c_mv, "rm": c_rm, "usage": c_usage,
+    "star": lambda a: c_star(a, True), "unstar": lambda a: c_star(a, False),
+    "search": lambda a: show_files(Api().call("GET", "/api/search?q=" + urllib.parse.quote(" ".join(a)))),
+    "recent": lambda a: show_files(Api().call("GET", "/api/recent")),
+    "starred": lambda a: show_files(Api().call("GET", "/api/starred")),
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    cmd = CMDS.get(sys.argv[1])
+    if not cmd:
+        print(f"unknown command: {sys.argv[1]} (cloud help)", file=sys.stderr)
+        return 2
+    try:
+        cmd(sys.argv[2:])
+        return 0
+    except Fail as e:
+        print(f"cloud: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\ncancelled", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# cloudctl: manage an installed cloud-serv (the one deploy.sh set up).
+# Run with no arguments for a menu, or `cloudctl help` for the commands.
+set -euo pipefail
+
+ENVF="${CLOUDCTL_ENV:-/etc/cloud-serv/install.env}"
+[ -f "$ENVF" ] || { echo "cloud-serv isn't installed here ($ENVF missing). Run deploy.sh first." >&2; exit 1; }
+# shellcheck disable=SC1090
+. "$ENVF"
+: "${SERVICE:?}" "${SVC_USER:?}" "${INSTALL_DIR:?}" "${DATA_DIR:?}" "${CONFIG:?}"
+BIN="$INSTALL_DIR/cloud_serv"
+
+c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
+say()  { printf '%s %s\n' "$(c '1;35' '==>')" "$*"; }
+warn() { printf '%s %s\n' "$(c '1;33' '!!')" "$*" >&2; }
+die()  { printf '%s %s\n' "$(c '1;31' 'xx')" "$*" >&2; exit 1; }
+need_root() { [ "$(id -u)" -eq 0 ] || die "this needs root: sudo cloudctl $*"; }
+cfg() { grep -E "^$1=" "$CONFIG" 2>/dev/null | tail -1 | cut -d= -f2-; }
+port() { cfg PORT; }
+scheme() { [ "$(cfg TLS_ENABLED)" = false ] && echo http || echo https; }
+health() { curl -sk --max-time 3 "$(scheme)://127.0.0.1:$(port)/api/health" 2>/dev/null | grep -q ok; }
+confirm() { local a; read -r -p "$1 [y/N]: " a </dev/tty; [[ "$a" =~ ^[Yy] ]]; }
+db_ro() { # db_ro <python using `db`> : read-only look at the database
+    python3 -I - "$(cfg DB_PATH)" "$@" <<EOF
+import sqlite3, sys
+db = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+$DBPY
+EOF
+}
+human() { numfmt --to=iec --suffix=B "${1:-0}" 2>/dev/null || echo "${1}B"; }
+
+cmd_help() { cat <<EOF
+$(c '1;35' cloudctl) - manage cloud-serv ($INSTALL_DIR)
+
+  status              is it running, health, version, users, disk use
+  start|stop|restart  control the service (stop/restart are graceful)
+  logs [-f] [N]       last N log lines (default 100), -f to follow
+  url                 addresses to open it on (LAN + Tailscale)
+  users               list accounts: role, status, quota, usage
+  admin <email>       create an admin account (prints a recovery key file path)
+  backup [dir]        full backup: database, files, avatars, config, TLS (default $DATA_DIR/../cloud-serv-backups)
+  restore <file>      restore a backup made by 'backup' (keeps the old data aside)
+  update <zip>        install a new deploy zip from package.sh (auto-backs up the database first)
+  config [show|edit]  show the config (secrets hidden) or edit it, then restart
+  cert [--timer]      get a browser-trusted cert from Tailscale (root); --timer renews monthly
+  doctor              check everything that commonly goes wrong
+  version             installed version
+EOF
+}
+
+cmd_status() {
+    local st; st="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+    printf '%-10s %s\n' service "$( [ "$st" = active ] && c 32 "running" || c 31 "$st")"
+    printf '%-10s %s\n' health "$(health && c 32 ok || c 31 'not answering')"
+    printf '%-10s %s\n' version "$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo dev)"
+    printf '%-10s %s\n' address "$(scheme)://<host>:$(port)  (cloudctl url)"
+    if [ -r "$(cfg DB_PATH)" ]; then
+        DBPY='
+u = db.execute("SELECT COUNT(*), SUM(role=\"admin\"), SUM(status=\"pending\") FROM users").fetchone()
+f = db.execute("SELECT COUNT(*), COALESCE(SUM(stored_size),0) FROM files").fetchone()
+print(f"{u[0]} accounts ({u[1] or 0} admin, {u[2] or 0} waiting for approval), {f[0]} files")'
+        printf '%-10s %s\n' accounts "$(db_ro 2>/dev/null || echo '?')"
+    fi
+    printf '%-10s %s used by data, %s free on disk\n' disk "$(du -sh "$DATA_DIR" 2>/dev/null | cut -f1)" "$(df -h --output=avail "$DATA_DIR" | tail -1 | tr -d ' ')"
+}
+
+cmd_logs() {
+    local follow="" n=100
+    for a in "$@"; do case "$a" in -f) follow=-f ;; *[!0-9]*) die "logs [-f] [N]" ;; *) n="$a" ;; esac; done
+    journalctl -u "$SERVICE" -n "$n" --no-pager $follow
+}
+
+cmd_url() {
+    local p s; p="$(port)"; s="$(scheme)"
+    echo "on this box:  $s://localhost:$p"
+    for ip in $(hostname -I 2>/dev/null); do
+        case "$ip" in 100.*) ;; *:*) ;; *) echo "on your LAN:  $s://$ip:$p" ;; esac
+    done
+    if command -v tailscale >/dev/null && tailscale status >/dev/null 2>&1; then
+        local tip dns; tip="$(tailscale ip -4 2>/dev/null | head -1)"
+        dns="$(tailscale status --json 2>/dev/null | python3 -I -c 'import sys,json; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)"
+        [ -n "$dns" ] && echo "on Tailscale: $s://$dns:$p"
+        [ -n "$tip" ] && echo "on Tailscale: $s://$tip:$p"
+    fi
+}
+
+cmd_users() {
+    [ -r "$(cfg DB_PATH)" ] || need_root users
+    DBPY='
+rows = db.execute("""SELECT u.id, u.email, u.role, u.status, u.storage_quota_bytes,
+    (SELECT COALESCE(SUM(stored_size),0) FROM files f WHERE f.user_id=u.id) FROM users u ORDER BY u.id""").fetchall()
+def h(n):
+    for unit in ("B","KB","MB","GB","TB"):
+        if n < 1024: return f"{n:.0f} {unit}" if unit=="B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
+print("{:>4}  {:32} {:6} {:10} {:>10} / quota".format("id", "email", "role", "status", "used"))
+for i, e, r, s, q, used in rows:
+    quota = h(q) if q is not None else "unlimited"
+    print(f"{i:>4}  {e[:32]:32} {r:6} {s:10} {h(used):>10} / {quota}")' db_ro
+}
+
+cmd_admin() {
+    need_root admin; local email="${1:-}"
+    [ -n "$email" ] || read -r -p "admin email: " email </dev/tty
+    local rec; rec="/etc/cloud-serv/recovery-$(date +%Y%m%d-%H%M%S).txt"
+    runuser -u "$SVC_USER" -- "$BIN" admin create-admin --email "$email" --config "$CONFIG" --recovery-key-file "$DATA_DIR/recovery.tmp" | sed "s|$DATA_DIR/recovery.tmp|$rec|"
+    mv "$DATA_DIR/recovery.tmp" "$rec"; chown root:root "$rec"; chmod 0600 "$rec"
+    warn "RECOVERY KEY saved to $rec: store it somewhere safe, then delete that file"
+}
+
+cmd_backup() {
+    need_root backup
+    local dest="${1:-$(dirname "$DATA_DIR")/cloud-serv-backups}" ts out tmp
+    ts="$(date +%Y%m%d-%H%M%S)"; out="$dest/cloud-serv-$ts.tar.gz"
+    install -d -m 0700 "$dest"
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+    say "copying the database (safe while running: SQLite online backup)"
+    python3 -I - "$(cfg DB_PATH)" "$tmp/cloud.db" <<'EOF'
+import sqlite3, sys
+src = sqlite3.connect(sys.argv[1]); dst = sqlite3.connect(sys.argv[2])
+src.backup(dst); dst.close(); src.close()
+EOF
+    cp "$CONFIG" "$tmp/config.env"
+    echo "$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo dev) $ts" > "$tmp/BACKUP_INFO"
+    say "packing files, avatars, account backups and TLS into $out"
+    tar -czf "$out" -C "$tmp" cloud.db config.env BACKUP_INFO \
+        -C "$DATA_DIR" --exclude=cloud.db --exclude='cloud.db-*' --exclude=recovery.tmp .
+    chmod 0600 "$out"
+    say "done: $out ($(du -h "$out" | cut -f1)). It holds your config secrets and any unencrypted files: keep it private."
+}
+
+cmd_restore() {
+    need_root restore; local f="${1:-}"
+    [ -f "$f" ] || die "restore <backup.tar.gz>"
+    tar -tzf "$f" ./cloud.db >/dev/null 2>&1 || tar -tzf "$f" cloud.db >/dev/null 2>&1 || die "$f doesn't look like a cloudctl backup"
+    warn "this replaces ALL current accounts and files with the backup's."
+    confirm "restore $f?" || die "cancelled"
+    local aside; aside="$DATA_DIR.pre-restore-$(date +%Y%m%d-%H%M%S)"
+    say "stopping $SERVICE"; systemctl stop "$SERVICE"
+    say "moving current data aside to $aside"
+    mv "$DATA_DIR" "$aside"; install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$DATA_DIR"
+    tar -xzf "$f" -C "$DATA_DIR" --exclude=config.env --exclude=BACKUP_INFO
+    [ -f "$DATA_DIR/cloud.db" ] || { mv "$DATA_DIR" "$DATA_DIR.failed"; mv "$aside" "$DATA_DIR"; die "no database in the backup; put things back"; }
+    chown -R "$SVC_USER:$SVC_USER" "$DATA_DIR"; chmod 0700 "$DATA_DIR"
+    if tar -xzf "$f" -O config.env >/dev/null 2>&1 || tar -xzf "$f" -O ./config.env >/dev/null 2>&1; then
+        tar -xzf "$f" -O config.env > /etc/cloud-serv/config.from-backup 2>/dev/null || tar -xzf "$f" -O ./config.env > /etc/cloud-serv/config.from-backup
+        chmod 0600 /etc/cloud-serv/config.from-backup
+        echo "the backup's config is at /etc/cloud-serv/config.from-backup (your current config was kept; diff them if needed)"
+    fi
+    say "starting $SERVICE"; systemctl start "$SERVICE"; sleep 2
+    health && say "restored and running. Old data kept at $aside (delete it once you're happy)." || warn "not answering yet: cloudctl logs"
+}
+
+cmd_update() {
+    need_root update; local zip="${1:-}"
+    [ -f "$zip" ] || die "update <cloud-serv-deploy.zip>  (built with package.sh)"
+    local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+    unzip -q "$zip" -d "$tmp"; [ -x "$tmp/cloud-serv/deploy.sh" ] || die "no cloud-serv/deploy.sh in $zip"
+    say "safety copy of the database first"
+    python3 -I - "$(cfg DB_PATH)" "$DATA_DIR/backups/pre-update-$(date +%Y%m%d-%H%M%S).db" <<'EOF'
+import sqlite3, sys
+s = sqlite3.connect(sys.argv[1]); d = sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()
+EOF
+    chown "$SVC_USER:$SVC_USER" "$DATA_DIR"/backups/pre-update-*.db; chmod 0600 "$DATA_DIR"/backups/pre-update-*.db
+    say "installing $(cat "$tmp/cloud-serv/VERSION" 2>/dev/null || echo new version) over $INSTALL_DIR"
+    cp -a "$tmp/cloud-serv/." "$INSTALL_DIR/"
+    "$INSTALL_DIR/deploy.sh" --yes
+}
+
+cmd_config() {
+    case "${1:-show}" in
+        show) sed -E 's/^((REGISTRATION_INVITE_CODE|OIDC_CLIENT_SECRET)=).+/\1********/' "$CONFIG" | grep -vE '^\s*(#|$)' ;;
+        edit) need_root config edit
+              local before; before="$(sha256sum "$CONFIG")"
+              "${EDITOR:-nano}" "$CONFIG"
+              [ "$before" = "$(sha256sum "$CONFIG")" ] && { echo "no changes"; return; }
+              chown root:"$SVC_USER" "$CONFIG"; chmod 0640 "$CONFIG"
+              say "restarting to apply"; systemctl restart "$SERVICE"; sleep 2
+              health && say "running with the new config" || { warn "not answering, check: cloudctl logs"; exit 1; } ;;
+        *) die "config [show|edit]" ;;
+    esac
+}
+
+cmd_cert() {
+    need_root cert
+    command -v tailscale >/dev/null && tailscale status >/dev/null 2>&1 || die "Tailscale isn't installed/logged in (scripts/setup-tailscale.sh)"
+    local dns; dns="$(tailscale status --json | python3 -I -c 'import sys,json; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
+    [ -n "$dns" ] || die "no MagicDNS name: turn on MagicDNS + HTTPS certificates in the Tailscale admin console"
+    say "requesting a certificate for $dns"
+    tailscale cert --cert-file "$(cfg TLS_CERT_PATH)" --key-file "$(cfg TLS_KEY_PATH)" "$dns"
+    chown "$SVC_USER:$SVC_USER" "$(cfg TLS_CERT_PATH)" "$(cfg TLS_KEY_PATH)"; chmod 0600 "$(cfg TLS_KEY_PATH)"
+    systemctl restart "$SERVICE"
+    say "done: open https://$dns:$(port) (no certificate warning)"
+    if [ "${1:-}" = --timer ]; then
+        cat > /etc/systemd/system/cloud-serv-cert.service <<EOF
+[Unit]
+Description=Renew cloud-serv's Tailscale certificate
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cloudctl cert
+EOF
+        cat > /etc/systemd/system/cloud-serv-cert.timer <<EOF
+[Unit]
+Description=Renew cloud-serv's Tailscale certificate monthly
+[Timer]
+OnCalendar=monthly
+RandomizedDelaySec=6h
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload; systemctl enable --now cloud-serv-cert.timer >/dev/null 2>&1
+        say "monthly renewal timer installed (Tailscale certs last 90 days)"
+    fi
+}
+
+cmd_doctor() {
+    local bad=0
+    chk() { if eval "$2" >/dev/null 2>&1; then echo "  $(c 32 ok)   $1"; else echo "  $(c 31 FAIL) $1${3:+  -> $3}"; bad=$((bad+1)); fi; }
+    echo "cloud-serv doctor"
+    chk "service running" "systemctl is-active --quiet $SERVICE" "cloudctl logs"
+    chk "answers on port $(port)" health "check PORT / firewall; cloudctl logs"
+    chk "binary present" "[ -x '$BIN' ]" "re-run deploy.sh"
+    chk "config readable only by root + service" "[ \"\$(stat -c %a '$CONFIG')\" = 640 ]" "chmod 640 $CONFIG"
+    chk "data folder private (0700)" "[ \"\$(stat -c %a '$DATA_DIR')\" = 700 ]" "chmod 700 $DATA_DIR"
+    chk "data owned by $SVC_USER" "[ \"\$(stat -c %U '$DATA_DIR')\" = $SVC_USER ]" "chown -R $SVC_USER: $DATA_DIR"
+    chk "over 5% disk free" "[ \$(df --output=pcent '$DATA_DIR' | tail -1 | tr -dc 0-9) -lt 95 ]" "free up space"
+    if [ "$(scheme)" = https ] && [ -r "$(cfg TLS_CERT_PATH)" ]; then
+        chk "TLS cert valid for 14+ days" "openssl x509 -checkend 1209600 -noout -in '$(cfg TLS_CERT_PATH)'" "cloudctl cert (Tailscale) or delete it to regenerate"
+    fi
+    if [ -r "$(cfg DB_PATH)" ]; then
+        DBPY='r = db.execute("PRAGMA quick_check").fetchone()[0]; assert r == "ok", r; print(r)'
+        chk "database integrity" db_ro "restore from backup: cloudctl restore"
+    fi
+    if command -v tailscale >/dev/null && tailscale status >/dev/null 2>&1; then echo "  $(c 32 ok)   Tailscale up"
+    else echo "  $(c 36 info) Tailscale not set up (optional; for access from anywhere: scripts/setup-tailscale.sh)"; fi
+    [ "$bad" -eq 0 ] && say "all good" || warn "$bad problem(s) above"
+}
+
+menu() {
+    while true; do
+        echo; echo "$(c '1;35' cloud-serv) $(systemctl is-active "$SERVICE" 2>/dev/null || true)  ($(scheme)://<host>:$(port))"
+        local items=(status logs url users restart backup update config doctor admin cert quit) i=1
+        for it in "${items[@]}"; do printf '  %2d) %s\n' $i "$it"; i=$((i+1)); done
+        local n; read -r -p "choose: " n </dev/tty || exit 0
+        [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 1 ] && [ "$n" -le ${#items[@]} ] || continue
+        local pick="${items[$((n-1))]}"
+        case "$pick" in
+            quit) exit 0 ;;
+            update) local z; read -r -p "path to deploy zip: " z </dev/tty; ( cmd_update "$z" ) || true ;;
+            config) ( cmd_config show ) || true; confirm "edit it?" && { ( cmd_config edit ) || true; } ;;
+            *) ( "cmd_$pick" ) || true ;;
+        esac
+    done
+}
+
+case "${1:-}" in
+    "") menu ;;
+    help|-h|--help) cmd_help ;;
+    status|logs|url|users|admin|backup|restore|update|config|cert|doctor) c="$1"; shift; "cmd_$c" "$@" ;;
+    start|stop|restart) need_root "$1"; systemctl "$1" "$SERVICE"; [ "$1" = stop ] || { sleep 2; health && say "running" || warn "not answering yet: cloudctl logs"; } ;;
+    version) cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo dev ;;
+    *) die "unknown command '$1' (cloudctl help)" ;;
+esac

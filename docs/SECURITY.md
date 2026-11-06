@@ -62,7 +62,7 @@ Unit (`crypto.test.js`, Node WebCrypto) and a real-API end-to-end test
 - Server logs do not record file names or bodies (checked); the legacy plaintext upload path
   is preserved only for non-E2E clients/tests.
 
-Current suite: **112 assertions, 0 failures**, also run in CI on every push/PR.
+Current suite: **766 checks, 0 failures** (`bash tests/run.sh`), also run in CI on every push/PR.
 
 ## Residual risks (known)
 
@@ -88,7 +88,7 @@ Current suite: **112 assertions, 0 failures**, also run in CI on every push/PR.
 
 ## Before exposure (Tailscale)
 
-- Set `RATE_LIMIT_ENABLED=true` in `config.env` (currently `false` for testing).
+- Rate limiting is on by default (`RATE_LIMIT_ENABLED=true`); only the test harness turns it off.
 - **TLS is terminated in the daemon, over Tailscale — no reverse proxy.** `TLS_ENABLED`
   (default `true`), `TLS_CERT_PATH` (default `data/tls/server.crt`), `TLS_KEY_PATH` (default
   `data/tls/server.key`). The self-signed EC P-256 cert (10 years, OpenSSL C API,
@@ -133,3 +133,43 @@ Current suite: **112 assertions, 0 failures**, also run in CI on every push/PR.
   `popen`/a shell (mitigated by strict hostname validation + quoting) rather than fork/exec; the
   real path was only tested with a fake `tailscale` on PATH, so smoke-test it once on the real
   box after `scripts/setup-tailscale.sh`.
+
+## Added since September 2026
+- **Single sign-on (OIDC, authentik):** authorization code + PKCE S256, `state` + `nonce`,
+  `client_secret_basic`. The ID token comes straight from the token endpoint over verified TLS;
+  `iss`, `aud`, `exp` and `nonce` are checked. New accounts only for members of
+  `OIDC_ALLOWED_GROUP`. **Never matched by email** (that would let any IdP email claim an
+  account); existing accounts link explicitly from Settings.
+- **Trusted devices:** a non-extractable ECDH P-256 key per browser (IndexedDB). Approval wraps
+  the DEK to it (ephemeral ECDH, HKDF-SHA256, AES-GCM, AAD `cloud-serv-device-v1`). The approving
+  user compares a 6-digit code (from SHA-256 of the public key) on both screens, so a device
+  registered by someone else can't slip through. Revocable; capped per account.
+- **Sign-up:** one-time invite codes (stored hashed, single use, optional expiry, race-safe: 15
+  parallel uses of one code create exactly one account) and admin-approved sign-up requests
+  (max 25 waiting). Same generic answer for every refusal (no account enumeration).
+- **Live updates:** `/api/events` WebSocket, session-only (no API keys), same-origin only, 10
+  per account / 200 total. It carries only "this list changed" signals, never data.
+- **Storage quota is enforced on real bytes:** `stored_size` (bytes on disk) instead of the
+  client-reported size; unfinished chunked uploads count; per-account lock around
+  check-then-write; idle uploads expire after 24 h.
+- **HSTS** (`max-age=31536000`) on every response.
+- **systemd sandbox** for service installs (`deploy.sh`): own user, read-only system, write
+  access to the data dir only, no capabilities, syscall filter, `MemoryDenyWriteExecute`.
+  `systemd-analyze security` exposure **1.4 (OK)**.
+- **Companion CLI (`cloud`):** API keys only (no account powers), config `0600`, self-signed
+  server certificates are pinned after the user checks the fingerprint, and a changed
+  certificate is refused.
+
+## Security sweeps
+| Date | What ran | Result |
+|---|---|---|
+| 2026-09-23 | full manual review ([archive/SECURITY_SWEEP_2026-09-23.md](archive/SECURITY_SWEEP_2026-09-23.md)) | H1, M6-M10, L20 fixed (M6 accepted as a trade-off, see above) |
+| 2026-11-05 | AddressSanitizer + UBSan build running the whole suite | 1 bug: uninitialised fields in vendored Crow's request parser, **fixed** (`libs/crow/http_request.h`) |
+| 2026-11-05 | endpoint fuzzer: all 70 routes x no-auth/user/admin, hostile IDs, wrong-typed JSON, junk bodies and headers, raw protocol garbage (~6,600 requests, 2 seeds) on the sanitizer build | 0 server errors, 0 crashes, 0 sanitizer reports |
+| 2026-11-05 | concurrency: 20 parallel uploads into a full quota, duplicate chunks, one invite used 15x at once, double approvals | **quota bypass found and fixed** (chunked uploads with no declared size; client-reported size used for usage). All races now hold. Covered by `tests/test_quota_race.sh`. |
+| 2026-11-05 | code review of OIDC, devices, invites, storage, events, profile | WebSocket state leaked on error and one account could take every live-update slot: **both fixed** |
+| 2026-11-05 | probes: cookie flags, CSRF, security headers, folder cycles, cross-user moves, suspended sessions, login timing, disguised images, 60 MB JSON | all held. HSTS was missing: **added**. |
+| 2026-11-05 | `scripts/security-audit.sh` | 19/19 (script updated for invite-only sign-up) |
+
+Known open items (accepted for now): API keys survive a password change (separate credentials,
+revoked individually, as on GitHub); the DEK in `sessionStorage` (residual risk 4 above).
